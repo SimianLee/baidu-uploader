@@ -20,8 +20,11 @@ rem    推送前会检查 config.json / token.json / libs 是否被 git 跟踪�
 rem    命中则立即中止 —— 这两个文件含 SecretKey 和授权 Token，绝不能入库。
 rem
 rem  说明：
-rem    - 默认走 HTTPS（三平台地址由用户指定）；若某平台 HTTPS 推送卡死或
-rem      报认证失败，改用 push-all.bat ssh（需本机 SSH 公钥已加到对应平台）
+rem    - github / gitee 走 HTTPS（本机凭据管理器已存凭据，实测正常）
+rem    - gitcode 走 SSH：该平台已移除密码认证，HTTPS 推送必报
+rem      "HTTP Basic: Access denied"（2026-09-20 实测），故默认用 SSH
+rem    - 若 HTTPS 平台推送卡死或认证失败，改用 push-all.bat ssh 全走 SSH
+rem      （需本机 SSH 公钥已添加到 github / gitee 账号）
 rem    - 脚本幂等：重复运行没副作用，远程地址与脚本不一致时自动纠正
 rem    - 执行结束后会停住，提示「按任意键关闭窗口」，不会一闪而过
 rem ============================================================
@@ -29,14 +32,19 @@ setlocal enabledelayedexpansion
 chcp 65001 >nul
 cd /d "%~dp0"
 
+rem 首次连接 SSH 主机时自动接受 host key（但仍然拒绝密钥变更的主机）
+set "GIT_SSH_COMMAND=ssh -o StrictHostKeyChecking=accept-new"
+
 rem ---------------- 远程地址 ----------------
 set "USE_SSH=0"
 set "DO_COMMIT=0"
 
-rem HTTPS（默认）
+rem github / gitee 走 HTTPS（实测正常，Windows 凭据管理器已存本机凭据）
 set "GITHUB_URL=https://github.com/SimianLee/baidu-uploader.git"
-set "GITCODE_URL=https://gitcode.com/SimianLee/baidu-uploader.git"
 set "GITEE_URL=https://gitee.com/SimianLee/baidu-uploader.git"
+rem gitcode 走 SSH：该平台已移除密码认证，HTTPS 推送必报
+rem "HTTP Basic: Access denied"，只能走 SSH 或私人令牌（2026-09-20 实测）
+set "GITCODE_URL=git@gitcode.com:SimianLee/baidu-uploader.git"
 
 rem SSH 备选（https 不通时启用：gitcode 禁用密码认证、github:443 常被墙、
 rem gitee HTTPS 曾出现长时间无响应）—— 由下面的 USE_SSH 开关决定
@@ -202,10 +210,12 @@ echo.
 if defined FAIL (
     if not "%FAIL%"=="0" (
         echo  排错提示:
-        echo    1. gitcode 报 "HTTP Basic: Access denied" -^> 该平台已禁用密码认证。
-        echo       办法A：改用 SSH 推送 —— push-all.bat ssh
-        echo       办法B：去 gitcode 个人设置生成「私人令牌 PAT」，推送弹窗里
-        echo              用户名填账号、密码填 PAT（凭据管理器会记住）
+        echo    1. gitcode 报认证失败（含 "Access denied" / "Permission denied"）
+        echo       -^> 该平台已移除密码认证，脚本默认已走 SSH。
+        echo       若报 Permission denied (publickey)：SSH 公钥没加到 gitcode
+        echo       账号，去「个人设置 - SSH 公钥」添加 ~/.ssh/id_rsa.pub 内容。
+        echo       想继续用 HTTPS 的话，去 gitcode 生成私人令牌 PAT，推送弹窗里
+        echo       用户名填账号、密码填 PAT（并把脚本里的地址改回 https）。
         echo    2. 卡住不动 / 其他认证失败 -^> 改用 SSH：push-all.bat ssh
         echo       （需本机 SSH 公钥已添加到对应平台账号）
         echo    3. 提示 non-fast-forward -^> 远端已有初始化文件，先执行：

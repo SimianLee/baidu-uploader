@@ -226,11 +226,13 @@ open_panel.bat            :: 用面板填写密钥和目录最省事
 
 本项目同时托管在三个平台，双击 `push-all.bat` 一次推完：
 
-| 平台 | 地址 |
-|---|---|
-| GitHub | https://github.com/SimianLee/baidu-uploader.git |
-| GitCode | https://gitcode.com/SimianLee/baidu-uploader.git |
-| Gitee | https://gitee.com/SimianLee/baidu-uploader.git |
+| 平台 | 地址 | 协议 |
+|---|---|---|
+| GitHub | https://github.com/SimianLee/baidu-uploader.git | HTTPS |
+| GitCode | git@gitcode.com:SimianLee/baidu-uploader.git | **SSH** |
+| Gitee | https://gitee.com/SimianLee/baidu-uploader.git | HTTPS |
+
+> GitCode 之所以单独走 SSH：该平台已移除密码认证，HTTPS 推送必失败（见下）。
 
 ### 用法
 
@@ -248,11 +250,19 @@ open_panel.bat            :: 用面板填写密钥和目录最省事
 3. **依次推送并汇总**：每个库的原始输出实时显示，结束给出成功/失败统计
 4. **写日志**：`push-logs/push-<时间戳>.log`（完整）+ `push-logs/history.log`（历次一行摘要，UTF-8 带 BOM，记事本打开不乱码）
 
-### 实测情况（2026-09-20）
+### GitCode 为什么要走 SSH（2026-09-20 实测）
 
-- **GitHub / Gitee**：HTTPS 推送正常（本机凭据管理器已存）
-- **GitCode**：该平台**已禁用密码认证**，HTTPS 推送会报 `HTTP Basic: Access denied`。两条路可走：
-  - 用 SSH：`push-all.bat ssh`（需 `~/.ssh` 公钥已添加到 gitcode 账号）
-  - 用私人令牌：gitcode 个人设置 → 生成 PAT → 推送弹窗里用户名填账号、**密码填 PAT**
+HTTPS 推送会直接失败：
 
-> 脚本可重复运行：已推送成功的库会显示 `Everything up-to-date` 直接跳过，只补推失败的那个。
+```
+remote: <CH.00905401> HTTP Basic: Access denied.
+remote: The password-based authentication of Git has been removed.
+        Please use your personal access token instead of the password.
+fatal: Authentication failed for 'https://gitcode.com/...'
+```
+
+原因不是账号密码输错，而是 **GitCode 已经彻底移除密码认证**，HTTPS 只剩两条路（私人令牌 / SSH）。脚本默认选了 SSH，因此双击即可一次推完三个库。
+
+若哪天报 `Permission denied (publickey)`，说明 `~/.ssh/id_rsa.pub` 的公钥没加到 GitCode 账号，去「个人设置 → SSH 公钥」粘贴一次即可（本机密钥已存在：id_rsa / id_rsa.pub）。
+
+> 脚本可重复运行：已推送成功的库会显示 `Everything up-to-date` 直接跳过，只补推落后的那个。
