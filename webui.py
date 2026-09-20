@@ -133,6 +133,17 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):   # 静默访问日志
         pass
 
+    def end_headers(self):
+        # 允许 file:// 直接双击打开的页面也调用本机 API（服务只绑 127.0.0.1，外部访问不到）
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.end_headers()
+
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -247,7 +258,13 @@ def main():
     if not HTMLFILE.exists():
         print(f"[错误] 找不到 {HTMLFILE.name}")
         sys.exit(1)
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    try:
+        srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError:
+        print(f"[提示] 端口 {PORT} 已被占用 —— 控制面板多半已经在运行了。")
+        print(f"       请直接浏览器打开：http://127.0.0.1:{PORT}/")
+        input("按回车键退出…")
+        sys.exit(1)
     url = f"http://127.0.0.1:{PORT}/"
     print(f"控制面板已启动：{url}  （Ctrl+C 退出，不影响正在进行的上传）")
     if not os.environ.get("WEBUI_NO_BROWSER"):   # 测试模式下不弹浏览器
