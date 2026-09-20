@@ -221,3 +221,38 @@ pip install -r requirements.txt
 copy config.example.json config.json
 open_panel.bat            :: 用面板填写密钥和目录最省事
 ```
+
+## 十三、一键推送到三个远程仓库（push-all.bat）
+
+本项目同时托管在三个平台，双击 `push-all.bat` 一次推完：
+
+| 平台 | 地址 |
+|---|---|
+| GitHub | https://github.com/SimianLee/baidu-uploader.git |
+| GitCode | https://gitcode.com/SimianLee/baidu-uploader.git |
+| Gitee | https://gitee.com/SimianLee/baidu-uploader.git |
+
+### 用法
+
+| 命令 | 作用 |
+|---|---|
+| `push-all.bat` | 推送当前分支到三个库（首次运行会自动做初始化提交） |
+| `push-all.bat setup` | 只配置三个远程地址，不推送 |
+| `push-all.bat ssh` | 改用 SSH 地址推送（HTTPS 不通时用） |
+| `push-all.bat commit "说明"` | 先 `git add -A` + commit 再推送 |
+
+### 它做了什么
+
+1. **推送前安全自检**：若 `config.json` / `token.json` / `libs/` / `uploaded_log.txt` 已被 git 跟踪，立即中止并给出 `git rm --cached` 的解法——防止密钥泄漏到公开仓库
+2. **幂等配置远程**：三个远程不存在就添加、地址不对就纠正，重复运行无副作用
+3. **依次推送并汇总**：每个库的原始输出实时显示，结束给出成功/失败统计
+4. **写日志**：`push-logs/push-<时间戳>.log`（完整）+ `push-logs/history.log`（历次一行摘要，UTF-8 带 BOM，记事本打开不乱码）
+
+### 实测情况（2026-09-20）
+
+- **GitHub / Gitee**：HTTPS 推送正常（本机凭据管理器已存）
+- **GitCode**：该平台**已禁用密码认证**，HTTPS 推送会报 `HTTP Basic: Access denied`。两条路可走：
+  - 用 SSH：`push-all.bat ssh`（需 `~/.ssh` 公钥已添加到 gitcode 账号）
+  - 用私人令牌：gitcode 个人设置 → 生成 PAT → 推送弹窗里用户名填账号、**密码填 PAT**
+
+> 脚本可重复运行：已推送成功的库会显示 `Everything up-to-date` 直接跳过，只补推失败的那个。

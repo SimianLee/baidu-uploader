@@ -202,12 +202,16 @@ echo.
 if defined FAIL (
     if not "%FAIL%"=="0" (
         echo  排错提示:
-        echo    1. 认证失败 / 卡住不动  -^> 改用 SSH：push-all.bat ssh
-        echo       （需本机 SSH 公钥已添加到 github / gitcode / gitee 账号）
-        echo    2. 提示 non-fast-forward -^> 远端已有初始化文件，先执行：
+        echo    1. gitcode 报 "HTTP Basic: Access denied" -^> 该平台已禁用密码认证。
+        echo       办法A：改用 SSH 推送 —— push-all.bat ssh
+        echo       办法B：去 gitcode 个人设置生成「私人令牌 PAT」，推送弹窗里
+        echo              用户名填账号、密码填 PAT（凭据管理器会记住）
+        echo    2. 卡住不动 / 其他认证失败 -^> 改用 SSH：push-all.bat ssh
+        echo       （需本机 SSH 公钥已添加到对应平台账号）
+        echo    3. 提示 non-fast-forward -^> 远端已有初始化文件，先执行：
         echo       git pull --rebase gitee %BRANCH% 再重试（或确认无需保留后强推）
-        echo    3. 远端仓库不存在        -^> 先到平台建名为 baidu-uploader 的空仓库
-        echo    4. 脚本可重复运行，成功的库会跳过。
+        echo    4. 远端仓库不存在        -^> 先到平台建名为 baidu-uploader 的空仓库
+        echo    5. 脚本可重复运行，成功的库会跳过。
         echo.
     )
 )
