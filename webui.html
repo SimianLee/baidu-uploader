@@ -596,7 +596,7 @@ async function submitCode(){
 }
 
 async function verifyToken(){
-  const d = await api('/api/verify');
+  const d = await api('/api/verify', {});   // 用 POST（语义正确，后端也兼容 GET）
   setMsg('authMsg', (d.ok ? '已登录：' : '') + d.msg, d.ok);
   refreshTokenChip();
 }
@@ -610,7 +610,7 @@ async function startUpload(){
 
 async function stopUpload(){
   if(!confirm('确定停止上传？\n已成功的文件会保留记录，之后可以断点续传。')) return;
-  const d = await api('/api/stop');
+  const d = await api('/api/stop', {});
   setMsg('ctlMsg', d.msg, d.ok);
 }
 
@@ -619,7 +619,7 @@ async function dryrun(){
   $('btnDry').textContent = '分析中…';
   setMsg('ctlMsg', '干跑分析中，文件多时可能要等半分钟…');
   try{
-    const d = await api('/api/dryrun');
+    const d = await api('/api/dryrun', {});
     const el = $('dryout');
     el.textContent = d.output || d.msg || '(无输出)';
     el.classList.toggle('empty', !el.textContent.trim());

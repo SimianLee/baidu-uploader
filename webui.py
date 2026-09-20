@@ -153,20 +153,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path in ("/", "/index.html", "/webui.html"):
+        path = self.path.split("?")[0]   # 去掉可能的查询串
+        if path in ("/", "/index.html", "/webui.html"):
             body = HTMLFILE.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-        elif self.path == "/api/config":
+        elif path == "/api/config":
             try:
                 cfg = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
                 self._json({"ok": True, "config": cfg})
             except Exception as e:
                 self._json({"ok": False, "msg": f"读取配置失败：{e}"})
-        elif self.path == "/api/progress":
+        elif path == "/api/progress":
             prog = {}
             if PROGRESS.exists():
                 try:
@@ -175,26 +176,25 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             self._json({"ok": True, "running": is_running(),
                         "progress": prog, "log": tail_text(LOGFILE)})
-        elif self.path == "/api/authurl":
+        elif path == "/api/authurl":
             self._json({"ok": True, "url": auth_url(), "has_token": TOKEN.exists()})
-        elif self.path == "/api/authgo":
+        elif path == "/api/authgo":
             # 302 直接跳转：浏览器原生导航，不受弹窗拦截器影响
             url = auth_url()
             self.send_response(302)
             self.send_header("Location", url)
             self.send_header("Content-Length", "0")
             self.end_headers()
+        elif path.startswith("/api/"):
+            # 用 GET 调用的接口（如 /api/verify、/api/stop、/api/dryrun）一律放行
+            self.handle_api(path, {})
         else:
-            self._json({"ok": False, "msg": "not found"}, 404)
+            self._json({"ok": False, "msg": f"接口不存在：{path}"}, 404)
 
-    def do_POST(self):
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length) or b"{}")
-        except Exception:
-            body = {}
-
-        if self.path == "/api/config":
+    def handle_api(self, path, body):
+        """所有 /api/* 路由统一在这里处理：GET（无 body）和 POST 都走这条路，
+        避免前端用错 HTTP 方法时出现 404 not found 却不知所措。"""
+        if path == "/api/config":
             cfg = body.get("config")
             if not isinstance(cfg, dict):
                 return self._json({"ok": False, "msg": "配置格式错误"})
@@ -217,16 +217,16 @@ class Handler(BaseHTTPRequestHandler):
             CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
             return self._json({"ok": True, "msg": "配置已保存"})
 
-        if self.path == "/api/start":
+        if path == "/api/start":
             limit = int(body.get("limit", 0) or 0)
             ok, msg = start_upload(limit)
             return self._json({"ok": ok, "msg": msg})
 
-        if self.path == "/api/stop":
+        if path == "/api/stop":
             ok, msg = stop_upload()
             return self._json({"ok": ok, "msg": msg})
 
-        if self.path == "/api/dryrun":
+        if path == "/api/dryrun":
             if is_running():
                 return self._json({"ok": False, "msg": "上传进行中，不能干跑"})
             try:
@@ -239,18 +239,28 @@ class Handler(BaseHTTPRequestHandler):
             except subprocess.TimeoutExpired:
                 return self._json({"ok": False, "msg": "干跑超时（目录太大？）"})
 
-        if self.path == "/api/login":
+        if path == "/api/login":
             code = str(body.get("code", "")).strip()
             if not code:
                 return self._json({"ok": False, "msg": "请填写授权码"})
             ok, msg = do_login(code)
             return self._json({"ok": ok, "msg": msg})
 
-        if self.path == "/api/verify":
+        if path == "/api/verify":
             ok, msg = verify_token()
             return self._json({"ok": ok, "msg": msg})
 
-        return self._json({"ok": False, "msg": "not found"}, 404)
+        return self._json({"ok": False, "msg": f"接口不存在：{path}"}, 404)
+
+    def do_POST(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+        self.handle_api(self.path.split("?")[0], body)
 
 
 def main():
