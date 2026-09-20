@@ -94,9 +94,16 @@ def do_login(code: str):
 
 
 def auth_url():
-    cfg = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
+    """带 AppKey 的授权网址；AppKey 没配好时退回开放平台控制台"""
+    try:
+        cfg = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
+    except Exception:
+        cfg = {}
+    key = str(cfg.get("app_key", "")).strip()
+    if not key or key in ("xxx", "test", "YOUR_APP_KEY", "你的AppKey") or key.startswith("你的"):
+        return "https://pan.baidu.com/union/console"
     return ("https://openapi.baidu.com/oauth/2.0/authorize?"
-            f"response_type=code&client_id={cfg['app_key']}"
+            f"response_type=code&client_id={key}"
             "&redirect_uri=oob&scope=basic,netdisk")
 
 
@@ -159,6 +166,13 @@ class Handler(BaseHTTPRequestHandler):
                         "progress": prog, "log": tail_text(LOGFILE)})
         elif self.path == "/api/authurl":
             self._json({"ok": True, "url": auth_url(), "has_token": TOKEN.exists()})
+        elif self.path == "/api/authgo":
+            # 302 直接跳转：浏览器原生导航，不受弹窗拦截器影响
+            url = auth_url()
+            self.send_response(302)
+            self.send_header("Location", url)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         else:
             self._json({"ok": False, "msg": "not found"}, 404)
 
