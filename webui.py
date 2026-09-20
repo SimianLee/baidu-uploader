@@ -177,7 +177,22 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "running": is_running(),
                         "progress": prog, "log": tail_text(LOGFILE)})
         elif path == "/api/authurl":
-            self._json({"ok": True, "url": auth_url(), "has_token": TOKEN.exists()})
+            # 顺带回传 Token 有效期，页面上好显示"已授权到哪天"，刷新页面不用重新授权
+            info = {}
+            if TOKEN.exists():
+                try:
+                    t = json.loads(TOKEN.read_text(encoding="utf-8-sig"))
+                    exp = int(t.get("expires_in", 0) or 0)
+                    saved = TOKEN.stat().st_mtime
+                    info = {
+                        "saved_at": time.strftime("%Y-%m-%d %H:%M", time.localtime(saved)),
+                        "expires_at": (time.strftime("%Y-%m-%d", time.localtime(saved + exp))
+                                       if exp else ""),
+                    }
+                except Exception:
+                    pass
+            self._json({"ok": True, "url": auth_url(), "has_token": TOKEN.exists(),
+                        "token_info": info})
         elif path == "/api/authgo":
             # 302 直接跳转：浏览器原生导航，不受弹窗拦截器影响
             url = auth_url()

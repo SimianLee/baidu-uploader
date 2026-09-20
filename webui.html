@@ -230,6 +230,14 @@
     font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:#ffb86c;
   }
   .filewarn a{color:#8ab4ff}
+
+  /* ---------- 自动保存状态 ---------- */
+  .autosave{
+    font-size:11.5px;color:var(--muted2);white-space:nowrap;align-self:center;
+    padding:3px 9px;border-radius:99px;border:1px solid transparent;
+  }
+  .autosave.ok{color:var(--green);background:#0f1f1a;border-color:#1e4d3c}
+  .autosave.warn{color:var(--yellow);background:#241f0e;border-color:#5a4a1a}
   .drybox{margin-bottom:12px}
   .drybox .term{max-height:190px;color:#9fb0d0}
   .tagbox{
@@ -284,7 +292,7 @@
     <div class="col">
 
       <div class="card">
-        <h2><span class="idx">1</span>参数设置<small>改动后需点「保存配置」</small></h2>
+        <h2><span class="idx">1</span>参数设置与账号授权<small>改动自动保存，也可手动点保存</small></h2>
 
         <div class="sec">应用密钥</div>
         <div class="row">
@@ -302,6 +310,40 @@
             <div class="hint">必填。等同密码，请勿分享或提交到公开仓库。</div>
           </div>
         </div>
+
+        <div class="sec">百度账号授权</div>
+        <div class="hint" style="margin:-2px 0 9px">
+          只需授权一次：Token 存在本地 <code>token.json</code> 并自动续期，刷新页面、重启工具都不用重新授权。
+        </div>
+        <div class="steps">
+          <div class="step"><span class="n">1</span><div class="body">
+            <div class="t">打开授权页，登录并确认授权</div>
+            <div class="d">
+              <div class="btnbar">
+                <a id="authLink" class="btn green sm" href="/api/authgo" target="_blank" rel="noopener">打开授权页</a>
+                <button class="btn ghost sm" onclick="copyAuthUrl()">复制网址</button>
+              </div>
+              <div class="urlbox"><input id="authUrlBox" readonly value="读取中…" onclick="this.select()"></div>
+              <div class="hint">链接已带上你的 AppKey；打不开就用「复制网址」粘贴到浏览器地址栏</div>
+            </div>
+          </div></div>
+          <div class="step"><span class="n">2</span><div class="body">
+            <div class="t">把页面显示的授权码粘贴到下面</div>
+            <div class="d">
+              <div class="row" style="gap:8px">
+                <div class="field" style="margin:0"><input id="authCode" placeholder="授权成功页面显示的一串码，约 10 分钟内有效" spellcheck="false"></div>
+                <button class="btn sm" onclick="submitCode()">提交</button>
+              </div>
+            </div>
+          </div></div>
+          <div class="step"><span class="n">3</span><div class="body">
+            <div class="t">确认账号与网盘容量</div>
+            <div class="d"><button class="btn ghost sm" onclick="verifyToken()">验证登录状态</button></div>
+          </div></div>
+        </div>
+        <div class="msg" id="authMsg" style="margin-top:10px"></div>
+
+        <div class="divider"></div>
 
         <div class="sec">目录</div>
         <div class="row">
@@ -365,46 +407,17 @@
           <button class="btn green" onclick="saveConfig()">保存配置</button>
           <button class="btn ghost" onclick="loadConfig()">重新读取</button>
           <button class="btn ghost" onclick="fillDefaults()">填入推荐值</button>
+          <div class="spacer"></div>
+          <span class="autosave" id="autoTip"></span>
         </div>
         <div class="msg" id="cfgMsg"></div>
-      </div>
-
-      <div class="card">
-        <h2><span class="idx">2</span>百度账号授权<small>只需一次，Token 自动续期</small></h2>
-        <div class="steps">
-          <div class="step"><span class="n">1</span><div class="body">
-            <div class="t">打开授权页，登录并确认授权</div>
-            <div class="d">
-              <div class="btnbar">
-                <a id="authLink" class="btn green sm" href="/api/authgo" target="_blank" rel="noopener">打开授权页</a>
-                <button class="btn ghost sm" onclick="copyAuthUrl()">复制网址</button>
-              </div>
-              <div class="urlbox"><input id="authUrlBox" readonly value="读取中…" onclick="this.select()"></div>
-              <div class="hint">链接已带上你的 AppKey；打不开就用「复制网址」粘贴到浏览器地址栏</div>
-            </div>
-          </div></div>
-          <div class="step"><span class="n">2</span><div class="body">
-            <div class="t">把页面显示的授权码粘贴到下面</div>
-            <div class="d">
-              <div class="row" style="gap:8px">
-                <div class="field" style="margin:0"><input id="authCode" placeholder="授权成功页面显示的一串码，约 10 分钟内有效" spellcheck="false"></div>
-                <button class="btn sm" onclick="submitCode()">提交</button>
-              </div>
-            </div>
-          </div></div>
-          <div class="step"><span class="n">3</span><div class="body">
-            <div class="t">确认账号与网盘容量</div>
-            <div class="d"><button class="btn ghost sm" onclick="verifyToken()">验证登录状态</button></div>
-          </div></div>
-        </div>
-        <div class="msg" id="authMsg"></div>
       </div>
     </div>
 
     <!-- ============ 右列 ============ -->
     <div class="col">
       <div class="card">
-        <h2><span class="idx">3</span>上传控制<small>中断后再次点开始即可续传</small></h2>
+        <h2><span class="idx">2</span>上传控制<small>中断后再次点开始即可续传</small></h2>
         <div class="btnbar">
           <button class="btn ghost" onclick="dryrun()" id="btnDry">干跑预览</button>
           <div class="field sm" style="margin:0;flex:0 0 132px">
@@ -424,7 +437,7 @@
       </div>
 
       <div class="card">
-        <h2><span class="idx">4</span>实时进度<small>每 2.5 秒刷新</small></h2>
+        <h2><span class="idx">3</span>实时进度<small>每 2.5 秒刷新</small></h2>
         <div class="stats">
           <div class="stat total"><b id="stTotal">—</b><span>待上传</span></div>
           <div class="stat done"><b id="stDone">—</b><span>已成功</span></div>
@@ -505,7 +518,8 @@ const DEFAULTS = {
 
 function fillDefaults(){
   Object.entries(DEFAULTS).forEach(([k, v]) => { if($(k)) $(k).value = v; });
-  setMsg('cfgMsg', '已填入推荐值（AppKey/SecretKey 和本地目录需自己填写），记得点「保存配置」');
+  setMsg('cfgMsg', '已填入推荐值（AppKey/SecretKey 和本地目录需自己填写）');
+  scheduleAutoSave();
 }
 
 async function loadConfig(){
@@ -524,16 +538,62 @@ async function loadConfig(){
   refreshTokenChip();
 }
 
-async function saveConfig(){
+/* ---------- 自动保存：输入即存，刷新/重启都不丢 ---------- */
+const REQUIRED = ['app_key', 'secret_key', 'local_dir', 'remote_dir'];
+let autoTimer = null;
+
+function nowHM(){
+  const d = new Date();
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+function collect(){
   const c = {};
   FIELDS.forEach(f => { if($(f)) c[f] = $(f).value; });
   c.batch_size = +c.batch_size; c.batch_pause_sec = +c.batch_pause_sec;
   c.file_interval_sec = +c.file_interval_sec; c.max_file_size_mb = +c.max_file_size_mb;
   c.recursive = c.recursive === 'true';
-  c.exclude_patterns = c.exclude_patterns.split(',').map(s=>s.trim()).filter(Boolean);
-  const d = await api('/api/config', {config:c});
+  c.exclude_patterns = c.exclude_patterns.split(',').map(s => s.trim()).filter(Boolean);
+  return c;
+}
+
+function missingRequired(c){
+  return REQUIRED.filter(k => !String(c[k] || '').trim());
+}
+
+function markAuto(text, ok){
+  const el = $('autoTip'); if(!el) return;
+  el.textContent = text || '';
+  el.className = 'autosave' + (ok === true ? ' ok' : ok === false ? ' warn' : '');
+}
+
+function scheduleAutoSave(){
+  clearTimeout(autoTimer);
+  markAuto('编辑中…', null);
+  autoTimer = setTimeout(autoSave, 800);   // 停手 0.8 秒才写盘，避免边打字边存
+}
+
+async function autoSave(){
+  const c = collect();
+  const miss = missingRequired(c);
+  if(miss.length){
+    markAuto('未自动保存：还有 ' + miss.length + ' 项必填没填', false);
+    return;
+  }
+  const d = await api('/api/config', {config: c});
+  if(d.ok){
+    markAuto('✓ 已自动保存 ' + nowHM(), true);
+    refreshTokenChip();          // AppKey 改了，授权链接要跟着更新
+  }else{
+    markAuto('自动保存失败：' + d.msg, false);
+  }
+}
+
+async function saveConfig(){
+  const c = collect();
+  const d = await api('/api/config', {config: c});
   setMsg('cfgMsg', d.msg, d.ok);
-  if(d.ok) refreshTokenChip();
+  if(d.ok){ markAuto('✓ 已保存 ' + nowHM(), true); refreshTokenChip(); }
 }
 
 /* ---------- 授权 ---------- */
@@ -543,8 +603,11 @@ async function refreshTokenChip(){
   let d;
   try { d = await api('/api/authurl'); } catch(e){ return null; }
   const chip = $('tokenChip');
+  const ti = d.token_info || {};
   if(d.has_token){
-    chip.innerHTML = '<span class="dot"></span>已授权';
+    // Token 存在服务端 token.json，刷新页面/重启工具都不需要重新授权
+    chip.innerHTML = '<span class="dot"></span>已授权' +
+      (ti.expires_at ? '（有效期至 ' + ti.expires_at + '）' : '');
     chip.className = 'chip ok';
   } else {
     chip.innerHTML = '<span class="dot"></span>未授权';
@@ -680,6 +743,12 @@ async function pollNow(){
     // 把「打开授权页」的兜底地址改成绝对 URL，否则会解析成 file:///C:/api/authgo
     const l = $('authLink'); if(l) l.href = 'http://127.0.0.1:8765/api/authgo';
   }
+  // 任一配置项改动就自动保存：不用手动点保存，刷新页面也不丢
+  FIELDS.forEach(f => {
+    const el = $(f); if(!el) return;
+    el.addEventListener('input', scheduleAutoSave);
+    el.addEventListener('change', scheduleAutoSave);
+  });
 })();
 
 loadConfig();
