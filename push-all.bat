@@ -5,10 +5,14 @@ rem
 rem  用法：
 rem    push-all.bat                  推送当前分支到 github / gitcode / gitee
 rem    push-all.bat setup            只配置三个远程，不推送
-rem    push-all.bat ssh              改用 SSH 地址推送（HTTPS 卡住时用）
+rem    push-all.bat ssh              全部改用 SSH 地址推送
 rem    push-all.bat commit "说明"    先 add+commit 再推送
 rem
 rem  首次运行会自动做初始化提交（git add -A + commit），因为新仓库没有 HEAD。
+rem
+rem  自动回退：某个库用 HTTPS 推送失败时，会自动换 SSH 地址再试一次。
+rem  （github:443 常被代理挡成 502，gitcode 已移除密码认证只能 SSH，
+rem    所以这两家最终都会走 SSH —— 需本机 SSH 公钥已添加到对应平台）
 rem
 rem  日志：
 rem    push-logs\push-<时间戳>.log   本次完整日志（git 原始输出 + 成败结论）
@@ -20,11 +24,6 @@ rem    推送前会检查 config.json / token.json / libs 是否被 git 跟踪�
 rem    命中则立即中止 —— 这两个文件含 SecretKey 和授权 Token，绝不能入库。
 rem
 rem  说明：
-rem    - github / gitee 走 HTTPS（本机凭据管理器已存凭据，实测正常）
-rem    - gitcode 走 SSH：该平台已移除密码认证，HTTPS 推送必报
-rem      "HTTP Basic: Access denied"（2026-09-20 实测），故默认用 SSH
-rem    - 若 HTTPS 平台推送卡死或认证失败，改用 push-all.bat ssh 全走 SSH
-rem      （需本机 SSH 公钥已添加到 github / gitee 账号）
 rem    - 脚本幂等：重复运行没副作用，远程地址与脚本不一致时自动纠正
 rem    - 执行结束后会停住，提示「按任意键关闭窗口」，不会一闪而过
 rem ============================================================
@@ -39,27 +38,31 @@ rem ---------------- 远程地址 ----------------
 set "USE_SSH=0"
 set "DO_COMMIT=0"
 
-rem github / gitee 走 HTTPS（实测正常，Windows 凭据管理器已存本机凭据）
-set "GITHUB_URL=https://github.com/SimianLee/baidu-uploader.git"
-set "GITEE_URL=https://gitee.com/SimianLee/baidu-uploader.git"
-rem gitcode 走 SSH：该平台已移除密码认证，HTTPS 推送必报
-rem "HTTP Basic: Access denied"，只能走 SSH 或私人令牌（2026-09-20 实测）
-set "GITCODE_URL=git@gitcode.com:SimianLee/baidu-uploader.git"
+rem github
+set "HTTPS_github=https://github.com/SimianLee/baidu-uploader.git"
+set "SSH_github=git@github.com:SimianLee/baidu-uploader.git"
+rem gitee
+set "HTTPS_gitee=https://gitee.com/SimianLee/baidu-uploader.git"
+set "SSH_gitee=git@gitee.com:SimianLee/baidu-uploader.git"
+rem gitcode：该平台已移除密码认证，HTTPS 推送必报 HTTP Basic: Access denied，
+rem 因此首选地址直接填 SSH（2026-09-20 实测）
+set "HTTPS_gitcode=git@gitcode.com:SimianLee/baidu-uploader.git"
+set "SSH_gitcode=git@gitcode.com:SimianLee/baidu-uploader.git"
 
-rem SSH 备选（https 不通时启用：gitcode 禁用密码认证、github:443 常被墙、
-rem gitee HTTPS 曾出现长时间无响应）—— 由下面的 USE_SSH 开关决定
+set "URL_github=%HTTPS_github%"
+set "URL_gitcode=%HTTPS_gitcode%"
+set "URL_gitee=%HTTPS_gitee%"
 
-rem ---------------- 解析参数 ----------------
-if /i "%~1"=="ssh"    set "USE_SSH=1"
+if /i "%~1"=="ssh" set "USE_SSH=1"
+if "%USE_SSH%"=="1" (
+    set "URL_github=%SSH_github%"
+    set "URL_gitcode=%SSH_gitcode%"
+    set "URL_gitee=%SSH_gitee%"
+)
+
 if /i "%~1"=="commit" set "DO_COMMIT=1"
 set "CMSG=%~2"
 if not defined CMSG set "CMSG=update: 百度网盘分批上传工具"
-
-if "%USE_SSH%"=="1" (
-    set "GITHUB_URL=git@github.com:SimianLee/baidu-uploader.git"
-    set "GITCODE_URL=git@gitcode.com:SimianLee/baidu-uploader.git"
-    set "GITEE_URL=git@gitee.com:SimianLee/baidu-uploader.git"
-)
 
 rem ---------------- 0) 准备日志目录与时间戳 ----------------
 if not exist "push-logs" mkdir "push-logs"
@@ -95,12 +98,12 @@ if not errorlevel 1 (
 )
 
 rem ---------------- 1) 幂等配置三个远程 ----------------
-git remote get-url github  >nul 2>&1 || git remote add github  "%GITHUB_URL%"
-git remote get-url gitcode >nul 2>&1 || git remote add gitcode "%GITCODE_URL%"
-git remote get-url gitee   >nul 2>&1 || git remote add gitee   "%GITEE_URL%"
-git remote set-url github  "%GITHUB_URL%"  2>nul
-git remote set-url gitcode "%GITCODE_URL%" 2>nul
-git remote set-url gitee   "%GITEE_URL%"   2>nul
+git remote get-url github  >nul 2>&1 || git remote add github  "%URL_github%"
+git remote get-url gitcode >nul 2>&1 || git remote add gitcode "%URL_gitcode%"
+git remote get-url gitee   >nul 2>&1 || git remote add gitee   "%URL_gitee%"
+git remote set-url github  "%URL_github%"  2>nul
+git remote set-url gitcode "%URL_gitcode%" 2>nul
+git remote set-url gitee   "%URL_gitee%"   2>nul
 
 rem ---------------- 1.5) 提交处理 ----------------
 git rev-parse HEAD >nul 2>&1
@@ -158,7 +161,7 @@ if /i "%~1"=="setup" (
     goto :end
 )
 
-rem ---------------- 3) 依次推送到三个远程 ----------------
+rem ---------------- 3) 依次推送（失败自动回退 SSH） ----------------
 for %%r in (github gitcode gitee) do (
     set "T0=!TIME:~0,8!"
     set "T0=!T0: =0!"
@@ -167,10 +170,16 @@ for %%r in (github gitcode gitee) do (
     echo ============================================
     >>"%PLOG%" echo.
     >>"%PLOG%" echo ---- [%%r] 开始 !T0! ----
-    git push -u %%r %BRANCH% > "!TMPR!" 2>&1
-    set "RC=!errorlevel!"
-    type "!TMPR!"
-    type "!TMPR!" >> "%PLOG%"
+    call :push_one %%r
+    rem HTTPS 失败则换 SSH 地址再试一次
+    if !RC! neq 0 (
+        if not "!URL_%%r!"=="!SSH_%%r!" (
+            echo  [重试] %%r 改用 SSH 地址再试一次...
+            >>"%PLOG%" echo ---- [%%r] HTTPS 失败，改用 SSH 重试 ----
+            git remote set-url %%r "!SSH_%%r!" 2>nul
+            call :push_one %%r
+        )
+    )
     if !RC! equ 0 (
         echo  [成功] %%r 已推送。
         >>"%PLOG%" echo ---- [%%r] 结果: 成功 ----
@@ -182,6 +191,8 @@ for %%r in (github gitcode gitee) do (
         set "R_%%r=失败"
         set /a FAIL+=1
     )
+    rem 恢复首选地址，保持脚本幂等
+    git remote set-url %%r "!URL_%%r!" 2>nul
     echo.
 )
 if exist "%TMPR%" del "%TMPR%" >nul 2>&1
@@ -203,6 +214,15 @@ echo  完整日志: %PLOG%
 echo  历史记录:
 powershell -NoProfile -Command "Get-Content '%HIST%' -Tail 5 -Encoding UTF8"
 echo ============================================
+goto :end
+
+rem ---------------- 子程序：推送单个远程，结果放 RC ----------------
+:push_one
+git push -u %1 %BRANCH% > "%TMPR%" 2>&1
+set "RC=!errorlevel!"
+type "%TMPR%"
+type "%TMPR%" >> "%PLOG%"
+exit /b 0
 
 rem ---------------- 5) 结束 ----------------
 :end
@@ -210,17 +230,14 @@ echo.
 if defined FAIL (
     if not "%FAIL%"=="0" (
         echo  排错提示:
-        echo    1. gitcode 报认证失败（含 "Access denied" / "Permission denied"）
-        echo       -^> 该平台已移除密码认证，脚本默认已走 SSH。
-        echo       若报 Permission denied (publickey)：SSH 公钥没加到 gitcode
-        echo       账号，去「个人设置 - SSH 公钥」添加 ~/.ssh/id_rsa.pub 内容。
-        echo       想继续用 HTTPS 的话，去 gitcode 生成私人令牌 PAT，推送弹窗里
-        echo       用户名填账号、密码填 PAT（并把脚本里的地址改回 https）。
-        echo    2. 卡住不动 / 其他认证失败 -^> 改用 SSH：push-all.bat ssh
-        echo       （需本机 SSH 公钥已添加到对应平台账号）
-        echo    3. 提示 non-fast-forward -^> 远端已有初始化文件，先执行：
-        echo       git pull --rebase gitee %BRANCH% 再重试（或确认无需保留后强推）
-        echo    4. 远端仓库不存在        -^> 先到平台建名为 baidu-uploader 的空仓库
+        echo    1. Permission denied ^(publickey^) -^> SSH 公钥没加到该平台，
+        echo       把 ~/.ssh/id_rsa.pub 的内容粘贴到平台「SSH 公钥」设置里
+        echo    2. github 报 502 / Empty reply -^> 代理挡住了 HTTPS，脚本已自动
+        echo       回退 SSH；仍失败就直接：push-all.bat ssh
+        echo    3. gitcode 报 HTTP Basic: Access denied -^> 该平台已移除密码认证，
+        echo       只能 SSH 或用私人令牌 PAT（脚本默认已用 SSH）
+        echo    4. non-fast-forward -^> 远端已有初始化文件，先
+        echo       git pull --rebase gitee %BRANCH% 再重试
         echo    5. 脚本可重复运行，成功的库会跳过。
         echo.
     )

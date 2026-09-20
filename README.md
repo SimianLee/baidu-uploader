@@ -247,8 +247,9 @@ open_panel.bat            :: 用面板填写密钥和目录最省事
 
 1. **推送前安全自检**：若 `config.json` / `token.json` / `libs/` / `uploaded_log.txt` 已被 git 跟踪，立即中止并给出 `git rm --cached` 的解法——防止密钥泄漏到公开仓库
 2. **幂等配置远程**：三个远程不存在就添加、地址不对就纠正，重复运行无副作用
-3. **依次推送并汇总**：每个库的原始输出实时显示，结束给出成功/失败统计
-4. **写日志**：`push-logs/push-<时间戳>.log`（完整）+ `push-logs/history.log`（历次一行摘要，UTF-8 带 BOM，记事本打开不乱码）
+3. **失败自动回退 SSH**：某库 HTTPS 推送失败后，自动换 SSH 地址再试一次（github 的 443 常被代理挡成 502，gitcode 只能走 SSH，靠这一步实现双击一次全通）
+4. **依次推送并汇总**：每个库的原始输出实时显示，结束给出成功/失败统计
+5. **写日志**：`push-logs/push-<时间戳>.log`（完整）+ `push-logs/history.log`（历次一行摘要，UTF-8 带 BOM，记事本打开不乱码）
 
 ### GitCode 为什么要走 SSH（2026-09-20 实测）
 
