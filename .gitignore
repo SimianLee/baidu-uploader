@@ -1,0 +1,48 @@
+# ==========================================================
+# 百度网盘分批上传工具 · Git 忽略规则
+# ==========================================================
+
+# ---------- 敏感：千万不要提交 ----------
+# config.json 含 AppKey / SecretKey 明文
+# token.json  含百度账号的 access_token / refresh_token
+config.json
+token.json
+*.token
+secret*.json
+
+# ---------- 第三方依赖（用 requirements.txt 重装即可）----------
+libs/
+site-packages/
+venv/
+.venv/
+env/
+
+# ---------- Python 缓存 ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---------- 运行产物 / 断点记录 ----------
+upload.log
+progress.json
+uploaded_log.txt
+uploaded_log.json
+done_log.json
+*.log
+
+# ---------- 推送日志 ----------
+push-logs/
+
+# ---------- 临时 / 测试文件（下划线开头）----------
+_*
+!.gitignore
+
+# ---------- 编辑器 / 系统 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini

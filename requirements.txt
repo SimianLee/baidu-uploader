@@ -1,0 +1,2 @@
+requests>=2.28
+send2trash>=1.8

@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>百度网盘分批上传 · 控制面板</title>
+<style>
+  :root{
+    --bg:#0a0c11;
+    --bg-grad:radial-gradient(1200px 600px at 12% -8%, #16213a 0%, transparent 55%),
+              radial-gradient(900px 500px at 100% 0%, #1a2333 0%, transparent 50%);
+    --card:rgba(23,27,38,.82);
+    --card-solid:#171b26;
+    --field:#10141d;
+    --line:#252b3a;
+    --line-hi:#333c52;
+    --text:#e8ebf2;
+    --muted:#7f889e;
+    --muted2:#5f6880;
+    --accent:#5b8dff;
+    --accent-dim:#2a3d6b;
+    --green:#2fcf94;
+    --red:#ff5f6d;
+    --yellow:#ffc861;
+    --purple:#a78bfa;
+    --r:14px;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; color:var(--text); background:var(--bg); background-image:var(--bg-grad);
+    background-attachment:fixed;
+    font-family:"Microsoft YaHei UI","Microsoft YaHei","Segoe UI",system-ui,-apple-system,sans-serif;
+    font-size:14px; line-height:1.6; -webkit-font-smoothing:antialiased;
+  }
+  ::selection{background:var(--accent);color:#fff}
+  /* 滚动条 */
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:#2b3245;border-radius:9px;border:2px solid transparent;background-clip:padding-box}
+  ::-webkit-scrollbar-thumb:hover{background:#3a4360;background-clip:padding-box}
+
+  .wrap{max-width:1240px;margin:0 auto;padding:26px 22px 70px}
+
+  /* ---------- 顶部 ---------- */
+  header.glass{
+    background:linear-gradient(135deg, rgba(38,48,74,.9), rgba(23,27,38,.75));
+    border:1px solid var(--line); border-radius:18px; padding:18px 22px;
+    box-shadow:var(--shadow); backdrop-filter:blur(10px);
+    display:flex; align-items:center; gap:16px; margin-bottom:20px;
+  }
+  .logo{
+    width:44px;height:44px;flex:0 0 44px;border-radius:12px;display:grid;place-items:center;
+    background:linear-gradient(135deg,#4f7cff,#7a5bff); box-shadow:0 6px 18px -6px #4f7cffaa;
+  }
+  .logo svg{width:24px;height:24px;fill:#fff}
+  header h1{font-size:19px;margin:0;letter-spacing:.4px;font-weight:600}
+  .sub{color:var(--muted);font-size:12px;margin-top:2px}
+  .spacer{flex:1}
+  .chip{
+    display:inline-flex;align-items:center;gap:6px;
+    padding:5px 13px;border-radius:99px;font-size:12px;font-weight:500;
+    border:1px solid var(--line-hi);background:#141926;color:var(--muted);white-space:nowrap;
+  }
+  .chip .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+  .chip.ok{color:var(--green);border-color:#1e4d3c;background:#0f2620}
+  .chip.bad{color:var(--red);border-color:#5a2730;background:#2a1418}
+  .chip.run{color:var(--yellow);border-color:#5c4a24;background:#2a2213}
+  .chip.run .dot{animation:pulse 1.2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+  /* ---------- 布局 ---------- */
+  .grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:18px;align-items:start}
+  .col{display:flex;flex-direction:column;gap:18px;min-width:0}
+  @media(max-width:940px){.grid{grid-template-columns:1fr}}
+
+  /* ---------- 卡片 ---------- */
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--r);
+    padding:18px 20px 20px; box-shadow:var(--shadow); backdrop-filter:blur(6px);
+  }
+  .card > h2{
+    font-size:14px;margin:0 0 16px;font-weight:600;color:#cfd8ee;
+    display:flex;align-items:center;gap:9px;letter-spacing:.3px;
+  }
+  .card > h2 .idx{
+    width:20px;height:20px;flex:0 0 20px;border-radius:6px;display:grid;place-items:center;
+    background:var(--accent-dim);color:#a8c0ff;font-size:11px;font-weight:700;
+  }
+  .card > h2 small{margin-left:auto;color:var(--muted2);font-weight:400;font-size:11.5px}
+
+  /* ---------- 表单 ---------- */
+  .sec{
+    font-size:11.5px;color:var(--muted2);text-transform:uppercase;letter-spacing:1px;
+    margin:2px 0 10px;display:flex;align-items:center;gap:8px;
+  }
+  .sec::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line),transparent)}
+  .sec + .row{margin-bottom:2px}
+  .row{display:flex;gap:12px;flex-wrap:wrap}
+  .field{flex:1;min-width:160px;margin-bottom:13px}
+  .field.sm{flex:0 0 calc(25% - 9px);min-width:112px}
+  .field label{display:block;font-size:12.5px;color:#b6bfd4;margin-bottom:5px;font-weight:500}
+  .field label .req{color:var(--red);margin-left:2px}
+  .field input,.field select,.field textarea{
+    width:100%;background:var(--field);border:1px solid var(--line);color:var(--text);
+    border-radius:10px;padding:9px 11px;font-size:13px;outline:none;
+    transition:border-color .15s, box-shadow .15s, background .15s;
+    font-family:inherit;
+  }
+  .field input::placeholder{color:#4d566c}
+  .field input:hover,.field select:hover{border-color:var(--line-hi)}
+  .field input:focus,.field select:focus{
+    border-color:var(--accent); box-shadow:0 0 0 3px rgba(91,141,255,.13); background:#0c1017;
+  }
+  .field select{appearance:none;cursor:pointer;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path fill='%237f889e' d='M6 8.5 1.5 4h9z'/></svg>");
+    background-repeat:no-repeat;background-position:right 10px center;background-size:11px;padding-right:28px}
+  .field select option{background:#141926;color:var(--text)}
+  .hint{font-size:11px;color:var(--muted2);margin-top:5px;line-height:1.45}
+  .reveal{
+    position:absolute;right:9px;top:50%;transform:translateY(-50%);cursor:pointer;
+    color:var(--muted2);font-size:11px;user-select:none;padding:2px 4px;border-radius:4px;
+  }
+  .reveal:hover{color:var(--text);background:#1b2233}
+  .inpwrap{position:relative}
+
+  /* ---------- 按钮 ---------- */
+  .btn{
+    background:var(--accent);color:#fff;border:0;border-radius:10px;padding:9px 17px;
+    font-size:13px;font-weight:500;cursor:pointer;transition:.15s;font-family:inherit;
+    display:inline-flex;align-items:center;gap:6px;white-space:nowrap;
+  }
+  .btn:hover:not(:disabled){filter:brightness(1.13);transform:translateY(-1px)}
+  .btn:active:not(:disabled){transform:translateY(0)}
+  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn.ghost{background:#151a26;border:1px solid var(--line-hi);color:#c3cbdd}
+  .btn.ghost:hover:not(:disabled){background:#1b2231;border-color:#3d4863}
+  .btn.danger{background:var(--red)}
+  .btn.green{background:var(--green);color:#06281c;font-weight:600}
+  .btn.sm{padding:7px 13px;font-size:12px;border-radius:8px}
+  .btnbar{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+  .divider{height:1px;background:var(--line);margin:16px -20px}
+
+  /* ---------- 提示条 ---------- */
+  .msg{
+    margin-top:11px;font-size:12px;color:var(--muted);min-height:0;word-break:break-all;
+    padding:0;border-radius:8px;transition:.2s;
+  }
+  .msg:not(:empty){padding:8px 11px;background:#131824;border:1px solid var(--line)}
+  .msg.ok{color:var(--green);border-color:#1e4d3c;background:#0f1f1a}
+  .msg.bad{color:#ff8b95;border-color:#5a2730;background:#241317}
+
+  /* ---------- 授权区 ---------- */
+  .steps{display:flex;flex-direction:column;gap:11px}
+  .step{display:flex;gap:11px;align-items:flex-start}
+  .step .n{
+    width:22px;height:22px;flex:0 0 22px;border-radius:50%;display:grid;place-items:center;
+    background:#1c2233;color:#8fa4d8;font-size:11px;font-weight:700;
+    border:1px solid var(--line-hi);margin-top:2px;
+  }
+  .step .body{flex:1;min-width:0}
+  .step .body .t{font-size:12.5px;color:#c3cbdd;margin-bottom:2px}
+  .step .body .d{font-size:11.5px;color:var(--muted2);line-height:1.5}
+
+  /* ---------- 统计卡 ---------- */
+  .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:15px}
+  @media(max-width:520px){.stats{grid-template-columns:repeat(2,1fr)}}
+  .stat{
+    background:linear-gradient(160deg,#161b28,#12161f);border:1px solid var(--line);
+    border-radius:12px;padding:11px 8px;text-align:center;position:relative;overflow:hidden;
+  }
+  .stat::before{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:currentColor;opacity:.5}
+  .stat b{display:block;font-size:21px;font-weight:600;line-height:1.25;letter-spacing:.5px;font-variant-numeric:tabular-nums}
+  .stat span{font-size:11px;color:var(--muted);letter-spacing:.5px}
+  .stat.total{color:#7fa0ff} .stat.done{color:var(--green)}
+  .stat.fail{color:var(--red)} .stat.pct{color:var(--purple)}
+
+  /* ---------- 进度条 ---------- */
+  .barhead{display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-bottom:6px}
+  .bar{
+    height:10px;background:#12161f;border:1px solid var(--line);border-radius:99px;
+    overflow:hidden;margin-bottom:13px;position:relative;
+  }
+  .bar i{
+    display:block;height:100%;width:0%;border-radius:99px;transition:width .6s cubic-bezier(.4,0,.2,1);
+    background:linear-gradient(90deg,#4f7cff,#2fcf94);background-size:200% 100%;
+    box-shadow:0 0 12px -2px #2fcf9488;
+  }
+  .bar.anim i{animation:flow 2.2s linear infinite}
+  @keyframes flow{0%{background-position:0 0}100%{background-position:200% 0}}
+  .nowfile{
+    font-size:12px;color:var(--yellow);margin-bottom:11px;word-break:break-all;min-height:0;
+    display:flex;align-items:center;gap:6px;
+  }
+  .nowfile:not(:empty){min-height:20px}
+
+  /* ---------- 日志 / 输出 ---------- */
+  .term{
+    background:#0a0d14;border:1px solid var(--line);border-radius:11px;padding:12px 14px;
+    font-family:"Cascadia Mono","Consolas","Menlo",monospace;
+    font-size:11.5px;line-height:1.7;overflow:auto;white-space:pre-wrap;word-break:break-all;
+    margin:0;color:#93a0bb;
+  }
+  .term.headroom{max-height:290px}
+  .term.empty::before{content:attr(data-empty);color:#4d566c;font-style:italic}
+  .hidden{display:none}
+  .drybox{margin-bottom:12px}
+  .drybox .term{max-height:190px;color:#9fb0d0}
+  .tagbox{
+    display:inline-block;background:#10231c;color:var(--green);border:1px solid #1e4d3c;
+    padding:2px 9px;border-radius:6px;font-size:11.5px;margin-right:6px;
+  }
+
+  footer{margin-top:22px;color:var(--muted2);font-size:11.5px;text-align:center;line-height:1.8}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* ---------- Toast ---------- */
+  #toasts{position:fixed;right:20px;bottom:20px;display:flex;flex-direction:column;gap:9px;z-index:99}
+  .toast{
+    background:#171d2b;border:1px solid var(--line-hi);border-left:3px solid var(--accent);
+    border-radius:10px;padding:11px 15px;font-size:12.5px;color:#dbe2f0;min-width:220px;max-width:340px;
+    box-shadow:0 12px 32px -10px rgba(0,0,0,.8);animation:slidein .25s ease-out;word-break:break-word;
+  }
+  .toast.ok{border-left-color:var(--green)} .toast.bad{border-left-color:var(--red)}
+  .toast.warn{border-left-color:var(--yellow)}
+  @keyframes slidein{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:translateX(0)}}
+  .fadeout{opacity:0;transform:translateX(24px);transition:.3s}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="glass">
+    <div class="logo">
+      <svg viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9L12 3zm0 2.3 5.7 3.2v6.1L12 17.9l-5.7-3.3V8.5L12 5.3zM11 9v3H8v2h3v3h2v-3h3v-2h-3V9h-2z"/></svg>
+    </div>
+    <div>
+      <h1>百度网盘分批上传</h1>
+      <div class="sub">非会员友好 · 分批限速 · 断点续传 · 本地运行</div>
+    </div>
+    <div class="spacer"></div>
+    <span class="chip" id="tokenChip"><span class="dot"></span>检查授权中…</span>
+  </header>
+
+  <div class="grid">
+    <!-- ============ 左列 ============ -->
+    <div class="col">
+
+      <div class="card">
+        <h2><span class="idx">1</span>参数设置<small>改动后需点「保存配置」</small></h2>
+
+        <div class="sec">应用密钥</div>
+        <div class="row">
+          <div class="field">
+            <label>AppKey<span class="req">*</span></label>
+            <input id="app_key" placeholder="在 pan.baidu.com/union 控制台创建应用后获取" spellcheck="false">
+            <div class="hint">必填。开放平台「我的应用」页面里复制。</div>
+          </div>
+          <div class="field">
+            <label>SecretKey<span class="req">*</span></label>
+            <div class="inpwrap">
+              <input id="secret_key" type="password" placeholder="与 AppKey 同一页面复制" spellcheck="false">
+              <span class="reveal" onclick="toggleSecret(this)">显示</span>
+            </div>
+            <div class="hint">必填。等同密码，请勿分享或提交到公开仓库。</div>
+          </div>
+        </div>
+
+        <div class="sec">目录</div>
+        <div class="row">
+          <div class="field">
+            <label>本地上传目录<span class="req">*</span></label>
+            <input id="local_dir" placeholder="例：C:\Users\你的用户名\Downloads\待上传" spellcheck="false">
+          </div>
+          <div class="field">
+            <label>网盘目标目录<span class="req">*</span></label>
+            <input id="remote_dir" placeholder="/apps/baidu_uploader" spellcheck="false">
+            <div class="hint">不存在会自动创建，可写 /我的备份 之类。</div>
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label>上传范围</label>
+            <select id="recursive">
+              <option value="true">当前目录 + 所有子目录</option>
+              <option value="false">仅当前目录下的文件</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>排除规则</label>
+            <input id="exclude_patterns" placeholder="Thumbs.db, desktop.ini, *.tmp, ~$*" spellcheck="false">
+            <div class="hint">逗号分隔，支持通配符 * ?</div>
+          </div>
+        </div>
+
+        <div class="sec">分批策略（针对非会员限制）</div>
+        <div class="row">
+          <div class="field sm"><label>每批数量</label><input id="batch_size" type="number" min="1" placeholder="500"></div>
+          <div class="field sm"><label>批间暂停(秒)</label><input id="batch_pause_sec" type="number" min="0" placeholder="5"></div>
+          <div class="field sm"><label>文件间隔(秒)</label><input id="file_interval_sec" type="number" min="0" step="0.1" placeholder="0.2"></div>
+          <div class="field sm"><label>大小上限(MB)</label><input id="max_file_size_mb" type="number" min="1" placeholder="4096"></div>
+        </div>
+        <div class="hint" style="margin-top:-4px">
+          每批 500 · 暂停 5s · 间隔 0.2s 是海量小文件实测最优解；被限流就把「每批数量」调小、暂停调大。
+          大小上限默认 4096MB（非会员单文件上限），超出的文件自动跳过不传。
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="sec">上传成功后，本地文件怎么处理</div>
+        <div class="row">
+          <div class="field">
+            <label>处理方式</label>
+            <select id="after_upload">
+              <option value="keep">保留在原处（最安全，推荐）</option>
+              <option value="move">移动到指定目录</option>
+              <option value="trash">送入回收站（可还原）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>归档目录</label>
+            <input id="done_dir" placeholder="留空则自动用「本地目录同级/已上传」" spellcheck="false">
+            <div class="hint">仅在选择「移动」时生效。重名文件自动加 (1)(2)，不会覆盖。</div>
+          </div>
+        </div>
+
+        <div class="btnbar" style="margin-top:4px">
+          <button class="btn green" onclick="saveConfig()">保存配置</button>
+          <button class="btn ghost" onclick="loadConfig()">重新读取</button>
+          <button class="btn ghost" onclick="fillDefaults()">填入推荐值</button>
+        </div>
+        <div class="msg" id="cfgMsg"></div>
+      </div>
+
+      <div class="card">
+        <h2><span class="idx">2</span>百度账号授权<small>只需一次，Token 自动续期</small></h2>
+        <div class="steps">
+          <div class="step"><span class="n">1</span><div class="body">
+            <div class="t">打开授权页，登录并确认授权</div>
+            <div class="d"><button class="btn sm" onclick="openAuth()">打开授权页</button></div>
+          </div></div>
+          <div class="step"><span class="n">2</span><div class="body">
+            <div class="t">把页面显示的授权码粘贴到下面</div>
+            <div class="d">
+              <div class="row" style="gap:8px">
+                <div class="field" style="margin:0"><input id="authCode" placeholder="授权成功页面显示的一串码，约 10 分钟内有效" spellcheck="false"></div>
+                <button class="btn sm" onclick="submitCode()">提交</button>
+              </div>
+            </div>
+          </div></div>
+          <div class="step"><span class="n">3</span><div class="body">
+            <div class="t">确认账号与网盘容量</div>
+            <div class="d"><button class="btn ghost sm" onclick="verifyToken()">验证登录状态</button></div>
+          </div></div>
+        </div>
+        <div class="msg" id="authMsg"></div>
+      </div>
+    </div>
+
+    <!-- ============ 右列 ============ -->
+    <div class="col">
+      <div class="card">
+        <h2><span class="idx">3</span>上传控制<small>中断后再次点开始即可续传</small></h2>
+        <div class="btnbar">
+          <button class="btn ghost" onclick="dryrun()" id="btnDry">干跑预览</button>
+          <div class="field sm" style="margin:0;flex:0 0 132px">
+            <label style="margin-bottom:3px">试传数量(0=全部)</label>
+            <input id="limit" type="number" min="0" value="0" style="padding:7px 10px">
+          </div>
+          <div class="spacer"></div>
+          <button class="btn green" id="btnStart" onclick="startUpload()">开始上传</button>
+          <button class="btn danger" id="btnStop" onclick="stopUpload()" disabled>停止</button>
+        </div>
+        <div class="msg" id="ctlMsg"></div>
+
+        <div class="drybox hidden" id="drybox">
+          <div style="margin:12px 0 8px"><span class="tagbox">干跑结果</span><span class="hint" style="display:inline">不会真正上传任何文件</span></div>
+          <pre class="term" id="dryout"></pre>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span class="idx">4</span>实时进度<small>每 2.5 秒刷新</small></h2>
+        <div class="stats">
+          <div class="stat total"><b id="stTotal">—</b><span>待上传</span></div>
+          <div class="stat done"><b id="stDone">—</b><span>已成功</span></div>
+          <div class="stat fail"><b id="stFail">—</b><span>失败</span></div>
+          <div class="stat pct"><b id="stPct">—</b><span>完成度</span></div>
+        </div>
+        <div class="barhead"><span id="barLabel">尚未开始</span><span id="barTip"></span></div>
+        <div class="bar" id="bar"><i id="barFill"></i></div>
+        <div class="nowfile" id="nowFile"></div>
+        <pre class="term headroom empty" id="log" data-empty="等待上传任务…暂无日志"></pre>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    面板只监听本机 127.0.0.1，外部无法访问 · 关闭页面或面板都不影响后台上传进程<br>
+    <span class="hint">配置文件、Token、断点记录均保存在本地，请勿提交到公开仓库</span>
+  </footer>
+</div>
+
+<div id="toasts"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+/* ---------- Toast ---------- */
+function toast(text, kind){
+  const el = document.createElement('div');
+  el.className = 'toast' + (kind ? ' ' + kind : '');
+  el.textContent = text;
+  $('toasts').appendChild(el);
+  setTimeout(() => { el.classList.add('fadeout'); setTimeout(() => el.remove(), 320); }, 3600);
+}
+
+function setMsg(id, text, ok){
+  const el = $(id);
+  el.textContent = text || '';
+  el.className = 'msg' + (ok === true ? ' ok' : ok === false ? ' bad' : '');
+  if(text && (ok === true || ok === false)) toast(text, ok ? 'ok' : 'bad');
+}
+
+function toggleSecret(el){
+  const inp = el.previousElementSibling;
+  const show = inp.type === 'password';
+  inp.type = show ? 'text' : 'password';
+  el.textContent = show ? '隐藏' : '显示';
+}
+
+async function api(path, body){
+  const opt = body ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)} : {};
+  const r = await fetch(path, opt);
+  return r.json();
+}
+
+/* ---------- 配置 ---------- */
+const FIELDS = ['app_key','secret_key','local_dir','remote_dir','done_dir','after_upload',
+                'batch_size','batch_pause_sec','file_interval_sec','max_file_size_mb',
+                'recursive','exclude_patterns'];
+
+/* 推荐默认值：海量小文件场景（9.9 万文件 / 21GB）实测调优 */
+const DEFAULTS = {
+  remote_dir: '/apps/baidu_uploader',
+  after_upload: 'keep',
+  batch_size: 500,
+  batch_pause_sec: 5,
+  file_interval_sec: 0.2,
+  max_file_size_mb: 4096,
+  recursive: 'true',
+  exclude_patterns: 'Thumbs.db, desktop.ini, *.tmp, ~$*, *.partial'
+};
+
+function fillDefaults(){
+  Object.entries(DEFAULTS).forEach(([k, v]) => { if($(k)) $(k).value = v; });
+  setMsg('cfgMsg', '已填入推荐值（AppKey/SecretKey 和本地目录需自己填写），记得点「保存配置」');
+}
+
+async function loadConfig(){
+  const d = await api('/api/config');
+  if(!d.ok) return setMsg('cfgMsg', d.msg, false);
+  const c = d.config;
+  FIELDS.forEach(f => {
+    if(!$(f)) return;
+    let v = c[f];
+    if((v === undefined || v === null || v === '') && DEFAULTS[f] !== undefined) v = DEFAULTS[f];
+    $(f).value = v !== undefined ? v : '';
+  });
+  if(Array.isArray(c.exclude_patterns)) $('exclude_patterns').value = c.exclude_patterns.join(', ');
+  $('recursive').value = String(!!c.recursive);
+  setMsg('cfgMsg', '', null);
+  refreshTokenChip();
+}
+
+async function saveConfig(){
+  const c = {};
+  FIELDS.forEach(f => { if($(f)) c[f] = $(f).value; });
+  c.batch_size = +c.batch_size; c.batch_pause_sec = +c.batch_pause_sec;
+  c.file_interval_sec = +c.file_interval_sec; c.max_file_size_mb = +c.max_file_size_mb;
+  c.recursive = c.recursive === 'true';
+  c.exclude_patterns = c.exclude_patterns.split(',').map(s=>s.trim()).filter(Boolean);
+  const d = await api('/api/config', {config:c});
+  setMsg('cfgMsg', d.msg, d.ok);
+  if(d.ok) refreshTokenChip();
+}
+
+/* ---------- 授权 ---------- */
+async function refreshTokenChip(){
+  let d;
+  try { d = await api('/api/authurl'); } catch(e){ return null; }
+  const chip = $('tokenChip');
+  if(d.has_token){
+    chip.innerHTML = '<span class="dot"></span>已授权';
+    chip.className = 'chip ok';
+  } else {
+    chip.innerHTML = '<span class="dot"></span>未授权';
+    chip.className = 'chip bad';
+  }
+  return d;
+}
+
+async function openAuth(){
+  const d = await refreshTokenChip();
+  if(d && d.url) window.open(d.url, '_blank');
+  setMsg('authMsg', '已打开授权页：登录后点确认，把显示的授权码粘贴回来再提交', true);
+}
+
+async function submitCode(){
+  const code = $('authCode').value.trim();
+  if(!code) return setMsg('authMsg', '请先填写授权码', false);
+  const d = await api('/api/login', {code});
+  setMsg('authMsg', d.msg, d.ok);
+  if(d.ok){ $('authCode').value = ''; refreshTokenChip(); }
+}
+
+async function verifyToken(){
+  const d = await api('/api/verify');
+  setMsg('authMsg', (d.ok ? '已登录：' : '') + d.msg, d.ok);
+  refreshTokenChip();
+}
+
+/* ---------- 上传控制 ---------- */
+async function startUpload(){
+  const d = await api('/api/start', {limit: +($('limit').value || 0)});
+  setMsg('ctlMsg', d.msg, d.ok);
+  if(d.ok){ $('drybox').classList.add('hidden'); pollNow(); }
+}
+
+async function stopUpload(){
+  if(!confirm('确定停止上传？\n已成功的文件会保留记录，之后可以断点续传。')) return;
+  const d = await api('/api/stop');
+  setMsg('ctlMsg', d.msg, d.ok);
+}
+
+async function dryrun(){
+  $('btnDry').disabled = true;
+  $('btnDry').textContent = '分析中…';
+  setMsg('ctlMsg', '干跑分析中，文件多时可能要等半分钟…');
+  try{
+    const d = await api('/api/dryrun');
+    const el = $('dryout');
+    el.textContent = d.output || d.msg || '(无输出)';
+    el.classList.toggle('empty', !el.textContent.trim());
+    $('drybox').classList.remove('hidden');
+    setMsg('ctlMsg', d.ok ? '干跑完成，结果见下方' : '干跑失败', d.ok);
+  } finally {
+    $('btnDry').disabled = false;
+    $('btnDry').textContent = '干跑预览';
+  }
+}
+
+/* ---------- 进度轮询 ---------- */
+let lastLog = '';
+function renderProgress(d){
+  const p = d.progress || {};
+  const total = p.total ?? 0, done = p.done ?? 0, fail = p.failed ?? 0;
+  if(total > 0){
+    const pct = Math.min(100, Math.floor((done + fail) / total * 100));
+    $('stTotal').textContent = total.toLocaleString();
+    $('stDone').textContent = done.toLocaleString();
+    $('stFail').textContent = fail.toLocaleString();
+    $('stPct').textContent = pct + '%';
+    $('barFill').style.width = pct + '%';
+    $('barLabel').textContent = (done + fail).toLocaleString() + ' / ' + total.toLocaleString() + ' 个文件';
+    $('barTip').textContent = p.finished ? '已结束' : '处理中';
+    $('nowFile').textContent = p.finished
+      ? '✔ 本轮任务已完成'
+      : (p.current ? '正在处理：' + p.current : '');
+  } else if(!d.running){
+    $('barLabel').textContent = '尚未开始';
+    $('barTip').textContent = '';
+  }
+  $('bar').classList.toggle('anim', !!d.running);
+
+  const logText = d.log || '';
+  $('log').classList.toggle('empty', !logText.trim());
+  if(logText !== lastLog){
+    lastLog = logText;
+    const el = $('log');
+    el.textContent = logText;
+    el.scrollTop = el.scrollHeight;   // 自动滚到底
+  }
+
+  const running = d.running;
+  $('btnStart').disabled = running;
+  $('btnStop').disabled = !running;
+  $('btnDry').disabled = running;
+}
+
+async function pollNow(){
+  try{ const d = await api('/api/progress'); renderProgress(d); }catch(e){}
+}
+
+loadConfig();
+pollNow();
+setInterval(pollNow, 2500);
+</script>
+</body>
+</html>
