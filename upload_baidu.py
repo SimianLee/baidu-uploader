@@ -19,6 +19,7 @@
 """
 
 import argparse
+import atexit
 import fnmatch
 import hashlib
 import json
@@ -48,6 +49,7 @@ if sys.platform == "win32":
 DEFAULT_CHUNK_MB = 4          # 百度分片上传标准分片 4MB
 TOKEN_FILE = "token.json"     # 与脚本放一起
 DONE_LOG = "uploaded_log.json"  # 断点记录：已成功上传的本地文件清单
+PID_FILE = "upload.pid"       # 上传进程锁：网页重启后也能认出"还有一个上传在跑"
 
 # 常见错误码（够用为主，其余原样打印）
 ERRNO_MAP = {
@@ -92,6 +94,50 @@ def errno_msg(errno) -> str:
     if errno is None:
         return "未知错误（无 errno）"
     return f"errno={errno} {ERRNO_MAP.get(errno, '未收录的错误码，请到百度开放平台文档查询')}"
+
+
+def pid_alive(pid: int) -> bool:
+    """跨进程判断 PID 是否还活着（Windows 用 OpenProcess，避开 os.kill 的语义差异）"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        try:
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+                return True
+            return False
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def acquire_pidfile(path: Path):
+    """占住进程锁：已有活着的上传进程就返回 (False, 那个PID)，否则写入自己的 PID 并注册退出清理"""
+    if path.exists():
+        try:
+            old = int(path.read_text(encoding="utf-8").strip())
+        except Exception:
+            old = -1
+        if pid_alive(old):
+            return False, old
+    path.write_text(str(os.getpid()), encoding="utf-8")
+    me = os.getpid()
+
+    def _cleanup():
+        try:
+            if path.exists() and path.read_text(encoding="utf-8").strip() == str(me):
+                path.unlink()
+        except Exception:
+            pass
+    atexit.register(_cleanup)
+    return True, me
 
 
 # ---------------- 授权（设备码扫码） ----------------
@@ -354,34 +400,72 @@ class PanApi:
 
 # ---------------- 文件收集 ----------------
 def collect_files(cfg, root: Path):
-    """收集待上传文件：按配置过滤、按大小分拣，返回 (待上传, 超大跳过) 两个列表"""
+    """收集待上传文件：按配置过滤、按大小分拣。
+    返回 (待上传, 超大跳过, 统计) —— 统计用于在"扫到 0 个"时说清楚到底卡在哪一步。"""
     patterns = cfg.get("exclude_patterns", ["Thumbs.db", "desktop.ini", "*.tmp", "~$*"])
     max_mb = cfg.get("max_file_size_mb", 4096)
     recursive = cfg.get("recursive", True)
     max_bytes = max_mb * 1024 * 1024
     to_upload, too_big = [], []
+    stats = {"scanned": 0, "excluded": 0, "empty": 0, "subdirs": 0}
 
     it = root.rglob("*") if recursive else root.glob("*")
     for p in sorted(it):
         if not p.is_file():
+            if p.is_dir() and p.parent == root:
+                stats["subdirs"] += 1
             continue
+        stats["scanned"] += 1
         # 排除脚本自身产生的记录文件
         if p.name in (DONE_LOG, TOKEN_FILE):
             continue
         rel = p.relative_to(root)
         if any(fnmatch.fnmatch(p.name, pat) or fnmatch.fnmatch(str(rel), pat)
                for pat in patterns):
+            stats["excluded"] += 1
             print(f"[跳过-排除规则] {rel}")
             continue
         size = p.stat().st_size
         if size == 0:
+            stats["empty"] += 1
             print(f"[跳过-空文件] {rel}")
             continue
         if size > max_bytes:
             too_big.append((p, size))
             continue
         to_upload.append((p, size))
-    return to_upload, too_big
+    return to_upload, too_big, stats
+
+
+def explain_empty(stats, cfg, root: Path, skipped_done: int, too_big_n: int):
+    """扫到 0 个待上传文件时，把可能的原因一条条讲清楚（避免只丢一句'收工'让人一头雾水）"""
+    recursive = cfg.get("recursive", True)
+    print("\n" + "=" * 56)
+    print("[提示] 本次没有需要上传的文件。排查信息如下：")
+    print(f"  扫描模式    ：{'当前目录 + 所有子目录' if recursive else '仅当前目录下的文件'}")
+    print(f"  扫到的文件数：{stats['scanned']}")
+    print(f"  其中被排除  ：{stats['excluded']}   空文件：{stats['empty']}")
+    print(f"  超大跳过    ：{too_big_n}   此前已上传过：{skipped_done}")
+    if not recursive:
+        sub = stats.get("subdirs", 0)
+        deep = 0
+        for _dp, _dn, fn in os.walk(root):
+            deep += len(fn)
+        if sub and deep > stats["scanned"]:
+            print("\n  ⚠ 很可能是这里：当前只扫顶层目录，而该目录下有 "
+                  f"{sub} 个子目录、里面共 {deep} 个文件。")
+            print("     把「上传范围」改成【当前目录 + 所有子目录】再试。")
+        elif not sub:
+            print("\n  该目录下确实没有任何文件/子目录，换个本地目录试试。")
+    else:
+        if stats["scanned"] == 0:
+            print("\n  整个目录里一个文件都没有（含子目录），换个本地目录试试。")
+        elif skipped_done >= stats["scanned"]:
+            print("\n  扫描到的文件此前全都上传成功过了 —— 属于正常情况，真的传完了。")
+            print(f"  断点记录：{cfg.get('_cfg_dir', '.')}/uploaded_log.txt（删掉可强制重传）")
+        else:
+            print("\n  文件被排除规则/空文件/超大文件过滤掉了，可到配置里放宽条件。")
+    print("=" * 56)
 
 
 # ---------------- 上传后处理（手动确认） ----------------
@@ -498,7 +582,10 @@ def main():
                         done_log_txt.read_text(encoding="utf-8-sig").splitlines() if ln)
 
     print(f"扫描本地目录: {root}")
-    to_upload, too_big = collect_files(cfg, root)
+    print(f"扫描模式: {'当前目录 + 所有子目录'
+                     if cfg.get('recursive', True) else '仅当前目录下的文件（不含子目录）'}")
+    cfg["_cfg_dir"] = str(cfg_path.parent)
+    to_upload, too_big, stats = collect_files(cfg, root)
 
     # 超大文件清单：宁可跳过也不浪费上传时间
     if too_big:
@@ -523,6 +610,9 @@ def main():
     # 干跑：只出计划
     if args.dry_run:
         total_size = sum(s for _, s in pending)
+        print(f"\n[干跑] 扫描 {stats['scanned']} 个文件 → 排除 {stats['excluded']} / "
+              f"空文件 {stats['empty']} / 超大 {len(too_big)} / 已传过 {skipped} / "
+              f"待上传 {len(pending)}")
         if not args.quiet:
             print(f"\n[干跑] 共 {len(pending)} 个待上传文件，按每批 {batch_size} 个分组，批间暂停 {batch_pause}s：")
             for i in range(0, len(pending), batch_size):
@@ -535,10 +625,19 @@ def main():
                     print(f"     ... 其余 {len(batch)-5} 个略")
         print(f"\n[干跑] 合计 {len(pending)} 个文件, 总大小 {human_size(total_size)}，"
               f"分 {(len(pending)+batch_size-1)//batch_size} 批")
+        if not pending:
+            explain_empty(stats, cfg, root, skipped, len(too_big))
         return
 
     if not pending:
-        print("\n没有需要上传的文件，收工。")
+        explain_empty(stats, cfg, root, skipped, len(too_big))
+        return
+
+    # 进程锁：防止网页重启后重复起第二个上传进程（会导致同一批文件被传两遍）
+    got, owner = acquire_pidfile(cfg_path.parent / PID_FILE)
+    if not got:
+        print(f"[提示] 已有一个上传进程在跑（PID {owner}），本次不再重复启动。")
+        print("      要换参数重传，先关掉它：网页点「停止」，或任务管理器结束该 PID。")
         return
 
     print(f"\n开始上传：共 {len(pending)} 个文件，每批 {batch_size} 个，批间暂停 {batch_pause} 秒")

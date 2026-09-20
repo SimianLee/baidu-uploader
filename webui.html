@@ -364,6 +364,7 @@
               <option value="true">当前目录 + 所有子目录</option>
               <option value="false">仅当前目录下的文件</option>
             </select>
+            <div class="hint" id="recHint"></div>
           </div>
           <div class="field">
             <label>排除规则</label>
@@ -516,6 +517,20 @@ const DEFAULTS = {
   exclude_patterns: 'Thumbs.db, desktop.ini, *.tmp, ~$*, *.partial'
 };
 
+/* 「上传范围」的实时提示：选"仅顶层"是最容易踩的坑（文件都在子目录时会扫出 0 个） */
+function updateRecHint(){
+  const el = $('recursive'), h = $('recHint');
+  if(!el || !h) return;
+  if(el.value === 'true'){
+    h.style.color = '';
+    h.textContent = '逐层往下扫所有子目录里的文件（绝大多数情况选这个）。';
+  }else{
+    h.style.color = '#ffc861';
+    h.innerHTML = '⚠ 只扫顶层那一层：如果文件都在子目录里，扫描结果会是 0 个，'
+                + '干跑和上传都会直接"收工"。踩过这个坑的话改回上一项。';
+  }
+}
+
 function fillDefaults(){
   Object.entries(DEFAULTS).forEach(([k, v]) => { if($(k)) $(k).value = v; });
   setMsg('cfgMsg', '已填入推荐值（AppKey/SecretKey 和本地目录需自己填写）');
@@ -534,6 +549,7 @@ async function loadConfig(){
   });
   if(Array.isArray(c.exclude_patterns)) $('exclude_patterns').value = c.exclude_patterns.join(', ');
   $('recursive').value = String(!!c.recursive);
+  updateRecHint();
   setMsg('cfgMsg', '', null);
   refreshTokenChip();
 }
@@ -707,11 +723,16 @@ function renderProgress(d){
     $('stPct').textContent = pct + '%';
     $('barFill').style.width = pct + '%';
     $('barLabel').textContent = (done + fail).toLocaleString() + ' / ' + total.toLocaleString() + ' 个文件';
-    $('barTip').textContent = p.finished ? '已结束' : '处理中';
+    const state = p.finished ? '已结束' : (d.running ? '处理中' : '已停止（可续传）');
+    $('barTip').textContent = state + (d.pid ? ' · PID ' + d.pid : '');
     $('nowFile').textContent = p.finished
       ? '✔ 本轮任务已完成'
-      : (p.current ? '正在处理：' + p.current : '');
-  } else if(!d.running){
+      : (d.running ? (p.current ? '正在处理：' + p.current : '')
+                   : '已停止，点「开始上传」可从断点继续');
+  } else if(d.running){
+    $('barLabel').textContent = '正在扫描目录…（9 万级文件约需半分钟）';
+    $('barTip').textContent = d.pid ? 'PID ' + d.pid : '';
+  } else {
     $('barLabel').textContent = '尚未开始';
     $('barTip').textContent = '';
   }

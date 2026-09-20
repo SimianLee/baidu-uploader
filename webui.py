@@ -26,6 +26,7 @@ TOKEN = PROJ / "token.json"
 LOGFILE = PROJ / "upload.log"
 PROGRESS = PROJ / "progress.json"
 HTMLFILE = PROJ / "webui.html"
+PIDFILE = PROJ / "upload.pid"            # 上传进程锁：面板重启也能认出还在跑的上传
 PORT = 8765
 
 # ---------------- 上传子进程管理 ----------------
@@ -36,11 +37,60 @@ def _base_env():
     return {**os.environ, "PYTHONPATH": str(PROJ / "libs")}
 
 
+def pid_alive(pid: int) -> bool:
+    """判断 PID 是否还活着（Windows 用 OpenProcess，避开 os.kill 的语义差异）"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        try:
+            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+                return True
+            return False
+        except Exception:
+            return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def read_pidfile() -> int:
+    """返回锁文件里记录的、且确实活着的上传进程 PID（没有则 0）"""
+    try:
+        if not PIDFILE.exists():
+            return 0
+        pid = int(PIDFILE.read_text(encoding="utf-8").strip())
+        return pid if pid_alive(pid) else 0
+    except Exception:
+        return 0
+
+
+def kill_pid(pid: int) -> bool:
+    """按 PID 结束上传进程（Windows 用 taskkill，带子进程一起收）"""
+    try:
+        if os.name == "nt":
+            r = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, timeout=20)
+            return r.returncode == 0
+        os.kill(pid, 15)
+        return True
+    except Exception:
+        return False
+
+
 def start_upload(limit: int = 0):
     with _state["lock"]:
         p = _state["proc"]
         if p is not None and p.poll() is None:
             return False, "已有上传任务在运行中"
+        # 面板重启过、内存里没记录时，靠 PID 锁文件认出"上一个上传还在跑"
+        other = read_pidfile()
+        if other:
+            return False, f"已有上传任务在运行中（PID {other}）"
         cmd = [PY, "-X", "utf8", "-u", str(PROJ / "upload_baidu.py")]
         if limit and limit > 0:
             cmd += ["--limit", str(limit)]
@@ -59,10 +109,20 @@ def stop_upload():
         if p is not None and p.poll() is None:
             p.terminate()
             return True, "停止信号已发送，进度已保存，可随时续传"
+        # 面板重启后 memory 里没进程对象，改用 PID 锁文件来停
+        other = read_pidfile()
+        if other and kill_pid(other):
+            try:
+                PIDFILE.unlink()
+            except Exception:
+                pass
+            return True, f"已停止上传进程（PID {other}），进度已保存，可随时续传"
         return False, "当前没有运行中的上传任务"
 
 
 def is_running():
+    if read_pidfile():          # 认得出来别的实例/上次启动留下的上传进程
+        return True
     p = _state["proc"]
     return p is not None and p.poll() is None
 
@@ -175,6 +235,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             self._json({"ok": True, "running": is_running(),
+                        "pid": read_pidfile(),
                         "progress": prog, "log": tail_text(LOGFILE)})
         elif path == "/api/authurl":
             # 顺带回传 Token 有效期，页面上好显示"已授权到哪天"，刷新页面不用重新授权
