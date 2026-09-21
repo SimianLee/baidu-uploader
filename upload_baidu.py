@@ -26,7 +26,9 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -94,6 +96,15 @@ def errno_msg(errno) -> str:
     if errno is None:
         return "未知错误（无 errno）"
     return f"errno={errno} {ERRNO_MAP.get(errno, '未收录的错误码，请到百度开放平台文档查询')}"
+
+
+# 多线程下 print 会打串，统一走这个带锁的 log()
+_log_lock = threading.Lock()
+
+
+def log(*a):
+    with _log_lock:
+        print(*a)
 
 
 def pid_alive(pid: int) -> bool:
@@ -263,6 +274,7 @@ class PanApi:
     def __init__(self, auth: BaiduAuth):
         self.auth = auth
         self._dirs_created = set()   # 已确认存在的远程目录缓存（海量小文件场景省掉重复 mkdir）
+        self._dir_lock = threading.Lock()   # 并发下保护目录缓存，避免同一目录重复建
 
     def _get(self, url, params, retry=2):
         """带自动刷新 Token、频控退避的 GET"""
@@ -299,20 +311,21 @@ class PanApi:
 
     # ---- 创建远程目录（父目录会自动创建；带缓存避免海量文件重复建目录） ----
     def mkdir(self, remote_dir: str, quiet: bool = False) -> None:
-        if remote_dir in self._dirs_created:
-            return
-        self._dirs_created.add(remote_dir)  # 无论成败都记下，防止同目录反复请求
+        with self._dir_lock:
+            if remote_dir in self._dirs_created:
+                return
+            self._dirs_created.add(remote_dir)  # 无论成败都记下，防止同目录反复请求
         r = self._post(self.CREATE, {}, data={"path": remote_dir, "isdir": 1, "rtype": 0})
         errno = r.get("errno", 0)
         if quiet and errno in (0, -8, 12):
             return
         if errno == 0:
-            print(f"[OK] 已创建远程目录: {remote_dir}")
+            log(f"[OK] 已创建远程目录: {remote_dir}")
         elif errno in (-8, 12):
             if not quiet:
-                print(f"[OK] 远程目录已存在: {remote_dir}")
+                log(f"[OK] 远程目录已存在: {remote_dir}")
         else:
-            print(f"[警告] 创建远程目录失败: {errno_msg(errno)}（可能已存在，继续尝试上传）")
+            log(f"[警告] 创建远程目录失败: {errno_msg(errno)}（可能已存在，继续尝试上传）")
 
     # ---- 计算分片 MD5 ----
     @staticmethod
@@ -350,9 +363,9 @@ class PanApi:
                 ).json()
                 if "md5" in r:
                     return r["md5"]
-                print(f"    [重试{attempt}] 分片{partseq} 上传异常: {r}")
+                log(f"    [重试{attempt}] 分片{partseq} 上传异常: {r}")
             except Exception as e:
-                print(f"    [重试{attempt}] 分片{partseq} 网络异常: {e}")
+                log(f"    [重试{attempt}] 分片{partseq} 网络异常: {e}")
             time.sleep(3 * attempt)
         raise RuntimeError(f"分片 {partseq} 连续 {max_retry} 次上传失败")
 
@@ -368,11 +381,11 @@ class PanApi:
         })
         errno = r.get("errno", 0)
         if errno != 0:
-            print(f"  [失败] 预上传出错: {errno_msg(errno)}")
+            log(f"  [失败] 预上传出错: {errno_msg(errno)}")
             return False
         # 官方语义：return_type=2 秒传完成；return_type=1 需上传 block_list 指定的分片
         if r.get("return_type") == 2:
-            print(f"  [秒传] 网盘已有相同文件，直接完成")
+            log(f"  [秒传] 网盘已有相同文件，直接完成")
             return True
 
         uploadid = r["uploadid"]
@@ -384,7 +397,8 @@ class PanApi:
                 f.seek(partseq * chunk_size)
                 chunk = f.read(chunk_size)
                 self._upload_part(remote_path, uploadid, partseq, chunk)
-                print(f"    分片进度: {idx}/{total}")
+                if total > 1:      # 单分片的小文件在并发下刷屏，只在多分片时才报进度
+                    log(f"    分片进度: {idx}/{total}")
 
         # 第 3 步：create 合并文件
         r = self._post(self.CREATE, {}, data={
@@ -394,7 +408,7 @@ class PanApi:
         errno = r.get("errno", 0)
         if errno == 0 and ("path" in r or "fs_id" in r):
             return True
-        print(f"  [失败] create 合并出错: {errno_msg(errno)} -> {r}")
+        log(f"  [失败] create 合并出错: {errno_msg(errno)} -> {r}")
         return False
 
 
@@ -533,6 +547,8 @@ def build_argparser():
     ap.add_argument("--dry-run", action="store_true", help="干跑：只列分批计划，不上传")
     ap.add_argument("--quiet", action="store_true", help="干跑时只输出汇总统计，不逐批列出")
     ap.add_argument("--batch-size", type=int, help="临时覆盖每批文件数")
+    ap.add_argument("--workers", type=int,
+                    help="批次内并发上传的线程数（默认取 config 的 workers，推荐 6~8；1=串行）")
     ap.add_argument("--limit", type=int, help="本次最多上传多少个文件（测试用）")
     ap.add_argument("--yes", action="store_true",
                     help="跳过手动确认，直接按配置里的 after_upload 处理（ask 视为 keep）")
@@ -613,6 +629,8 @@ def main():
         print(f"\n[干跑] 扫描 {stats['scanned']} 个文件 → 排除 {stats['excluded']} / "
               f"空文件 {stats['empty']} / 超大 {len(too_big)} / 已传过 {skipped} / "
               f"待上传 {len(pending)}")
+        wrk = args.workers or int(cfg.get("workers", 6) or 1)
+        print(f"[干跑] 上传时并发：{max(1, min(wrk, 32))} 路（想改就在配置里调 workers）")
         if not args.quiet:
             print(f"\n[干跑] 共 {len(pending)} 个待上传文件，按每批 {batch_size} 个分组，批间暂停 {batch_pause}s：")
             for i in range(0, len(pending), batch_size):
@@ -640,9 +658,17 @@ def main():
         print("      要换参数重传，先关掉它：网页点「停止」，或任务管理器结束该 PID。")
         return
 
-    print(f"\n开始上传：共 {len(pending)} 个文件，每批 {batch_size} 个，批间暂停 {batch_pause} 秒")
+    # 并发数：小文件耗时几乎全耗在等网络往返上，并发是唯一的提速手段（实测 8 并发 ≈ 13 倍）
+    workers = args.workers or int(cfg.get("workers", 6) or 1)
+    workers = max(1, min(workers, 32))
+    if workers > 1 and file_interval:
+        print(f"[提示] 并发模式下「文件间隔 {file_interval}s」不再逐个生效（间隔由并发度自然形成）")
+
+    print(f"\n开始上传：共 {len(pending)} 个文件，每批 {batch_size} 个，"
+          f"批次内并发 {workers} 路，批间暂停 {batch_pause} 秒")
     print("(提示：Ctrl+C 可随时中断，已成功的文件下次运行会自动跳过)\n")
 
+    t_start = time.time()
     api.mkdir(remote_base)
     all_uploaded, failed = [], []
     n_batch = (len(pending) + batch_size - 1) // batch_size
@@ -662,22 +688,23 @@ def main():
 
     write_progress()
 
-    for bi in range(n_batch):
-        batch = pending[bi * batch_size:(bi + 1) * batch_size]
-        print(f"\n===== 第 {bi+1}/{n_batch} 批（{len(batch)} 个文件）=====")
-        for p, size in batch:
-            rel = p.relative_to(root)
-            remote_path = f"{remote_base}/{str(rel).replace(chr(92), '/')}"
-            # 远程父目录不存在则先创建（带缓存：同一目录只请求一次）
-            remote_parent = remote_path.rsplit("/", 1)[0]
-            if remote_parent != remote_base:
-                api.mkdir(remote_parent, quiet=True)
-            print(f"-> 上传: {rel} ({human_size(size)})")
-            ok = False
-            try:
-                ok = api.upload_file(p, remote_path, chunk_size)
-            except Exception as e:
-                print(f"  [失败] 异常: {e}")
+    stat_lock = threading.Lock()
+
+    def upload_one(item):
+        """上传单个文件（在线程池里跑）：结果写回共享列表，失败不抛异常"""
+        p, size = item
+        rel = p.relative_to(root)
+        remote_path = f"{remote_base}/{str(rel).replace(chr(92), '/')}"
+        # 远程父目录不存在则先创建（带缓存：同一目录只请求一次）
+        remote_parent = remote_path.rsplit("/", 1)[0]
+        if remote_parent != remote_base:
+            api.mkdir(remote_parent, quiet=True)
+        ok = False
+        try:
+            ok = api.upload_file(p, remote_path, chunk_size)
+        except Exception as e:
+            log(f"  [失败] 异常: {rel} -> {e}")
+        with stat_lock:
             if ok:
                 all_uploaded.append((p, size))
                 done_log.add(str(p))
@@ -686,7 +713,27 @@ def main():
             else:
                 failed.append((p, size))
             write_progress(str(rel))
-            time.sleep(file_interval)  # 单文件间隔，降低频控风险
+        return ok
+
+    for bi in range(n_batch):
+        batch = pending[bi * batch_size:(bi + 1) * batch_size]
+        print(f"\n===== 第 {bi+1}/{n_batch} 批（{len(batch)} 个文件，并发 {workers}）=====")
+        if workers > 1:
+            # 批次内并发：小文件的耗时几乎全在等网络往返，并发是最直接的提速手段
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                list(ex.map(upload_one, batch))
+        else:
+            for it in batch:
+                upload_one(it)
+                if file_interval:
+                    time.sleep(file_interval)   # 单文件间隔，降低频控风险
+        n_done = len(all_uploaded) + len(failed)
+        spent = time.time() - t_start
+        speed = len(all_uploaded) / max(spent, 1)
+        left = len(pending) - n_done
+        eta = left / speed if speed else 0
+        print(f"  [进度] 已完成 {n_done}/{len(pending)}，"
+              f"均速 {speed*3600:.0f} 个/小时，剩余约 {eta/3600:.1f} 小时")
 
         # 批间暂停：模拟非会员"手动分次上传"，避开数量限制
         if bi < n_batch - 1:

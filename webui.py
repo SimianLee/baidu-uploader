@@ -278,7 +278,8 @@ class Handler(BaseHTTPRequestHandler):
             for k in ("app_key", "secret_key", "local_dir", "remote_dir"):
                 if not str(cfg.get(k, "")).strip():
                     return self._json({"ok": False, "msg": f"缺少必填项：{k}"})
-            for k in ("batch_size", "batch_pause_sec", "file_interval_sec", "max_file_size_mb"):
+            for k in ("batch_size", "batch_pause_sec", "file_interval_sec",
+                      "max_file_size_mb", "workers"):
                 try:
                     cfg[k] = int(cfg[k])
                 except Exception:

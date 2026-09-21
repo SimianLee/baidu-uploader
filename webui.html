@@ -375,14 +375,17 @@
 
         <div class="sec">分批策略（针对非会员限制）</div>
         <div class="row">
+          <div class="field sm"><label>并发路数</label><input id="workers" type="number" min="1" max="32" placeholder="8"></div>
           <div class="field sm"><label>每批数量</label><input id="batch_size" type="number" min="1" placeholder="500"></div>
           <div class="field sm"><label>批间暂停(秒)</label><input id="batch_pause_sec" type="number" min="0" placeholder="5"></div>
-          <div class="field sm"><label>文件间隔(秒)</label><input id="file_interval_sec" type="number" min="0" step="0.1" placeholder="0.2"></div>
           <div class="field sm"><label>大小上限(MB)</label><input id="max_file_size_mb" type="number" min="1" placeholder="4096"></div>
         </div>
+        <input id="file_interval_sec" type="hidden" value="0">
         <div class="hint" style="margin-top:-4px">
-          每批 500 · 暂停 5s · 间隔 0.2s 是海量小文件实测最优解；被限流就把「每批数量」调小、暂停调大。
-          大小上限默认 4096MB（非会员单文件上限），超出的文件自动跳过不传。
+          <b>并发路数是最关键的提速项</b>：实测同一批小文件，串行 3.95s/个 → 4 并发 0.44s/个 →
+          8 并发 0.29s/个（快 13 倍，未触发频控）。建议 6~8，跑着稳就往上加；
+          若日志里频繁出现「命中频控 31034」就降到 4。<br>
+          每批 500 · 批间暂停 5s；大小上限 4096MB（非会员单文件上限），超出的自动跳过不传。
         </div>
 
         <div class="divider"></div>
@@ -503,7 +506,7 @@ async function api(path, body){
 /* ---------- 配置 ---------- */
 const FIELDS = ['app_key','secret_key','local_dir','remote_dir','done_dir','after_upload',
                 'batch_size','batch_pause_sec','file_interval_sec','max_file_size_mb',
-                'recursive','exclude_patterns'];
+                'workers','recursive','exclude_patterns'];
 
 /* 推荐默认值：海量小文件场景（9.9 万文件 / 21GB）实测调优 */
 const DEFAULTS = {
@@ -511,8 +514,9 @@ const DEFAULTS = {
   after_upload: 'keep',
   batch_size: 500,
   batch_pause_sec: 5,
-  file_interval_sec: 0.2,
+  file_interval_sec: 0,
   max_file_size_mb: 4096,
+  workers: 8,
   recursive: 'true',
   exclude_patterns: 'Thumbs.db, desktop.ini, *.tmp, ~$*, *.partial'
 };
@@ -568,6 +572,7 @@ function collect(){
   FIELDS.forEach(f => { if($(f)) c[f] = $(f).value; });
   c.batch_size = +c.batch_size; c.batch_pause_sec = +c.batch_pause_sec;
   c.file_interval_sec = +c.file_interval_sec; c.max_file_size_mb = +c.max_file_size_mb;
+  c.workers = +c.workers;
   c.recursive = c.recursive === 'true';
   c.exclude_patterns = c.exclude_patterns.split(',').map(s => s.trim()).filter(Boolean);
   return c;
