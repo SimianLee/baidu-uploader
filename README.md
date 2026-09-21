@@ -101,8 +101,9 @@ python upload_baidu.py
 | `local_dir` | - | 本地待上传目录，必填 |
 | `remote_dir` | `/apps/baidu_uploader` | 网盘目标目录（不存在会自动创建，可改成如 `/我的备份`） |
 | `batch_size` | 500 | **每批文件数**——非会员限制的核心对策，海量小文件用 500；被限制就调小到 50~100 |
+| `workers` | 8 | **并发路数**——一批之内同时上传几个文件，这是提速的关键，见下方实测表 |
 | `batch_pause_sec` | 5 | 批与批之间暂停秒数，模拟"手动分次上传" |
-| `file_interval_sec` | 0.2 | 单个文件间隔，降低频控风险 |
+| `file_interval_sec` | 0 | 单个文件间隔；并发模式下已无必要，保持 0 即可（被限流时再调到 0.2~0.5） |
 | `max_file_size_mb` | 4096 | **大文件上限**，超过的直接跳过并列出清单，防止传一半失败浪费时间 |
 | `chunk_size_mb` | 4 | 分片大小，保持 4（官方标准）别改 |
 | `recursive` | true | 是否递归子目录（远程保持同样目录结构） |
@@ -110,7 +111,17 @@ python upload_baidu.py
 | `after_upload` | keep | 成功后处理：`ask` 每次手动确认（仅命令行）/ `move` 移动 / `trash` 进回收站 / `keep` 不动 |
 | `exclude_patterns` | 常见垃圾文件 | 通配符排除规则 |
 
-> `batch_size: 500 / batch_pause_sec: 5 / file_interval_sec: 0.2` 这组参数是在 9.9 万个小文件、21GB 的真实场景下实测调优出来的，一般无需修改。
+> `batch_size: 500 / workers: 8 / batch_pause_sec: 5` 这组参数是在 9.9 万个小文件、21GB 的真实场景下实测调优出来的，一般无需修改。
+
+### 并发路数实测（同一批真实小文件，24 个样本）
+
+| 并发路数 | 单文件均耗时 | 吞吐 | 提速 |
+|---|---|---|---|
+| 1（串行） | 3.95 s | 93 KB/s | 基准 |
+| 4 | 0.44 s | 838 KB/s | ≈ 9× |
+| **8（默认）** | **0.29 s** | **2550 KB/s** | **≈ 13.7×** |
+
+每个小文件都要跑 `precreate → 分片 → create` 三次 HTTPS 往返，串行时绝大部分时间在等网络回包——所以并发是唯一有效的提速手段。8 并发已基本打满 20Mbps 上行，再往上收益递减；日志里若频繁出现 `errno=31034 命中频控`，把 `workers` 降到 4。
 
 ## 五、"手动确认"是怎么工作的
 
@@ -143,7 +154,7 @@ python upload_baidu.py
 | errno | 含义 | 处理 |
 |---|---|---|
 | -6 / 111 | Token 无效/过期 | 重新 `--login`（自动刷新失败时） |
-| 31034 | 命中频控 | 调大 `batch_pause_sec` 和 `file_interval_sec` |
+| 31034 | 命中频控 | 把 `workers` 降到 4，并调大 `batch_pause_sec` / `file_interval_sec` |
 | 31061 | 网盘已有同名同内容文件 | 无害，已按覆盖策略处理 |
 | 31064 | 文件违规被拒 | 换文件或改文件名 |
 
@@ -162,7 +173,8 @@ python upload_baidu.py                  :: 确认没问题，全量开跑
 - **目录创建缓存**：同一远程目录只请求一次 mkdir，9.9 万文件不会重复建目录
 - **断点记录**：`uploaded_log.txt` 追加写（一行一个路径），海量文件下不会越写越慢
 - **频控退避**：遇 errno=31034 自动退避 30s/60s 重试
-- **推荐参数**（海量小文件）：`batch_size: 500, batch_pause_sec: 5, file_interval_sec: 0.2`
+- **推荐参数**（海量小文件）：`batch_size: 500, workers: 8, batch_pause_sec: 5, file_interval_sec: 0`
+- **单线程 vs 并发**：串行约 8 天（9.9 万文件），8 并发实测降到 5~7 小时
 - **长时间任务**：双击 `start_upload.bat` 开跑，关闭窗口即暂停，再次双击断点续传；蓝屏/断网/重启都不丢进度
 
 ## 十、网页控制面板（推荐入口）

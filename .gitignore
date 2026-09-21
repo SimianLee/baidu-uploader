@@ -25,6 +25,7 @@ __pycache__/
 
 # ---------- 运行产物 / 断点记录 ----------
 upload.log
+upload.log.*
 progress.json
 progress.json.tmp
 uploaded_log.txt

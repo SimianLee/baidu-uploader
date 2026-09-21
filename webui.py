@@ -28,6 +28,7 @@ PROGRESS = PROJ / "progress.json"
 HTMLFILE = PROJ / "webui.html"
 PIDFILE = PROJ / "upload.pid"            # 上传进程锁：面板重启也能认出还在跑的上传
 PORT = 8765
+LOG_MAX_BYTES = 20 * 1024 * 1024         # 日志超过 20MB 就归档，避免长期任务撑爆磁盘
 
 # ---------------- 上传子进程管理 ----------------
 _state = {"proc": None, "lock": threading.Lock()}
@@ -35,6 +36,18 @@ _state = {"proc": None, "lock": threading.Lock()}
 
 def _base_env():
     return {**os.environ, "PYTHONPATH": str(PROJ / "libs")}
+
+
+def rotate_log():
+    """upload.log 超过阈值就归档成 upload.log.1，只留一份旧档"""
+    try:
+        if LOGFILE.exists() and LOGFILE.stat().st_size > LOG_MAX_BYTES:
+            old = PROJ / "upload.log.1"
+            if old.exists():
+                old.unlink()
+            LOGFILE.rename(old)
+    except Exception:
+        pass    # 轮转失败不影响上传本身
 
 
 def pid_alive(pid: int) -> bool:
@@ -95,6 +108,7 @@ def start_upload(limit: int = 0):
         if limit and limit > 0:
             cmd += ["--limit", str(limit)]
         cmd += ["--yes"]   # 无交互环境，跳过末尾手动确认（after_upload 用 move/trash/keep）
+        rotate_log()       # 上一轮日志太大就先归档，本次从新文件开始写
         f = open(LOGFILE, "a", encoding="utf-8")
         f.write(f"\n==== 启动 {time.strftime('%Y-%m-%d %H:%M:%S')} ====\n")
         f.flush()
