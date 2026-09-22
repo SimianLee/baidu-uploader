@@ -511,13 +511,29 @@ def ask_action(uploaded, cfg):
     if mode == "move" and not done_dir:
         print("[警告] 未配置 done_dir，无法移动，文件保留原处")
         return
-    handle_uploaded(uploaded, mode, done_dir)
+    # 没配 done_dir 时传 None，避免回退逻辑把文件移动到当前工作目录
+    handle_uploaded(uploaded, mode, done_dir if cfg.get("done_dir") else None)
 
 
-def handle_uploaded(uploaded, mode, done_dir: Path):
+def handle_uploaded(uploaded, mode, done_dir):
+    """上传成功后的本地文件处理。
+
+    重要：Windows 的 SHFileOperationW 在 C:\\ProgramData 这类系统/隐藏目录下存在
+    已知误报——文件**确实已删除并进了回收站**，API 却返回 ERROR_FILE_NOT_FOUND(2)。
+    （实测：该目录下 20/20 全部删除成功且回收站可还原，但 20/20 全部抛异常）
+    所以这里一律以「文件是否真的不在了」为准，而不是以是否抛异常为准。
+    """
     if mode == "move":
         done_dir.mkdir(parents=True, exist_ok=True)
+
+    n_ok = n_warn = n_fail = 0
+    fails = []
+
     for p, _ in uploaded:
+        if not p.exists():          # 已经被删掉了（比如上一轮处理过）
+            n_ok += 1
+            continue
+        warn = ""                   # 非致命提示：删了但接口报错
         try:
             if mode == "move":
                 dest = done_dir / p.name
@@ -527,15 +543,57 @@ def handle_uploaded(uploaded, mode, done_dir: Path):
                     dest = done_dir / f"{p.stem}({i}){p.suffix}"
                     i += 1
                 shutil.move(str(p), str(dest))
-                print(f"  [已移动] {p.name} -> {dest}")
             elif mode == "trash":
                 if not HAS_SEND2TRASH:
                     print("  [警告] 未安装 send2trash，无法送回收站。pip install send2trash")
                     return
-                send2trash(str(p))
-                print(f"  [回收站] {p.name}")
+                try:
+                    send2trash(str(p))
+                except Exception:
+                    # 大概率是 Windows 在 ProgramData 下的误报，下面按实际结果判定
+                    warn = "接口误报"
         except Exception as e:
             print(f"  [错误] 处理 {p} 失败: {e}")
+            n_fail += 1
+            fails.append(str(p))
+            continue
+
+        # 以磁盘事实为准
+        if not p.exists():
+            n_ok += 1
+            if warn:
+                n_warn += 1
+                if n_warn <= 5:     # 只提示前几条，避免刷屏
+                    print(f"  [回收站·{warn}] {p.name}（文件已删除，Windows 接口返回码不准，可忽略）")
+            elif mode == "move":
+                print(f"  [已移动] {p.name}")
+            else:
+                print(f"  [回收站] {p.name}")
+        else:
+            # 真的没删掉：回退成移动到 done_dir，绝不把文件丢在原地又不说明
+            if mode == "trash" and done_dir:
+                try:
+                    done_dir.mkdir(parents=True, exist_ok=True)
+                    dest = done_dir / p.name
+                    i = 1
+                    while dest.exists():
+                        dest = done_dir / f"{p.stem}({i}){p.suffix}"
+                        i += 1
+                    shutil.move(str(p), str(dest))
+                    print(f"  [回退-已移动] 删除失败，改移动到: {dest}")
+                    n_ok += 1
+                    continue
+                except Exception as e2:
+                    print(f"  [错误] 删除失败且回退移动也失败 {p}: {e2}")
+            else:
+                print(f"  [错误] 处理失败，文件仍在原处: {p}")
+            n_fail += 1
+            fails.append(str(p))
+
+    tag = "已移动" if mode == "move" else "已送回收站"
+    print(f"\n[上传后处理] {tag} {n_ok} 个"
+          + (f"（其中 {n_warn} 个 Windows 接口误报，实际已删除）" if n_warn else "")
+          + (f"，失败 {n_fail} 个" if n_fail else "，无失败"))
 
 
 # ---------------- 主流程 ----------------
