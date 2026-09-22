@@ -153,6 +153,18 @@
   .tab.on{background:#1b2231;border-color:var(--line-hi);color:#e6ebf7;font-weight:500}
   .panel{display:none}
   .panel.on{display:block}
+
+  /* 重名策略分段按钮（改名/整理页签用）：跳过=默认安全，覆盖=红色警示 */
+  .dupseg{display:inline-flex;border:1px solid var(--line-hi);border-radius:8px;
+          overflow:hidden;background:#141926}
+  .segbtn{background:transparent;border:none;color:var(--muted);padding:7px 13px;
+          font-size:12.5px;cursor:pointer;font-family:inherit;transition:.15s;
+          border-right:1px solid var(--line)}
+  .segbtn:last-child{border-right:none}
+  .segbtn:hover{color:#c3cbdd}
+  .segbtn.on{background:#1b2231;color:#e6ebf7;font-weight:500}
+  .segbtn.warn.on{background:#3a1a20;color:var(--red);border-color:#5a2730;font-weight:600}
+
   .oplist{max-height:260px;overflow:auto;font-size:12px;line-height:1.75}
   .oplist div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .oplist .arrow{color:var(--accent);margin:0 6px}
@@ -575,7 +587,7 @@
             </div>
           </div>
           <div class="hint">
-            文件会移动到「归档目录/分类名/」下，源目录保留原样；同名自动跳过，绝不覆盖。
+            文件会移动到「归档目录/分类名/」下；撞到网盘已有的同名文件时，按右侧「重名跳过 / 重名覆盖」按钮的选择处理。
           </div>
         </div>
 
@@ -616,10 +628,17 @@
         <div class="row" style="margin-top:10px">
           <div class="field sm" style="flex:0 0 auto">
             <label>&nbsp;</label>
-            <div class="btnbar" style="align-items:flex-end">
+            <div class="btnbar" style="align-items:flex-end;flex-wrap:wrap">
               <label class="hint" style="display:flex;align-items:center;gap:6px;margin:0 8px 0 0">
                 <input type="checkbox" id="panRecursive" style="width:auto">含子目录
               </label>
+              <div class="dupseg" id="dupBox" style="margin:0 8px 0 0"
+                   title="改名/整理撞到网盘已有的同名文件时：跳过保留旧文件；覆盖则把旧文件挪进备份目录再执行">
+                <button type="button" class="segbtn on" id="dupSkip"
+                        onclick="setDup('skip')">重名跳过</button>
+                <button type="button" class="segbtn warn" id="dupOver"
+                        onclick="setDup('overwrite')">重名覆盖</button>
+              </div>
               <button class="btn ghost" id="btnPanPlan" onclick="panPlan()">生成预览</button>
               <button class="btn green" id="btnPanApply" onclick="panApply()" disabled>执行</button>
             </div>
@@ -964,6 +983,20 @@ let panTab_ = 'rename';       // 当前功能页
 let panOps  = [];             // 当前已生成的待执行操作
 let panTotal = 0;             // 服务端算出的总条数（预览可能被截断）
 
+/* 重名策略：skip=跳过（默认，安全） / overwrite=覆盖（不可恢复） */
+let panDup = 'skip';
+function setDup(v, silent){
+  panDup = v;
+  $('dupSkip').classList.toggle('on', v === 'skip');
+  $('dupOver').classList.toggle('on', v === 'overwrite');
+  if(!silent){
+    setMsg('panMsg', v === 'overwrite'
+      ? '⚠ 已选「重名覆盖」：撞到的旧文件会先挪进「_覆盖备份/时间戳/」目录（可找回），再执行改名/移动'
+      : '已切回「重名跳过」：同名文件保留网盘上已有的，不覆盖',
+      v === 'overwrite' ? false : true);
+  }
+}
+
 function panTab(k){
   panTab_ = k;
   [['rename','tabRename','paneRename'], ['organize','tabOrganize','paneOrganize'],
@@ -971,6 +1004,10 @@ function panTab(k){
     $(tab).classList.toggle('on', key === k);
     $(pane).classList.toggle('on', key === k);
   });
+  // 重名策略选择只在改名/整理页签出现；切页签一律重置回「跳过」，
+  // 避免在改名页选了覆盖、切到别的页签执行时把策略带过去
+  if(typeof setDup === 'function') setDup('skip', true);
+  $('dupBox').classList.toggle('hidden', !(k === 'rename' || k === 'organize'));
   panOps = []; panTotal = 0;
   renderPanPreview([], '');
   $('btnPanApply').disabled = true;
@@ -1095,26 +1132,30 @@ async function panPlan(){
 
   panOps = d.ops || [];
   panTotal = d.total || 0;
+  const dupTxt = panDup === 'overwrite' ? '⚠ 重名将覆盖' : '重名将跳过';
   const tail = `扫描 ${d.scanned} 个文件 → ${panTotal} 条操作`
-    + (d.unchanged ? `（${d.unchanged} 个无变化）` : '');
+    + (d.unchanged ? `（${d.unchanged} 个无变化）` : '')
+    + ` · ${dupTxt}`;
   renderPanPreview(panOps, tail);
   $('btnPanApply').disabled = !panOps.length;
   setMsg('panMsg', panOps.length ? `${tail}，确认后点「执行」` : '没有符合条件的文件', !panOps.length ? false : null);
 }
 
-/* 执行：删除类操作必须二次确认 */
+/* 执行：删除类操作必须二次确认；覆盖模式同样二次确认 */
 async function panApply(){
   if(!panOps.length){ setMsg('panMsg', '没有待执行的操作', false); return; }
   const isDel = panOps.some(o => o.op === 'delete');
   const n = panOps.length;
   const tip = isDel
     ? `⚠ 即将删除 ${n} 个文件，此操作不可撤销。确定继续吗？`
-    : `即将对 ${n} 个文件执行操作，确定继续吗？`;
+    : panDup === 'overwrite'
+    ? `⚠ 即将执行 ${n} 条操作（重名覆盖模式）：撞到的旧文件会先挪进「_覆盖备份」目录再执行，可找回。确定继续吗？`
+    : `即将对 ${n} 个文件执行操作（重名跳过），确定继续吗？`;
   if(!confirm(tip)) return;
 
   $('btnPanApply').disabled = true;
   setMsg('panMsg', '正在执行…', null);
-  const d = await api('/api/pan_apply', {ops: panOps});
+  const d = await api('/api/pan_apply', {ops: panOps, ondup: panDup});
   $('btnPanApply').disabled = false;
   if(!d.ok){ setMsg('panMsg', d.msg, false); return; }
   const st = d.stat || {};

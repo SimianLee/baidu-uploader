@@ -438,12 +438,78 @@ def validate_plan(plan: dict, sandbox: str):
     return good, errs
 
 
-def apply_plan(pan: PanFiles, ops: list):
-    """按类型分组执行计划 → 返回统计"""
-    stat = {"rename": 0, "move": 0, "delete": 0, "fails": []}
+def _find_conflicts(pan: PanFiles, ren, mov):
+    """找出将被 rename/move 撞到的网盘现有文件，返回它们的完整路径列表。
+
+    rename 撞名点 = 源文件所在目录 + newname；move 撞名点 = dest + 源文件名。
+    每个涉及目录只 list 一次（缓存），文件名按小写比较（网盘大小写不敏感）。
+    """
+    targets = {}                       # 目录 -> {小写目标名}
+    for o in ren:
+        d, _, n = o["path"].rpartition("/")
+        targets.setdefault(d, set()).add(o["newname"].lower())
+    for o in mov:
+        targets.setdefault(o["dest"], set()).add(o["path"].rsplit("/", 1)[-1].lower())
+
+    conflicts = []
+    for d, names in targets.items():
+        try:
+            entries = pan.list_dir(d)
+        except Exception:
+            continue                   # 目录不存在=必然不撞名，跳过
+        for e in entries:
+            if e.get("isdir"):
+                continue
+            if e.get("name", "").lower() in names:
+                conflicts.append(f"{d}/{e['name']}")
+    return conflicts
+
+
+def _mkdirs(pan: PanFiles, path: str):
+    """一次建多级目录（百度 create 支持多级路径；已存在返回 True）"""
+    try:
+        return pan.mkdir(path)
+    except Exception:
+        return False
+
+
+def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip"):
+    """按类型分组执行计划 → 返回统计
+
+    ondup: rename/move 撞到同名文件时的策略
+           skip      跳过该条，保留网盘上已有的文件（默认，安全）
+           overwrite 覆盖。注意：百度 filemanager 的 ondup 参数对 rename/move
+                     不生效（实测撞名一律报 -8），所以覆盖用「先挪备份再执行」
+                     实现：被撞的旧文件移动到 沙盒/_覆盖备份/时间戳/原目录结构
+                     下，不删除、可找回，之后原操作就不会撞名了。
+    """
+    stat = {"rename": 0, "move": 0, "delete": 0, "backup": 0,
+            "backup_dir": "", "fails": []}
     ren = [{"path": o["path"], "newname": o["newname"]} for o in ops if o["op"] == "rename"]
     mov = [{"path": o["path"], "dest": o["dest"]} for o in ops if o["op"] == "move"]
     dele = [o["path"] for o in ops if o["op"] == "delete"]
+
+    # 覆盖模式：先找出撞名文件，挪进带时间戳的备份目录（保留原路径结构）
+    if ondup == "overwrite" and (ren or mov):
+        conflicts = _find_conflicts(pan, ren, mov)
+        if conflicts:
+            bdir = f"{pan.sandbox}/_覆盖备份/{time.strftime('%Y%m%d-%H%M%S')}"
+            mv_ops = []
+            for cf in conflicts:
+                rel = cf[len(pan.sandbox) + 1:]
+                bdest = f"{bdir}/{str(PurePosixPath(rel).parent)}"
+                _mkdirs(pan, bdest)
+                mv_ops.append({"path": cf, "dest": bdest})
+            ok, fails = pan.move_batch(mv_ops)
+            stat["backup"] = ok
+            stat["backup_dir"] = bdir
+            stat["fails"] += fails
+            if fails:
+                # 有文件没备份成功就不能继续覆盖（会导致误删），直接返回
+                stat["fails"].insert(0, {"path": bdir,
+                                         "msg": "备份失败，覆盖中止（见下方明细）"})
+                return stat
+            time.sleep(0.5)            # 等索引同步，避免紧跟着的操作读到旧状态
 
     # 移动前先把目标目录都建好（百度 move 不会自动建）
     for d in sorted({m["dest"] for m in mov}):
@@ -453,10 +519,10 @@ def apply_plan(pan: PanFiles, ops: list):
             stat["fails"].append({"path": d, "msg": f"建目录失败 {e}"})
 
     if ren:
-        ok, fails = pan.rename_batch(ren)
+        ok, fails = pan.rename_batch(ren, ondup="skip")
         stat["rename"] = ok; stat["fails"] += fails
     if mov:
-        ok, fails = pan.move_batch(mov)
+        ok, fails = pan.move_batch(mov, ondup="skip")
         stat["move"] = ok; stat["fails"] += fails
     if dele:
         ok, fails = pan.delete_batch(dele)

@@ -418,6 +418,10 @@ class Handler(BaseHTTPRequestHandler):
             ops = body.get("ops")
             if not isinstance(ops, list) or not ops:
                 return self._json({"ok": False, "msg": "没有要执行的操作"})
+            # 重名策略：skip 跳过（默认）/ overwrite 覆盖，其余值一律按 skip
+            ondup = str(body.get("ondup") or "skip").lower()
+            if ondup not in ("skip", "overwrite"):
+                ondup = "skip"
             good, errs = pan_tools.validate_plan({"ops": ops}, sandbox)
             if not good:
                 return self._json({"ok": False, "msg": "计划校验不通过：" + "；".join(errs[:3])})
@@ -426,12 +430,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False,
                                    "msg": f"一次最多执行 2000 条，当前 {len(good)} 条，请缩小范围"})
             try:
-                stat = pan_tools.apply_plan(pan, good)
+                stat = pan_tools.apply_plan(pan, good, ondup=ondup)
             except Exception as e:
                 return self._json({"ok": False, "msg": f"执行失败：{e}"})
             return self._json({"ok": True, "stat": stat, "errors": errs,
                                "msg": (f"完成：改名 {stat['rename']} / 移动 {stat['move']} / "
-                                       f"删除 {stat['delete']}，失败 {len(stat['fails'])}")})
+                                       f"删除 {stat['delete']}，失败 {len(stat['fails'])}"
+                                       + (f"；覆盖旧文件 {stat['backup']} 个（已备份到 {stat['backup_dir']}）"
+                                          if stat.get("backup") else ""))})
 
         # 导出文件清单（给 AI 用）
         if path == "/api/pan_export":
