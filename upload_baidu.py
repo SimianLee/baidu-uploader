@@ -397,7 +397,8 @@ class PanApi:
                 f.seek(partseq * chunk_size)
                 chunk = f.read(chunk_size)
                 self._upload_part(remote_path, uploadid, partseq, chunk)
-                if total > 1:      # 单分片的小文件在并发下刷屏，只在多分片时才报进度
+                # 并发下逐片打印会刷屏：分片多的文件每 8 片记一次，小于 8 片的记首尾
+                if total >= 8 and (idx % 8 == 0 or idx == total):
                     log(f"    分片进度: {idx}/{total}")
 
         # 第 3 步：create 合并文件

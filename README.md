@@ -11,6 +11,7 @@ baidu_uploader/
 ├── .gitignore             # 已排除密钥、Token、依赖、日志
 ├── config.example.json    # 配置模板（复制成 config.json 后填写）
 ├── upload_baidu.py        # 上传主程序（命令行入口）
+├── verify_remote.py       # 上传完成后核对网盘 vs 本地记录（只读）
 ├── webui.py               # 网页控制面板后端（只监听 127.0.0.1）
 ├── webui.html             # 网页控制面板页面
 ├── open_panel.bat         # 双击打开控制面板
@@ -165,7 +166,35 @@ python upload_baidu.py --login
 python upload_baidu.py --dry-run
 python upload_baidu.py --limit 3        :: 先传 3 个试试水
 python upload_baidu.py                  :: 确认没问题，全量开跑
+python verify_remote.py                 :: 跑完后核对网盘与本地是否一致
 ```
+
+## 八·五、上传完怎么确认没漏、没坏（verify_remote.py）
+
+传了几万个文件，最后该删本地还是不敢删？跑一下核对：
+
+```bat
+python verify_remote.py                          :: 核对整个上传目录
+python verify_remote.py --remote /apps/baidu_uploader/子目录名
+python verify_remote.py --sample 50              :: 差异样本多显示点
+```
+
+它做三件事：**递归列出网盘真实文件** → **读本地 `uploaded_log.txt`** → **按相对路径双向比对**，最后给出：
+
+```
+网盘实际文件数   :           101
+本地成功记录数   :           101
+两边一致         :           101
+网盘缺失(需补传) :             0
+网盘多出(未记录) :             0
+✔ 大小抽查：101 个本地仍存在的文件大小全部一致。
+```
+
+- **网盘缺失**：本地记录说传成功了、网盘里却没有 → 真正需要补传的。想补传就把对应行从 `uploaded_log.txt` 删掉再跑上传
+- **网盘多出**：网盘有、本地没记录 → 多半是往轮次遗留，或源文件已被你删掉
+- **大小不一致**：传了一半损坏的会被揪出来（只比对本地仍在的文件）
+
+只读工具，不碰网盘也不碰本地文件。实测一个 101 文件的子目录耗时 2 秒、3 次接口调用；全量 3~8 万文件约几十秒。
 
 ## 九、海量小文件实测备注（本次 9.9 万个文件调优经验）
 
