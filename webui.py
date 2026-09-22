@@ -341,6 +341,132 @@ class Handler(BaseHTTPRequestHandler):
             ok, msg = verify_token()
             return self._json({"ok": ok, "msg": msg})
 
+        # ---------------- 网盘整理 / 批量改名 / 批量删除（沙盒内） ----------------
+        if path in ("/api/pan_browse", "/api/pan_plan", "/api/pan_apply",
+                    "/api/pan_export", "/api/pan_validate"):
+            return self._handle_pan(path, body)
+
+        return self._json({"ok": False, "msg": f"接口不存在：{path}"}, 404)
+
+    # ---------------------------------------------------------------
+    def _pan(self):
+        """构造网盘操作对象（每次请求都重新读 token/config，保证拿到最新值）"""
+        import pan_tools
+        tk = json.loads(TOKEN.read_text(encoding="utf-8-sig")) if TOKEN.exists() else {}
+        if not tk.get("access_token"):
+            raise RuntimeError("还没有授权，请先在上方完成百度账号授权")
+        cfg = json.loads(CONFIG.read_text(encoding="utf-8-sig")) if CONFIG.exists() else {}
+        sandbox = str(cfg.get("remote_dir") or "/apps/baidu_uploader").rstrip("/")
+        return pan_tools.PanFiles(tk["access_token"], sandbox), sandbox
+
+    def _handle_pan(self, path, body):
+        import pan_tools
+        try:
+            pan, sandbox = self._pan()
+        except Exception as e:
+            return self._json({"ok": False, "msg": str(e)})
+
+        # 浏览目录：返回子目录 + 该层文件（限制条数，防止 8 万文件卡死页面）
+        if path == "/api/pan_browse":
+            p = str(body.get("path") or sandbox).strip() or sandbox
+            if p != sandbox and not p.startswith(sandbox + "/"):
+                p = sandbox
+            try:
+                items = pan.list_dir(p, recursive=False)
+            except Exception as e:
+                return self._json({"ok": False, "msg": f"列目录失败：{e}"})
+            dirs = sorted([i for i in items if i["isdir"]], key=lambda x: x["name"])
+            files = sorted([i for i in items if not i["isdir"]], key=lambda x: x["name"])
+            return self._json({"ok": True, "path": p, "sandbox": sandbox,
+                               "dirs": dirs, "files": files[:500],
+                               "file_total": len(files),
+                               "truncated": len(files) > 500})
+
+        # 生成计划（预览，不执行）
+        if path == "/api/pan_plan":
+            kind = str(body.get("kind") or "")
+            p = str(body.get("path") or sandbox).strip() or sandbox
+            recursive = bool(body.get("recursive", False))
+            try:
+                files = pan.list_files(p, recursive=recursive)
+            except Exception as e:
+                return self._json({"ok": False, "msg": f"扫描失败：{e}"})
+            if kind == "rename":
+                ops, unchanged = pan_tools.build_rename_plan(
+                    files, str(body.get("mode") or "replace"), body.get("params") or {})
+                return self._json({"ok": True, "ops": ops[:2000], "total": len(ops),
+                                   "unchanged": len(unchanged), "scanned": len(files)})
+            if kind == "organize":
+                dest = str(body.get("dest") or "").strip()
+                if not dest:
+                    return self._json({"ok": False, "msg": "请填写归档目标目录"})
+                ops = pan_tools.build_organize_plan(
+                    files, str(body.get("by") or "category"), dest, sandbox)
+                return self._json({"ok": True, "ops": ops[:2000], "total": len(ops),
+                                   "scanned": len(files)})
+            if kind == "delete":
+                ops = pan_tools.build_delete_plan(files, body.get("filters") or {})
+                return self._json({"ok": True, "ops": ops[:2000], "total": len(ops),
+                                   "scanned": len(files)})
+            return self._json({"ok": False, "msg": f"未知的计划类型：{kind}"})
+
+        # 执行计划
+        if path == "/api/pan_apply":
+            ops = body.get("ops")
+            if not isinstance(ops, list) or not ops:
+                return self._json({"ok": False, "msg": "没有要执行的操作"})
+            good, errs = pan_tools.validate_plan({"ops": ops}, sandbox)
+            if not good:
+                return self._json({"ok": False, "msg": "计划校验不通过：" + "；".join(errs[:3])})
+            # 安全上限：单次最多 2000 条，避免误操作一次搬空整个网盘
+            if len(good) > 2000:
+                return self._json({"ok": False,
+                                   "msg": f"一次最多执行 2000 条，当前 {len(good)} 条，请缩小范围"})
+            try:
+                stat = pan_tools.apply_plan(pan, good)
+            except Exception as e:
+                return self._json({"ok": False, "msg": f"执行失败：{e}"})
+            return self._json({"ok": True, "stat": stat, "errors": errs,
+                               "msg": (f"完成：改名 {stat['rename']} / 移动 {stat['move']} / "
+                                       f"删除 {stat['delete']}，失败 {len(stat['fails'])}")})
+
+        # 导出文件清单（给 AI 用）
+        if path == "/api/pan_export":
+            p = str(body.get("path") or sandbox).strip() or sandbox
+            recursive = bool(body.get("recursive", True))
+            limit = int(body.get("limit", 300) or 300)
+            try:
+                files = pan.list_files(p, recursive=recursive)
+            except Exception as e:
+                return self._json({"ok": False, "msg": f"扫描失败：{e}"})
+            files = files[:limit]
+            lines = [f'{i+1}\t{f["path"]}\t{f["size"]}' for i, f in enumerate(files)]
+            hint = (
+                f"# 以下是百度网盘沙盒目录 {p} 下的 {len(files)} 个文件（路径\t大小字节）。\n"
+                f"# 请按要求生成操作计划，输出严格的 JSON，格式：\n"
+                f'# {{"ops":[{{"op":"rename","path":"...","newname":"..."}},'
+                f'{{"op":"move","path":"...","dest":"..."}},'
+                f'{{"op":"delete","path":"..."}}]}}\n'
+                f"# 约束：1) path 必须是上面列出的完整路径，不要自造；"
+                f"2) 只允许操作 {sandbox} 内的文件；3) 不要输出解释文字，只输出 JSON。\n")
+            return self._json({"ok": True, "text": hint + "\n".join(lines),
+                               "count": len(files), "total": len(files)})
+
+        # 校验粘贴进来的 AI 计划
+        if path == "/api/pan_validate":
+            txt = str(body.get("text") or "").strip()
+            if not txt:
+                return self._json({"ok": False, "msg": "请粘贴计划 JSON"})
+            try:
+                plan = json.loads(txt)
+            except Exception as e:
+                return self._json({"ok": False, "msg": f"JSON 解析失败：{e}"})
+            good, errs = pan_tools.validate_plan(plan, sandbox)
+            return self._json({"ok": bool(good), "ops": good[:2000],
+                               "total": len(good), "errors": errs,
+                               "msg": (f"解析出 {len(good)} 条合法操作"
+                                       + (f"，{len(errs)} 条被拦截" if errs else ""))})
+
         return self._json({"ok": False, "msg": f"接口不存在：{path}"}, 404)
 
     def do_POST(self):

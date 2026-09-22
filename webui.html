@@ -144,6 +144,21 @@
   .btnbar{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
   .divider{height:1px;background:var(--line);margin:16px -20px}
 
+  /* ---------- 子功能切换标签 ---------- */
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 10px;
+        border-bottom:1px solid var(--line);padding-bottom:8px}
+  .tab{background:transparent;border:1px solid transparent;color:#8d97b0;
+       padding:6px 13px;border-radius:8px;font-size:12.5px;cursor:pointer;
+       font-family:inherit;transition:.15s}
+  .tab:hover{color:#c3cbdd;background:#151a26}
+  .tab.on{background:#1b2231;border-color:var(--line-hi);color:#e6ebf7;font-weight:500}
+  .panel{display:none}
+  .panel.on{display:block}
+  .oplist{max-height:260px;overflow:auto;font-size:12px;line-height:1.75}
+  .oplist div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .oplist .arrow{color:var(--accent);margin:0 6px}
+  .oplist .del{color:var(--red)}
+
   /* ---------- 提示条 ---------- */
   .msg{
     margin-top:11px;font-size:12px;color:var(--muted);min-height:0;word-break:break-all;
@@ -453,6 +468,151 @@
         <div class="nowfile" id="nowFile"></div>
         <pre class="term headroom empty" id="log" data-empty="等待上传任务…暂无日志"></pre>
       </div>
+
+      <!-- ============ 卡片 4：网盘整理 / 改名 / 删除 ============ -->
+      <div class="card">
+        <h2><span class="idx">4</span>网盘整理 · 批量改名 · 批量删除
+          <small>只操作沙盒目录内，越界自动拦截</small></h2>
+
+        <div class="row">
+          <div class="field">
+            <label>操作目录</label>
+            <input id="panPath" placeholder="/apps/baidu_uploader" spellcheck="false">
+          </div>
+          <div class="field" style="flex:0 0 auto;min-width:0">
+            <label>&nbsp;</label>
+            <div class="btnbar" style="align-items:flex-end">
+              <button class="btn ghost" onclick="panBrowse()">浏览</button>
+              <button class="btn ghost" onclick="panUp()">上一级</button>
+            </div>
+          </div>
+        </div>
+        <div class="hint" id="panHint" style="margin-top:-6px">
+          百度开放平台限制：接口只能操作应用沙盒目录，整盘整理需借助 alist。
+        </div>
+        <pre class="term headroom empty" id="panList" data-empty="点「浏览」列出该目录下的子目录与文件"></pre>
+
+        <div class="tabs">
+          <button class="tab on" id="tabRename" onclick="panTab('rename')">批量改名</button>
+          <button class="tab" id="tabOrganize" onclick="panTab('organize')">整理归档</button>
+          <button class="tab" id="tabDelete" onclick="panTab('delete')">批量删除</button>
+          <button class="tab" id="tabAi" onclick="panTab('ai')">AI 计划</button>
+        </div>
+
+        <!-- 改名 -->
+        <div class="panel on" id="paneRename">
+          <div class="row">
+            <div class="field sm" style="flex:0 0 150px">
+              <label>改名模式</label>
+              <select id="rnMode" onchange="panModeChange()">
+                <option value="replace">查找替换</option>
+                <option value="affix">加前后缀</option>
+                <option value="serial">序号重命名</option>
+                <option value="regex">正则替换</option>
+                <option value="clean">去广告/括号清理</option>
+              </select>
+            </div>
+            <div class="field sm" id="rnFindBox">
+              <label>查找</label><input id="rnFind" placeholder="要被替换的文字">
+            </div>
+            <div class="field sm" id="rnReplBox">
+              <label>替换为</label><input id="rnRepl" placeholder="留空=删除">
+            </div>
+            <div class="field sm hidden" id="rnPrefixBox">
+              <label>前缀</label><input id="rnPrefix" placeholder="如 [2026] ">
+            </div>
+            <div class="field sm hidden" id="rnSuffixBox">
+              <label>后缀</label><input id="rnSuffix" placeholder="如  - 终版">
+            </div>
+            <div class="field sm hidden" id="rnStartBox">
+              <label>起始序号</label><input id="rnStart" type="number" value="1">
+            </div>
+            <div class="field sm hidden" id="rnWidthBox">
+              <label>位数</label><input id="rnWidth" type="number" value="3">
+            </div>
+            <div class="field sm hidden" id="rnTplBox">
+              <label>模板</label><input id="rnTpl" value="{n}_{name}">
+            </div>
+            <div class="field sm hidden" id="rnPatternBox">
+              <label>正则</label><input id="rnPattern" placeholder="\.S(\d+)E(\d+)\.">
+            </div>
+            <div class="field sm hidden" id="rnRepl2Box">
+              <label>替换为</label><input id="rnRepl2" placeholder="可用 \1 \2 引用捕获组">
+            </div>
+          </div>
+          <div class="hint" id="rnHint">把文件名里的某串替换成另一串（大小写不敏感）。</div>
+        </div>
+
+        <!-- 整理 -->
+        <div class="panel" id="paneOrganize">
+          <div class="row">
+            <div class="field sm" style="flex:0 0 150px">
+              <label>归档方式</label>
+              <select id="ogBy">
+                <option value="category">按大类（视频/文档/图片…）</option>
+                <option value="ext">按后缀（mp4/pdf…）</option>
+                <option value="date">按修改月份（2026-09）</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>归档到</label>
+              <input id="ogDest" placeholder="/apps/baidu_uploader/归档">
+            </div>
+          </div>
+          <div class="hint">
+            文件会移动到「归档目录/分类名/」下，源目录保留原样；同名自动跳过，绝不覆盖。
+          </div>
+        </div>
+
+        <!-- 删除 -->
+        <div class="panel" id="paneDelete">
+          <div class="row">
+            <div class="field sm"><label>后缀(逗号分隔)</label><input id="dlExts" placeholder="tmp, part, bak"></div>
+            <div class="field sm"><label>文件名含(逗号分隔)</label><input id="dlKw" placeholder="临时, 副本"></div>
+            <div class="field sm"><label>正则</label><input id="dlRegex" placeholder="可选"></div>
+            <div class="field sm"><label>大于(MB)</label><input id="dlMin" type="number" placeholder="0"></div>
+            <div class="field sm"><label>小于(MB)</label><input id="dlMax" type="number" placeholder="0"></div>
+          </div>
+          <div class="hint" style="color:#ff8f8f">
+            ⚠ 删除不可撤销。执行前会列出完整清单，需要你再确认一次。
+          </div>
+        </div>
+
+        <!-- AI 计划 -->
+        <div class="panel" id="paneAi">
+          <div class="btnbar" style="margin-bottom:8px">
+            <button class="btn ghost" onclick="panExport()">导出当前目录文件清单</button>
+            <button class="btn ghost" onclick="copyPanText()">复制到剪贴板</button>
+            <div class="spacer"></div>
+            <span class="hint" id="aiCount"></span>
+          </div>
+          <textarea id="aiText" class="term" rows="7" spellcheck="false"
+            placeholder="① 点「导出」拿到文件清单 → ② 复制到 WorkBuddy 对话里，让 AI 按要求生成操作计划 JSON → ③ 把 JSON 粘贴回这里 → ④ 点「解析并预览」"></textarea>
+          <div class="btnbar" style="margin-top:8px">
+            <button class="btn green" onclick="panParse()">解析并预览</button>
+          </div>
+          <div class="hint">
+            约束会写在导出的文本里：AI 只能用清单里出现过的路径、只能操作沙盒目录、只输出 JSON。
+            解析时会逐条校验，越界或格式错的操作会被拦截并显示。
+          </div>
+        </div>
+
+        <!-- 预览与执行 -->
+        <div class="row" style="margin-top:10px">
+          <div class="field sm" style="flex:0 0 auto">
+            <label>&nbsp;</label>
+            <div class="btnbar" style="align-items:flex-end">
+              <label class="hint" style="display:flex;align-items:center;gap:6px;margin:0 8px 0 0">
+                <input type="checkbox" id="panRecursive" style="width:auto">含子目录
+              </label>
+              <button class="btn ghost" id="btnPanPlan" onclick="panPlan()">生成预览</button>
+              <button class="btn green" id="btnPanApply" onclick="panApply()" disabled>执行</button>
+            </div>
+          </div>
+        </div>
+        <div class="msg" id="panMsg"></div>
+        <div class="oplist term headroom empty" id="panPreview" data-empty="预览区：先选模式再点「生成预览」，确认无误后点「执行」"></div>
+      </div>
     </div>
   </div>
 
@@ -554,6 +714,11 @@ async function loadConfig(){
   if(Array.isArray(c.exclude_patterns)) $('exclude_patterns').value = c.exclude_patterns.join(', ');
   $('recursive').value = String(!!c.recursive);
   updateRecHint();
+  // 卡片4 的「操作目录」默认取上传用的远程目录
+  const rd = String(c.remote_dir || DEFAULTS.remote_dir).replace(/\/+$/, '');
+  if(!$('panPath').value) $('panPath').value = rd;
+  if(!$('ogDest').value) $('ogDest').value = rd + '/归档';
+  $('panHint').textContent = `沙盒根目录：${rd}　·　当前：${$('panPath').value}`;
   setMsg('cfgMsg', '', null);
   refreshTokenChip();
 }
@@ -762,6 +927,215 @@ async function pollNow(){
   try{ const d = await api('/api/progress'); renderProgress(d); }catch(e){}
 }
 
+/* =======================================================================
+   网盘整理 / 批量改名 / 批量删除 / AI 计划
+   全部只操作百度应用沙盒目录，越界在后端 validate_plan 里拦截
+   ======================================================================= */
+let panTab_ = 'rename';       // 当前功能页
+let panOps  = [];             // 当前已生成的待执行操作
+let panTotal = 0;             // 服务端算出的总条数（预览可能被截断）
+
+function panTab(k){
+  panTab_ = k;
+  [['rename','tabRename','paneRename'], ['organize','tabOrganize','paneOrganize'],
+   ['delete','tabDelete','paneDelete'], ['ai','tabAi','paneAi']].forEach(([key, tab, pane]) => {
+    $(tab).classList.toggle('on', key === k);
+    $(pane).classList.toggle('on', key === k);
+  });
+  panOps = []; panTotal = 0;
+  renderPanPreview([], '');
+  $('btnPanApply').disabled = true;
+  setMsg('panMsg', '', null);
+}
+
+/* 改名模式切换：只显示当前模式需要的输入框 */
+function panModeChange(){
+  const m = $('rnMode').value;
+  const show = (id, on) => $(id).classList.toggle('hidden', !on);
+  show('rnFindBox',   m === 'replace');
+  show('rnReplBox',   m === 'replace');
+  show('rnPrefixBox', m === 'affix');
+  show('rnSuffixBox', m === 'affix');
+  show('rnStartBox',  m === 'serial');
+  show('rnWidthBox',  m === 'serial');
+  show('rnTplBox',    m === 'serial');
+  show('rnPatternBox', m === 'regex');
+  show('rnRepl2Box',   m === 'regex');
+  $('rnHint').textContent = {
+    replace: '把文件名里的某串替换成另一串（大小写不敏感）。',
+    affix:   '统一加前缀 / 后缀，扩展名不受影响。',
+    serial:  '按顺序编号。模板里 {n}=序号、{name}=原文件名。',
+    regex:   '正则作用于「文件名（不含扩展名）」，可用 \\1 \\2 引用捕获组。',
+    clean:   '自动去掉网址、广告词、多余括号和空格；清理后为空则保留原名。'
+  }[m] || '';
+}
+
+function esc(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/* 预览区渲染：超过 300 条只画前 300，避免几万条卡死页面 */
+function renderPanPreview(ops, tail){
+  const el = $('panPreview');
+  const rows = ops.slice(0, 300).map(o => {
+    const nm = esc(o.name || o.path.split('/').pop());
+    if(o.op === 'rename')
+      return `<div><span class="del">改名</span> ${nm} <span class="arrow">→</span> ${esc(o.newname)}</div>`;
+    if(o.op === 'move')
+      return `<div><span class="arrow">移动</span> ${nm} <span class="arrow">→</span> ${esc(o.dest)}</div>`;
+    return `<div><span class="del">删除</span> ${nm}</div>`;
+  }).join('');
+  el.innerHTML = rows;
+  el.classList.toggle('empty', !rows);
+  if(rows){
+    const more = ops.length > 300 ? `<div style="color:#4d566c">… 仅显示前 300 条</div>` : '';
+    el.innerHTML = rows + more + (tail ? `<div style="color:#4d566c">${esc(tail)}</div>` : '');
+    el.classList.remove('empty');
+  }
+}
+
+/* 浏览目录 */
+async function panBrowse(){
+  const p = $('panPath').value.trim();
+  setMsg('panMsg', '正在列目录…', null);
+  const d = await api('/api/pan_browse', {path: p});
+  if(!d.ok){ setMsg('panMsg', d.msg, false); return; }
+  $('panPath').value = d.path;
+  $('panHint').textContent = `沙盒根目录：${d.sandbox}　·　当前：${d.path}`;
+  const dirs = d.dirs.map(x => `<div><span class="arrow">📁</span> ${esc(x.name)}/</div>`).join('');
+  const files = d.files.map(x => `<div>　${esc(x.name)}　<span style="color:#4d566c">${(x.size/1024).toFixed(1)} KB</span></div>`).join('');
+  const el = $('panList');
+  el.innerHTML = (dirs + files) +
+    (d.truncated ? `<div style="color:#4d566c">… 该层共 ${d.file_total} 个文件，仅列前 500</div>` : '');
+  el.classList.toggle('empty', !dirs && !files);
+  setMsg('panMsg', `列出 ${d.dirs.length} 个子目录、${d.file_total} 个文件`, true);
+}
+
+function panUp(){
+  const cur = $('panPath').value.trim();
+  const sandbox = ($('panHint').textContent.match(/沙盒根目录：(\S+)/) || [])[1];
+  if(!cur) return;
+  if(sandbox && cur === sandbox){ setMsg('panMsg', '已经是沙盒根目录了', null); return; }
+  const up = cur.replace(/\/+$/,'').split('/').slice(0,-1).join('/');
+  $('panPath').value = (sandbox && !up.startsWith(sandbox)) ? sandbox : up;
+  panBrowse();
+}
+
+/* 生成预览（改名 / 整理 / 删除） */
+async function panPlan(){
+  const path = $('panPath').value.trim();
+  const recursive = $('panRecursive').checked;
+  let body = {path, recursive};
+
+  if(panTab_ === 'rename'){
+    const m = $('rnMode').value;
+    body.kind = 'rename';
+    body.mode = m;
+    body.params = ({
+      replace: {find: $('rnFind').value, replace: $('rnRepl').value},
+      affix:   {prefix: $('rnPrefix').value, suffix: $('rnSuffix').value},
+      serial:  {start: +$('rnStart').value || 1, width: +$('rnWidth').value || 3,
+                template: $('rnTpl').value},
+      regex:   {pattern: $('rnPattern').value, repl: $('rnRepl2').value},
+      clean:   {}
+    })[m];
+    if(m === 'replace' && !body.params.find){
+      setMsg('panMsg', '请先填写「查找」内容', false); return;
+    }
+    if(m === 'regex' && !body.params.pattern){
+      setMsg('panMsg', '请先填写正则表达式', false); return;
+    }
+  }else if(panTab_ === 'organize'){
+    const dest = $('ogDest').value.trim();
+    if(!dest){ setMsg('panMsg', '请填写归档目标目录', false); return; }
+    body = {...body, kind: 'organize', by: $('ogBy').value, dest};
+  }else if(panTab_ === 'delete'){
+    body = {...body, kind: 'delete', filters: {
+      exts: $('dlExts').value, keywords: $('dlKw').value,
+      regex: $('dlRegex').value, min_mb: +$('dlMin').value || 0, max_mb: +$('dlMax').value || 0}};
+  }else{
+    setMsg('panMsg', 'AI 计划请直接在下方粘贴 JSON 后点「解析并预览」', null); return;
+  }
+
+  $('btnPanPlan').disabled = true;
+  setMsg('panMsg', '正在扫描网盘并生成计划…', null);
+  const d = await api('/api/pan_plan', body);
+  $('btnPanPlan').disabled = false;
+  if(!d.ok){ setMsg('panMsg', d.msg, false); return; }
+
+  panOps = d.ops || [];
+  panTotal = d.total || 0;
+  const tail = `扫描 ${d.scanned} 个文件 → ${panTotal} 条操作`
+    + (d.unchanged ? `（${d.unchanged} 个无变化）` : '');
+  renderPanPreview(panOps, tail);
+  $('btnPanApply').disabled = !panOps.length;
+  setMsg('panMsg', panOps.length ? `${tail}，确认后点「执行」` : '没有符合条件的文件', !panOps.length ? false : null);
+}
+
+/* 执行：删除类操作必须二次确认 */
+async function panApply(){
+  if(!panOps.length){ setMsg('panMsg', '没有待执行的操作', false); return; }
+  const isDel = panOps.some(o => o.op === 'delete');
+  const n = panOps.length;
+  const tip = isDel
+    ? `⚠ 即将删除 ${n} 个文件，此操作不可撤销。确定继续吗？`
+    : `即将对 ${n} 个文件执行操作，确定继续吗？`;
+  if(!confirm(tip)) return;
+
+  $('btnPanApply').disabled = true;
+  setMsg('panMsg', '正在执行…', null);
+  const d = await api('/api/pan_apply', {ops: panOps});
+  $('btnPanApply').disabled = false;
+  if(!d.ok){ setMsg('panMsg', d.msg, false); return; }
+  const st = d.stat || {};
+  setMsg('panMsg', d.msg + (st.fails && st.fails.length ? `：${st.fails.slice(0,2).join('；')}` : ''), true);
+  panOps = []; panTotal = 0;
+  renderPanPreview([], '');
+  $('btnPanApply').disabled = true;
+  panBrowse();     // 刷新目录列表
+}
+
+/* 导出清单给 AI */
+async function panExport(){
+  $('aiCount').textContent = '正在扫描…';
+  const d = await api('/api/pan_export',
+    {path: $('panPath').value.trim(), recursive: true, limit: 300});
+  if(!d.ok){ setMsg('panMsg', d.msg, false); $('aiCount').textContent = ''; return; }
+  $('aiText').value = d.text;
+  $('aiCount').textContent = `已导出 ${d.count} 个文件`;
+  setMsg('panMsg', '清单已生成，点「复制到剪贴板」后粘到 WorkBuddy 对话里', true);
+}
+
+async function copyPanText(){
+  const t = $('aiText').value;
+  if(!t.trim()){ setMsg('panMsg', '请先点「导出当前目录文件清单」', false); return; }
+  try{
+    await navigator.clipboard.writeText(t);
+    setMsg('panMsg', '已复制到剪贴板', true);
+  }catch(e){
+    $('aiText').select();
+    setMsg('panMsg', '自动复制被浏览器拦截，已全选，请按 Ctrl+C', null);
+  }
+}
+
+/* 解析 AI 返回的 JSON 计划 */
+async function panParse(){
+  const txt = $('aiText').value.trim();
+  if(!txt){ setMsg('panMsg', '请先粘贴 AI 生成的 JSON', false); return; }
+  const d = await api('/api/pan_validate', {text: txt});
+  if(!d.ok){ setMsg('panMsg', d.msg || '计划里没有合法操作', false); }
+  else if(d.errors && d.errors.length){
+    setMsg('panMsg', `${d.msg}：${d.errors.slice(0,3).join('；')}`, null);
+  }else{
+    setMsg('panMsg', d.msg, true);
+  }
+  panOps = d.ops || [];
+  panTotal = d.total || 0;
+  renderPanPreview(panOps, '');
+  $('btnPanApply').disabled = !panOps.length;
+}
+
 /* ---------- 启动：file:// 打开时给出修正指引 ---------- */
 (function initPanel(){
   if(location.protocol === 'file:'){
@@ -775,6 +1149,10 @@ async function pollNow(){
     el.addEventListener('input', scheduleAutoSave);
     el.addEventListener('change', scheduleAutoSave);
   });
+  panModeChange();          // 改名面板：按当前模式显示对应输入框
+  // 卡片4 目录输入框回车即浏览
+  const pp = $('panPath');
+  if(pp) pp.addEventListener('keydown', e => { if(e.key === 'Enter') panBrowse(); });
 })();
 
 loadConfig();
