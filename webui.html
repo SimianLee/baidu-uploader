@@ -165,29 +165,23 @@
   .segbtn.on{background:#1b2231;color:#e6ebf7;font-weight:500}
   .segbtn.warn.on{background:#3a1a20;color:var(--red);border-color:#5a2730;font-weight:600}
 
-  /* 「含子目录」：chip 式勾选，尺寸与右侧「重名跳过/覆盖」分段按钮一致
+  /* 「含子目录」开关：与右侧「重名跳过/覆盖」分段按钮完全同款（同底、同框、同字号、
+     同内边距、同高亮），勾选=按钮点亮。文字由 .dupseg 包裹，只有一个 .segbtn
      注意选择器要写 label.chkchip —— 通用规则 .field label 的特异性更高
      （class+type），会把这里的 inline-flex 覆盖成 block 并带上 margin-bottom */
+  .dupseg > label.chkchip,
   label.chkchip{
-    display:inline-flex;align-items:center;gap:8px;margin:0;padding:7px 13px;
-    border:1px solid var(--line-hi);border-radius:8px;background:#141926;
-    color:var(--muted);font-size:12.5px;font-weight:400;cursor:pointer;user-select:none;
+    display:inline-flex;align-items:center;margin:0;padding:7px 13px;
+    background:#141926;border:none;border-radius:0;color:var(--muted);
+    font-size:12.5px;font-weight:400;cursor:pointer;user-select:none;
+    /* line-height:normal 是关键：<button> 的 UA 样式就是 normal，而 label 会继承
+       body 的 1.6（12.5×1.6=20px），不覆盖就会比按钮高 4px、整组对不齐 */
+    line-height:normal;
     transition:.15s;white-space:nowrap;
   }
-  label.chkchip:hover{border-color:#3d4863;color:#c3cbdd}
+  label.chkchip:hover{color:#c3cbdd}
   label.chkchip input{position:absolute;width:1px;height:1px;opacity:0;margin:0;pointer-events:none}
-  label.chkchip .box{
-    width:15px;height:15px;flex:0 0 15px;border:1.5px solid #3d4658;border-radius:5px;
-    display:grid;place-items:center;transition:.15s;
-  }
-  label.chkchip .box::after{
-    content:"";width:8px;height:4px;margin-top:-2px;
-    border-left:2px solid #fff;border-bottom:2px solid #fff;
-    transform:rotate(-45deg) scale(0);transition:transform .16s cubic-bezier(.4,0,.2,1);
-  }
-  label.chkchip.on{border-color:var(--accent);background:#151d31;color:#dbe6ff}
-  label.chkchip.on .box{border-color:var(--accent);background:var(--accent)}
-  label.chkchip.on .box::after{transform:rotate(-45deg) scale(1)}
+  label.chkchip.on{background:#1b2231;color:#e6ebf7;font-weight:500}
 
   /* 生成预览 / 导出清单的扫描进度条
      目录总数事先不知道，所以用不确定进度条 + 实时计数，不假装有百分比 */
@@ -676,10 +670,12 @@
           <div class="field sm" style="flex:0 0 auto">
             <label>&nbsp;</label>
             <div class="btnbar" style="align-items:flex-end;flex-wrap:wrap">
-              <label class="chkchip" id="recChip"
-                     title="勾选：连同所有子目录一起扫描（文件多时更慢）；不勾选：只处理当前这一层">
-                <input type="checkbox" id="panRecursive"><span class="box"></span>含子目录
-              </label>
+              <div class="dupseg" id="recBox" style="margin:0 8px 0 0"
+                   title="开启：连同所有子目录一起扫描（文件多时更慢）；关闭：只处理当前这一层">
+                <label class="chkchip" id="recChip">
+                  <input type="checkbox" id="panRecursive">含子目录
+                </label>
+              </div>
               <div class="dupseg" id="dupBox" style="margin:0 8px 0 0"
                    title="改名/整理撞到网盘已有的同名文件时：跳过保留旧文件；覆盖则把旧文件挪进备份目录再执行">
                 <button type="button" class="segbtn on" id="dupSkip"
@@ -1329,7 +1325,8 @@ async function panParse(){
     el.addEventListener('change', scheduleAutoSave);
   });
   panModeChange();          // 改名面板：按当前模式显示对应输入框
-  // 「含子目录」chip：高亮状态跟着 checkbox 走（点击 label 由浏览器切换勾选）
+  // 「含子目录」开关（.dupseg 内的单个 .segbtn 式 label）：点亮状态跟着 checkbox 走
+  // 点击整个 label 由浏览器原生切换勾选，所以这里只需同步高亮
   const rc = $('panRecursive');
   if(rc){
     const syncChip = () => $('recChip').classList.toggle('on', rc.checked);
