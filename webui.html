@@ -422,11 +422,11 @@
     <div class="col">
       <div class="card">
         <h2><span class="idx">2</span>上传控制<small>中断后再次点开始即可续传</small></h2>
-        <div class="btnbar">
+        <div class="btnbar" style="align-items:flex-end">
           <button class="btn ghost" onclick="dryrun()" id="btnDry">干跑预览</button>
           <div class="field sm" style="margin:0;flex:0 0 132px">
             <label style="margin-bottom:3px">试传数量(0=全部)</label>
-            <input id="limit" type="number" min="0" value="0" style="padding:7px 10px">
+            <input id="limit" type="number" min="0" value="0" style="padding:8px 10px">
           </div>
           <div class="spacer"></div>
           <button class="btn green" id="btnStart" onclick="startUpload()">开始上传</button>
