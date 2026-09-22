@@ -46,6 +46,17 @@ class PanError(Exception):
     pass
 
 
+class ScanCancelled(Exception):
+    """扫描被用户主动停止（只读操作，没有对网盘做任何改动）
+
+    dirs/files 记录中断时已经走了多远，面板据此回显「已停止（扫了 N 个目录）」。"""
+
+    def __init__(self, dirs: int = 0, files: int = 0):
+        self.dirs = dirs
+        self.files = files
+        super().__init__(f"已停止扫描（已遍历 {dirs} 个目录 / 找到 {files} 个文件）")
+
+
 class PanFiles:
     """百度网盘沙盒内的文件操作封装"""
 
@@ -102,18 +113,24 @@ class PanFiles:
 
     # ---------- 列目录 ----------
     def list_dir(self, path: str, recursive: bool = False, limit: int = 1000,
-                 on_progress=None):
+                 on_progress=None, should_stop=None):
         """列出目录内容；recursive=True 时递归全部子目录。
         返回 [{path, name, size, isdir, mtime}]
 
         on_progress(dirs_done, files_seen, current_dir) 每列完一个目录回调一次。
-        目录总数事先未知，只能报「已处理多少」，面板据此显示扫描进度。"""
+        目录总数事先未知，只能报「已处理多少」，面板据此显示扫描进度。
+
+        should_stop() 返回真值时立刻抛 ScanCancelled 中断扫描（用户点了「停止」）。
+        检查点放在「每层目录开始前」和「同层分页拉取前」——后者保证一个几万条的
+        大目录在翻页途中也能被刹住，而不是必须读完这一层。"""
         root = self.check_path(path)
         out, stack, dirs_done, files_seen = [], [root], 0, 0
         while stack:
             d = stack.pop()
             start = 0
             while True:
+                if should_stop and should_stop():
+                    raise ScanCancelled(dirs_done, files_seen)
                 r = self._get(LIST_URL, {"dir": d, "start": start,
                                          "limit": limit, "order": "name"})
                 if r.get("errno", 0) != 0:
@@ -144,12 +161,16 @@ class PanFiles:
                     pass        # 进度回调只是锦上添花，出错绝不能中断扫描
             if not recursive:
                 break
+        if should_stop and should_stop():       # 收尾前最后一道检查
+            raise ScanCancelled(dirs_done, files_seen)
         return out
 
-    def list_files(self, path: str, recursive: bool = True, on_progress=None):
+    def list_files(self, path: str, recursive: bool = True, on_progress=None,
+                   should_stop=None):
         """只要文件，不要目录"""
         return [f for f in self.list_dir(path, recursive=recursive,
-                                         on_progress=on_progress)
+                                         on_progress=on_progress,
+                                         should_stop=should_stop)
                 if not f["isdir"]]
 
     # ---------- 建目录 ----------

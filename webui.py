@@ -205,13 +205,18 @@ def verify_token():
 # 扫描跑在 /api/pan_plan（或 /api/pan_export）的请求线程里，进度由另一个请求
 # 线程读取，所以用锁保护。ThreadingHTTPServer 保证两边互不阻塞。
 _scan_lock = threading.Lock()
-_scan = {"running": False, "phase": "", "dirs": 0, "files": 0, "path": "", "t0": 0.0}
+_scan = {"running": False, "phase": "", "dirs": 0, "files": 0, "path": "",
+         "t0": 0.0, "stopping": False, "cancelled": False}
+# 「停止」按钮：前端点一下就把这个 Event 置位，扫描线程在每个检查点自己中断。
+# 只能由 Event 通知、不能在别的线程里杀线程——扫描是纯只读的，让它自己退出最安全。
+_scan_cancel = threading.Event()
 
 
 def scan_begin():
+    _scan_cancel.clear()            # 新一轮扫描开始，清掉上一轮遗留的取消请求
     with _scan_lock:
-        _scan.update(running=True, phase="扫描目录", dirs=0, files=0,
-                     path="", t0=time.time())
+        _scan.update(running=True, phase="扫描目录", dirs=0, files=0, path="",
+                     t0=time.time(), stopping=False, cancelled=False)
 
 
 def scan_tick(dirs, files, cur):
@@ -225,9 +230,25 @@ def scan_phase(phase):
         _scan["phase"] = phase
 
 
-def scan_end():
+def scan_request_stop():
+    """前端点「停止」：只置标志，真正中断由扫描线程在下一个检查点完成。
+    返回 False 表示当前没有正在跑的扫描（可能是刚结束，前端据此提示）。"""
     with _scan_lock:
-        _scan["running"] = False
+        if not _scan["running"]:
+            return False
+        _scan["stopping"] = True        # 让前端能显示「正在停止…」
+    _scan_cancel.set()
+    return True
+
+
+def scan_should_stop():
+    return _scan_cancel.is_set()
+
+
+def scan_end(cancelled=False):
+    _scan_cancel.clear()               # 扫描已退出，清掉标志，避免影响下一次
+    with _scan_lock:
+        _scan.update(running=False, stopping=False, cancelled=bool(cancelled))
 
 
 def scan_snapshot():
@@ -391,6 +412,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/pan_plan_progress":
             return self._json({"ok": True, **scan_snapshot()})
 
+        # 停止扫描：同样是纯内存操作，不碰网盘
+        if path == "/api/pan_cancel":
+            stopping = scan_request_stop()
+            return self._json({
+                "ok": True, "stopping": stopping,
+                "msg": "正在停止…" if stopping else "当前没有正在进行的扫描"})
+
         return self._json({"ok": False, "msg": f"接口不存在：{path}"}, 404)
 
     # ---------------------------------------------------------------
@@ -432,14 +460,22 @@ class Handler(BaseHTTPRequestHandler):
             kind = str(body.get("kind") or "")
             p = str(body.get("path") or sandbox).strip() or sandbox
             recursive = bool(body.get("recursive", False))
-            # 递归扫描可能是几千个目录的活儿，把进度摊给前端轮询
+            # 递归扫描可能是几千个目录的活儿，把进度摊给前端轮询；
+            # should_stop 让「停止」按钮能在下一个检查点把它刹住（只读，无副作用）
             scan_begin()
+            cancelled = False
             try:
-                files = pan.list_files(p, recursive=recursive, on_progress=scan_tick)
+                files = pan.list_files(p, recursive=recursive, on_progress=scan_tick,
+                                       should_stop=scan_should_stop)
+            except pan_tools.ScanCancelled as e:
+                cancelled = True
+                return self._json({"ok": False, "cancelled": True, "msg":
+                                   f"已停止扫描（已遍历 {e.dirs} 个目录 / "
+                                   f"找到 {e.files} 个文件），没有做任何改动"})
             except Exception as e:
                 return self._json({"ok": False, "msg": f"扫描失败：{e}"})
             finally:
-                scan_end()
+                scan_end(cancelled=cancelled)
             scan_phase("生成计划")
             if kind == "rename":
                 ops, unchanged = pan_tools.build_rename_plan(
@@ -492,12 +528,19 @@ class Handler(BaseHTTPRequestHandler):
             recursive = bool(body.get("recursive", True))
             limit = int(body.get("limit", 300) or 300)
             scan_begin()
+            cancelled = False
             try:
-                files = pan.list_files(p, recursive=recursive, on_progress=scan_tick)
+                files = pan.list_files(p, recursive=recursive, on_progress=scan_tick,
+                                       should_stop=scan_should_stop)
+            except pan_tools.ScanCancelled as e:
+                cancelled = True
+                return self._json({"ok": False, "cancelled": True, "msg":
+                                   f"已停止扫描（已遍历 {e.dirs} 个目录 / "
+                                   f"找到 {e.files} 个文件），清单未生成"})
             except Exception as e:
                 return self._json({"ok": False, "msg": f"扫描失败：{e}"})
             finally:
-                scan_end()
+                scan_end(cancelled=cancelled)
             files = files[:limit]
             lines = [f'{i+1}\t{f["path"]}\t{f["size"]}' for i, f in enumerate(files)]
             hint = (

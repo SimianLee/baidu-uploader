@@ -193,6 +193,14 @@
   .scantxt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
            font-variant-numeric:tabular-nums}
   .scantime{flex:0 0 auto;color:var(--muted2);font-variant-numeric:tabular-nums}
+  /* 扫描条里的「停止」：小号 + 警示色，与「重名覆盖」同一套红色语义 */
+  .scanstop{
+    flex:0 0 auto;padding:4px 11px;border-radius:7px;cursor:pointer;
+    font-family:inherit;font-size:11.5px;line-height:normal;
+    background:#241317;color:#ff8b95;border:1px solid #5a2730;transition:.15s;
+  }
+  .scanstop:hover:not(:disabled){background:#331a20;color:#ffa8b0;border-color:#7a3541}
+  .scanstop:disabled{background:#191216;color:#a06a72;border-color:#3d2429;cursor:default}
   .spin{
     width:12px;height:12px;flex:0 0 12px;border:2px solid #2b3550;border-top-color:var(--accent);
     border-radius:50%;animation:spin .7s linear infinite;
@@ -693,6 +701,8 @@
             <span class="spin"></span>
             <span class="scantxt" id="scanTxt">正在连接网盘…</span>
             <span class="scantime" id="scanTime"></span>
+            <button type="button" class="scanstop" id="btnScanStop" onclick="panStopScan()"
+                    title="中断这次扫描。扫描是只读的，停下来不会对网盘做任何改动">停止</button>
           </div>
           <div class="scanline"><i></i></div>
         </div>
@@ -1144,10 +1154,43 @@ function panUp(){
    递归扫描网盘可能要遍历几千个目录，期间没有任何反馈会让人以为卡死了。
    后端把进度写进一份内存状态，这里 300ms 拉一次显示。 */
 let scanTimer = null;
+let scanStopping = false;     // 已发出停止请求，等后端在下一个检查点退出
 
 function showScan(on){
   $('scanBar').classList.toggle('hidden', !on);
-  if(on){ $('scanTxt').textContent = '正在连接网盘…'; $('scanTime').textContent = ''; }
+  setScanStopping(false);              // 每次开/关都复位，避免残留「停止中…」
+  if(on){
+    $('scanTxt').textContent = '正在连接网盘…'; $('scanTime').textContent = '';
+    setScanBtnEnabled(true);
+  }
+}
+
+/* 停止按钮的三种形态：可停 / 停止中（禁用）/ 无可停（phase 已进入生成计划） */
+function setScanStopping(on){
+  scanStopping = on;
+  const b = $('btnScanStop'); if(!b) return;
+  b.textContent = on ? '停止中…' : '停止';
+  b.disabled = on;
+}
+
+function setScanBtnEnabled(on){
+  const b = $('btnScanStop'); if(!b) return;
+  if(scanStopping){ b.disabled = true; return; }   // 停止中就别再让它可点了
+  b.disabled = !on;
+}
+
+/* 点「停止」：请求后端让扫描线程在下一个检查点退出。
+   这个请求很快就会返回；真正的收尾由正在等待的 pan_plan / pan_export 那边完成 */
+async function panStopScan(){
+  if(scanStopping) return;
+  setScanStopping(true);
+  $('scanTxt').textContent = '正在停止…（等当前这一层目录读完就中断）';
+  const d = await api('/api/pan_cancel', {});
+  if(!d || !d.ok || !d.stopping){
+    // 扫描已经自己结束了，把按钮放回去，交给 panPlan / panExport 的 finally 收尾
+    setScanStopping(false);
+    toast('扫描已经结束了', null);
+  }
 }
 
 function stopScanPoll(){ if(scanTimer){ clearInterval(scanTimer); scanTimer = null; } }
@@ -1170,10 +1213,23 @@ function startScanPoll(render){
 
 function scanPaint(d, sec){
   const cur = d.path ? d.path.split('/').pop() : '';
-  $('scanTxt').textContent = d.phase === '生成计划'
-    ? `扫描完成（${d.dirs} 个目录 / ${d.files} 个文件），正在生成计划…`
-    : `正在扫描：已遍历 ${d.dirs} 个目录 · 找到 ${d.files} 个文件`
-      + (cur ? ` · 当前 ${cur}` : '');
+  // 扫描阶段才有东西可停；进入「生成计划」后按钮置灰，避免点了没反应像坏了
+  setScanBtnEnabled(d.running && d.phase === '扫描目录');
+  // 只要用户点过停止（不管请求到没到后端），文案就锁定在「正在停止」，
+  // 否则 300ms 一次的轮询会把提示覆盖回「正在扫描…」，看着像点了没反应
+  if(scanStopping || d.stopping){
+    $('scanTxt').textContent =
+      `正在停止…（已遍历 ${d.dirs} 个目录 · 找到 ${d.files} 个文件）`;
+  }else if(!d.running && d.cancelled){
+    // 已经停下来了（这一步是为了不把「被停止」误显示成「扫描完成，正在生成计划」）
+    $('scanTxt').textContent =
+      `已停止（已遍历 ${d.dirs} 个目录 · 找到 ${d.files} 个文件）`;
+  }else{
+    $('scanTxt').textContent = d.phase === '生成计划'
+      ? `扫描完成（${d.dirs} 个目录 / ${d.files} 个文件），正在生成计划…`
+      : `正在扫描：已遍历 ${d.dirs} 个目录 · 找到 ${d.files} 个文件`
+        + (cur ? ` · 当前 ${cur}` : '');
+  }
   $('scanTime').textContent = sec + 's';
 }
 
@@ -1223,7 +1279,8 @@ async function panPlan(){
   }finally{
     stopScanPoll(); showScan(false); $('btnPanPlan').disabled = false;
   }
-  if(!d.ok){ setMsg('panMsg', d.msg, false); return; }
+  // 用户点了「停止」→ 中性提示（这不是报错，扫描是只读的，什么都没改）
+  if(!d.ok){ setMsg('panMsg', d.msg, d.cancelled ? null : false); return; }
 
   panOps = d.ops || [];
   panTotal = d.total || 0;
@@ -1276,7 +1333,11 @@ async function panExport(){
   }finally{
     stopScanPoll(); showScan(false);
   }
-  if(!d.ok){ setMsg('panMsg', d.msg, false); $('aiCount').textContent = ''; return; }
+  if(!d.ok){
+    setMsg('panMsg', d.msg, d.cancelled ? null : false);
+    $('aiCount').textContent = d.cancelled ? '已停止扫描' : '';
+    return;
+  }
   $('aiText').value = d.text;
   $('aiCount').textContent = `已导出 ${d.count} 个文件`;
   setMsg('panMsg', '清单已生成，点「复制到剪贴板」后粘到 WorkBuddy 对话里', true);
