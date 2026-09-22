@@ -52,6 +52,7 @@ DEFAULT_CHUNK_MB = 4          # 百度分片上传标准分片 4MB
 TOKEN_FILE = "token.json"     # 与脚本放一起
 DONE_LOG = "uploaded_log.json"  # 断点记录：已成功上传的本地文件清单
 PID_FILE = "upload.pid"       # 上传进程锁：网页重启后也能认出"还有一个上传在跑"
+MAP_FILE = "upload_map.json"  # 非 mirror 布局的远程名分配记录（断点续传防错位）
 
 # 常见错误码（够用为主，其余原样打印）
 ERRNO_MAP = {
@@ -483,6 +484,95 @@ def explain_empty(stats, cfg, root: Path, skipped_done: int, too_big_n: int):
     print("=" * 56)
 
 
+# ---------------- 目录布局：上传到网盘时的目录组织方式 ----------------
+LAYOUTS = ("mirror", "flat", "by_category", "by_ext")
+LAYOUT_NAMES = {
+    "mirror":      "保持本地目录结构",
+    "flat":        "全部平铺到目标目录（同名自动加序号）",
+    "by_category": "按文件大类分目录（视频/文档/图片…）",
+    "by_ext":      "按扩展名分目录（mp4/pdf/txt…）",
+}
+
+try:
+    # 大类映射复用网盘整理工具里的同一份表，保证「按规则上传」和「按规则整理」口径一致
+    from pan_tools import category_of as _category_of
+except Exception:                       # pan_tools 不在时用内置兜底，不影响上传
+    _FALLBACK_CAT = {"视频": "mp4 mkv avi mov wmv flv rmvb webm m4v iso",
+                     "音频": "mp3 flac wav ape aac ogg wma m4a",
+                     "图片": "jpg jpeg png gif bmp webp tif svg heic psd",
+                     "文档": "pdf doc docx xls xlsx ppt pptx txt md csv epub mobi chm",
+                     "压缩包": "zip rar 7z tar gz bz2 xz cab",
+                     "安装包": "exe msi dmg apk deb rpm"}
+
+    def _category_of(ext: str) -> str:
+        e = (ext or "").lower().lstrip(".")
+        for cat, exts in _FALLBACK_CAT.items():
+            if e in exts.split():
+                return cat
+        return "其它"
+
+
+def build_remote_map(files, root: Path, remote_base: str, layout: str, old_map=None):
+    """给每个文件算出目标远程路径。
+
+    mirror   : remote_base/本地相对路径（默认，网盘长成本地的样子）
+    flat     : 全部平铺进 remote_base 一层
+    by_category / by_ext : 平铺进 remote_base/分类名（或扩展名）/ 一层
+
+    非 mirror 模式下不同子目录的同名文件会撞车：按扫描顺序自动改名为
+    名字(1).ext、名字(2).ext……分配基于**全量文件列表**（files 要传含断点
+    续传时已成功的那部分）+ 历史分配表（upload_map.json）双重确定：
+    断点续传、部分重跑、甚至本地文件已被移走/删除，同一文件都永远得到
+    同一个远程名，已占用的名字绝不复用——防止远程同名互相覆盖错位。
+
+    返回 (mapping, new_names)：
+      mapping   : {Path -> 远程完整路径}，含 files 里的每一个
+      new_names : {本地路径str -> 相对 remote_base 的远程名}（仅本次新分配的）
+    """
+    from collections import defaultdict
+    mapping, new_names = {}, {}
+    used = defaultdict(set)          # 远程子目录 -> 已占用的小写文件名
+
+    if layout == "mirror":
+        for p, _ in files:
+            rel = str(p.relative_to(root)).replace(chr(92), "/")
+            mapping[p] = f"{remote_base}/{rel}"
+        return mapping, new_names
+
+    # 1) 恢复历史分配：名字一旦占用永不释放（哪怕本地文件已被移走/删除）
+    for lp, rel in (old_map or {}).items():
+        sub, _, nm = str(rel).rpartition("/")
+        used[sub].add(nm.lower())
+
+    # 2) 全量顺序分配：历史表里有的直接沿用旧名，保证重跑不错位
+    for p, _ in files:
+        key = str(p)
+        if old_map and key in old_map:
+            rel = str(old_map[key])
+            mapping[p] = f"{remote_base}/{rel}"
+            sub, _, nm = rel.rpartition("/")
+            used[sub].add(nm.lower())
+            continue
+        if layout == "by_category":
+            subdir = _category_of(p.suffix.lstrip("."))
+        elif layout == "by_ext":
+            subdir = (p.suffix.lstrip(".") or "noext").lower()
+        else:                        # flat
+            subdir = ""
+        stem, ext = p.stem, p.suffix
+        name, n = p.name, 0
+        # 同一目标目录内重名（大小写不敏感）就加序号，绝不覆盖
+        while name.lower() in used[subdir]:
+            n += 1
+            name = f"{stem}({n}){ext}"
+        used[subdir].add(name.lower())
+        rel = f"{subdir}/{name}" if subdir else name
+        mapping[p] = f"{remote_base}/{rel}"
+        new_names[key] = rel
+    return mapping, new_names
+
+
+
 # ---------------- 上传后处理（手动确认） ----------------
 def ask_action(uploaded, cfg):
     """上传成功后的处理：ask=逐批询问（默认）/ move / trash / keep"""
@@ -606,6 +696,8 @@ def build_argparser():
     ap.add_argument("--dry-run", action="store_true", help="干跑：只列分批计划，不上传")
     ap.add_argument("--quiet", action="store_true", help="干跑时只输出汇总统计，不逐批列出")
     ap.add_argument("--batch-size", type=int, help="临时覆盖每批文件数")
+    ap.add_argument("--layout", choices=LAYOUTS,
+                    help="目录布局：mirror 镜像本地结构 / flat 平铺 / by_category 按大类 / by_ext 按扩展名")
     ap.add_argument("--workers", type=int,
                     help="批次内并发上传的线程数（默认取 config 的 workers，推荐 6~8；1=串行）")
     ap.add_argument("--limit", type=int, help="本次最多上传多少个文件（测试用）")
@@ -682,6 +774,19 @@ def main():
     chunk_size = cfg.get("chunk_size_mb", DEFAULT_CHUNK_MB) * 1024 * 1024
     remote_base = cfg["remote_dir"].rstrip("/")
 
+    # 目录布局：mirror(镜像本地结构) / flat(平铺) / by_category / by_ext
+    layout = (args.layout or cfg.get("upload_layout") or "mirror").lower()
+    if layout not in LAYOUTS:
+        print(f"[警告] 未知 upload_layout={layout}，按 mirror（保持本地结构）处理")
+        layout = "mirror"
+    # 远程名分配基于**全量扫描结果**（而非 pending）：已传过的文件虽然本次
+    # 不传，但它们占用的远程名不能让给别的同名文件，否则断点续传会错位覆盖
+    map_file = cfg_path.parent / MAP_FILE
+    old_map = load_json(map_file, {}) if layout != "mirror" else {}
+    remote_map, new_names = build_remote_map(to_upload, root, remote_base, layout, old_map)
+    renamed = sum(1 for p, _ in pending
+                  if layout != "mirror" and remote_map[p].rsplit("/", 1)[-1] != p.name)
+
     # 干跑：只出计划
     if args.dry_run:
         total_size = sum(s for _, s in pending)
@@ -690,6 +795,11 @@ def main():
               f"待上传 {len(pending)}")
         wrk = args.workers or int(cfg.get("workers", 6) or 1)
         print(f"[干跑] 上传时并发：{max(1, min(wrk, 32))} 路（想改就在配置里调 workers）")
+        print(f"[干跑] 目录布局：{LAYOUT_NAMES[layout]}"
+              + (f"，其中 {renamed} 个会因重名自动加序号" if renamed else ""))
+        if layout != "mirror":
+            for p, s in pending[:3]:
+                print(f"     例：{p.name}  ->  {remote_map[p]}")
         if not args.quiet:
             print(f"\n[干跑] 共 {len(pending)} 个待上传文件，按每批 {batch_size} 个分组，批间暂停 {batch_pause}s：")
             for i in range(0, len(pending), batch_size):
@@ -710,6 +820,13 @@ def main():
         explain_empty(stats, cfg, root, skipped, len(too_big))
         return
 
+    # 真跑才落盘分配表（干跑不动它）：新分配的名字先占住，
+    # 之后中断重跑会沿用同一批名字，不会因部分成功而整体错位
+    if new_names:
+        merged = dict(old_map or {})
+        merged.update(new_names)
+        save_json(map_file, merged)
+
     # 进程锁：防止网页重启后重复起第二个上传进程（会导致同一批文件被传两遍）
     got, owner = acquire_pidfile(cfg_path.parent / PID_FILE)
     if not got:
@@ -725,6 +842,8 @@ def main():
 
     print(f"\n开始上传：共 {len(pending)} 个文件，每批 {batch_size} 个，"
           f"批次内并发 {workers} 路，批间暂停 {batch_pause} 秒")
+    print(f"目录布局：{LAYOUT_NAMES[layout]}"
+          + (f"（{renamed} 个重名自动加序号）" if renamed else ""))
     print("(提示：Ctrl+C 可随时中断，已成功的文件下次运行会自动跳过)\n")
 
     t_start = time.time()
@@ -753,7 +872,7 @@ def main():
         """上传单个文件（在线程池里跑）：结果写回共享列表，失败不抛异常"""
         p, size = item
         rel = p.relative_to(root)
-        remote_path = f"{remote_base}/{str(rel).replace(chr(92), '/')}"
+        remote_path = remote_map[p]
         # 远程父目录不存在则先创建（带缓存：同一目录只请求一次）
         remote_parent = remote_path.rsplit("/", 1)[0]
         if remote_parent != remote_base:

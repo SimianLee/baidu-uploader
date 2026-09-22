@@ -436,12 +436,28 @@
     <div class="col">
       <div class="card">
         <h2><span class="idx">2</span>上传控制<small>中断后再次点开始即可续传</small></h2>
-        <div class="btnbar" style="align-items:flex-end">
-          <button class="btn ghost" onclick="dryrun()" id="btnDry">干跑预览</button>
-          <div class="field sm" style="margin:0;flex:0 0 132px">
-            <label style="margin-bottom:3px">试传数量(0=全部)</label>
+
+        <div class="row" style="margin-bottom:10px">
+          <div class="field">
+            <label>网盘目录布局</label>
+            <select id="upload_layout" onchange="layoutHint()">
+              <option value="mirror">保持本地目录结构（默认）</option>
+              <option value="flat">全部平铺到目标目录</option>
+              <option value="by_category">按文件大类分目录（视频/文档/图片…）</option>
+              <option value="by_ext">按扩展名分目录（mp4/pdf/txt…）</option>
+            </select>
+          </div>
+          <div class="field sm" style="flex:0 0 210px">
+            <label>试传数量(0=全部)</label>
             <input id="limit" type="number" min="0" value="0" style="padding:8px 10px">
           </div>
+        </div>
+        <div class="hint" id="layoutHint" style="margin-top:-4px">
+          网盘上会按本地的目录结构原样长一份；换布局只影响之后新传的文件。
+        </div>
+
+        <div class="btnbar" style="align-items:flex-end;margin-top:10px">
+          <button class="btn ghost" onclick="dryrun()" id="btnDry">干跑预览</button>
           <div class="spacer"></div>
           <button class="btn green" id="btnStart" onclick="startUpload()">开始上传</button>
           <button class="btn danger" id="btnStop" onclick="stopUpload()" disabled>停止</button>
@@ -665,7 +681,7 @@ async function api(path, body){
 /* ---------- 配置 ---------- */
 const FIELDS = ['app_key','secret_key','local_dir','remote_dir','done_dir','after_upload',
                 'batch_size','batch_pause_sec','file_interval_sec','max_file_size_mb',
-                'workers','recursive','exclude_patterns'];
+                'workers','recursive','exclude_patterns','upload_layout'];
 
 /* 推荐默认值：海量小文件场景（9.9 万文件 / 21GB）实测调优 */
 const DEFAULTS = {
@@ -677,12 +693,12 @@ const DEFAULTS = {
   max_file_size_mb: 4096,
   workers: 8,
   recursive: 'true',
+  upload_layout: 'mirror',
   exclude_patterns: 'Thumbs.db, desktop.ini, *.tmp, ~$*, *.partial'
 };
 
 /* 「上传范围」的实时提示：选"仅顶层"是最容易踩的坑（文件都在子目录时会扫出 0 个） */
-function updateRecHint(){
-  const el = $('recursive'), h = $('recHint');
+function updateRecHint(){  const el = $('recursive'), h = $('recHint');
   if(!el || !h) return;
   if(el.value === 'true'){
     h.style.color = '';
@@ -692,6 +708,19 @@ function updateRecHint(){
     h.innerHTML = '⚠ 只扫顶层那一层：如果文件都在子目录里，扫描结果会是 0 个，'
                 + '干跑和上传都会直接"收工"。踩过这个坑的话改回上一项。';
   }
+}
+
+/* 「网盘目录布局」的实时提示：讲清楚每种布局传上去长什么样 */
+function layoutHint(){
+  const el = $('upload_layout'), h = $('layoutHint');
+  if(!el || !h) return;
+  const tips = {
+    mirror: '网盘上会按本地的目录结构原样长一份；换布局只影响之后新传的文件。',
+    flat:   '所有文件（含子目录里的）都直接放进目标目录这一层；同名文件自动加 (1)(2) 序号，不会互相覆盖。',
+    by_category: '文件按大类分进 目标目录/视频|文档|图片…/ 子目录，本地原来的多层目录结构不再保留。',
+    by_ext: '文件按扩展名分进 目标目录/mp4|pdf|txt…/ 子目录，本地原来的多层目录结构不再保留。'
+  };
+  h.textContent = tips[el.value] || tips.mirror;
 }
 
 function fillDefaults(){
@@ -713,6 +742,7 @@ async function loadConfig(){
   if(Array.isArray(c.exclude_patterns)) $('exclude_patterns').value = c.exclude_patterns.join(', ');
   $('recursive').value = String(!!c.recursive);
   updateRecHint();
+  layoutHint();
   // 卡片4 的「操作目录」默认取上传用的远程目录
   const rd = String(c.remote_dir || DEFAULTS.remote_dir).replace(/\/+$/, '');
   if(!$('panPath').value) $('panPath').value = rd;

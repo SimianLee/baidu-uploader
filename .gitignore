@@ -32,6 +32,7 @@ uploaded_log.txt
 uploaded_log.json
 done_log.json
 upload.pid
+upload_map.json
 *.log
 
 # ---------- 推送日志 ----------

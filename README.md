@@ -92,6 +92,7 @@ python upload_baidu.py
 |---|---|
 | `--batch-size 30` | 临时改每批文件数（默认取配置里的 500） |
 | `--limit 5` | 本次只传前 5 个（小规模试水） |
+| `--layout flat` | 临时改网盘目录布局（mirror/flat/by_category/by_ext，见下表） |
 | `--yes` | 跳过手动确认（`after_upload` 为 ask 时视作保留原处） |
 | `--config xx.json` | 指定别的配置文件 |
 
@@ -109,6 +110,7 @@ python upload_baidu.py
 | `max_file_size_mb` | 4096 | **大文件上限**，超过的直接跳过并列出清单，防止传一半失败浪费时间 |
 | `chunk_size_mb` | 4 | 分片大小，保持 4（官方标准）别改 |
 | `recursive` | true | 是否递归子目录（远程保持同样目录结构） |
+| `upload_layout` | mirror | **网盘目录布局**：`mirror` 按本地目录结构原样长一份 / `flat` 全部平铺进目标目录（同名自动加 (1)(2) 序号） / `by_category` 按文件大类分目录（视频/文档/图片…，与网盘整理功能同一套分类口径） / `by_ext` 按扩展名分目录（mp4/pdf/txt…）。命令行可用 `--layout` 临时覆盖 |
 | `done_dir` | 空 | 上传成功后文件的归档目录；留空则自动取「本地目录同级/已上传」 |
 | `after_upload` | keep | 成功后处理：`ask` 每次手动确认（仅命令行）/ `move` 移动 / `trash` 进回收站 / `keep` 不动 |
 | `exclude_patterns` | 常见垃圾文件 | 通配符排除规则 |

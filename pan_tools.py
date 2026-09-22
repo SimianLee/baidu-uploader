@@ -331,7 +331,7 @@ CATEGORY_MAP = {
 
 
 def category_of(ext: str) -> str:
-    e = (ext or "").lower()
+    e = (ext or "").lower().lstrip(".")   # 传 ".mp4" 或 "mp4" 都能匹配
     for cat, exts in CATEGORY_MAP.items():
         if e in exts:
             return cat

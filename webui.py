@@ -303,6 +303,9 @@ class Handler(BaseHTTPRequestHandler):
             # after_upload 只允许三种（网页端无交互，不支持 ask）
             if cfg.get("after_upload") not in ("keep", "move", "trash"):
                 cfg["after_upload"] = "keep"
+            # upload_layout（网盘目录布局）只允许四种，防手改 config.json 写错
+            if cfg.get("upload_layout") not in ("mirror", "flat", "by_category", "by_ext"):
+                cfg["upload_layout"] = "mirror"
             if not str(cfg.get("done_dir", "")).strip():
                 cfg["done_dir"] = str(Path(cfg["local_dir"]).parent / "已上传")
             CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
