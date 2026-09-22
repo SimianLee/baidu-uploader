@@ -101,11 +101,15 @@ class PanFiles:
         return r
 
     # ---------- 列目录 ----------
-    def list_dir(self, path: str, recursive: bool = False, limit: int = 1000):
+    def list_dir(self, path: str, recursive: bool = False, limit: int = 1000,
+                 on_progress=None):
         """列出目录内容；recursive=True 时递归全部子目录。
-        返回 [{path, name, size, isdir, mtime}]"""
+        返回 [{path, name, size, isdir, mtime}]
+
+        on_progress(dirs_done, files_seen, current_dir) 每列完一个目录回调一次。
+        目录总数事先未知，只能报「已处理多少」，面板据此显示扫描进度。"""
         root = self.check_path(path)
-        out, stack = [], [root]
+        out, stack, dirs_done, files_seen = [], [root], 0, 0
         while stack:
             d = stack.pop()
             start = 0
@@ -124,18 +128,29 @@ class PanFiles:
                         "mtime": it.get("server_mtime") or it.get("local_mtime") or 0,
                     }
                     out.append(rec)
-                    if rec["isdir"] and recursive:
-                        stack.append(rec["path"])
+                    if rec["isdir"]:
+                        if recursive:
+                            stack.append(rec["path"])
+                    else:
+                        files_seen += 1
                 if len(items) < limit:
                     break
                 start += limit
+            dirs_done += 1
+            if on_progress:
+                try:
+                    on_progress(dirs_done, files_seen, d)
+                except Exception:
+                    pass        # 进度回调只是锦上添花，出错绝不能中断扫描
             if not recursive:
                 break
         return out
 
-    def list_files(self, path: str, recursive: bool = True):
+    def list_files(self, path: str, recursive: bool = True, on_progress=None):
         """只要文件，不要目录"""
-        return [f for f in self.list_dir(path, recursive=recursive) if not f["isdir"]]
+        return [f for f in self.list_dir(path, recursive=recursive,
+                                         on_progress=on_progress)
+                if not f["isdir"]]
 
     # ---------- 建目录 ----------
     def mkdir(self, path: str) -> bool:

@@ -165,6 +165,53 @@
   .segbtn.on{background:#1b2231;color:#e6ebf7;font-weight:500}
   .segbtn.warn.on{background:#3a1a20;color:var(--red);border-color:#5a2730;font-weight:600}
 
+  /* 「含子目录」：chip 式勾选，尺寸与右侧「重名跳过/覆盖」分段按钮一致
+     注意选择器要写 label.chkchip —— 通用规则 .field label 的特异性更高
+     （class+type），会把这里的 inline-flex 覆盖成 block 并带上 margin-bottom */
+  label.chkchip{
+    display:inline-flex;align-items:center;gap:8px;margin:0;padding:7px 13px;
+    border:1px solid var(--line-hi);border-radius:8px;background:#141926;
+    color:var(--muted);font-size:12.5px;font-weight:400;cursor:pointer;user-select:none;
+    transition:.15s;white-space:nowrap;
+  }
+  label.chkchip:hover{border-color:#3d4863;color:#c3cbdd}
+  label.chkchip input{position:absolute;width:1px;height:1px;opacity:0;margin:0;pointer-events:none}
+  label.chkchip .box{
+    width:15px;height:15px;flex:0 0 15px;border:1.5px solid #3d4658;border-radius:5px;
+    display:grid;place-items:center;transition:.15s;
+  }
+  label.chkchip .box::after{
+    content:"";width:8px;height:4px;margin-top:-2px;
+    border-left:2px solid #fff;border-bottom:2px solid #fff;
+    transform:rotate(-45deg) scale(0);transition:transform .16s cubic-bezier(.4,0,.2,1);
+  }
+  label.chkchip.on{border-color:var(--accent);background:#151d31;color:#dbe6ff}
+  label.chkchip.on .box{border-color:var(--accent);background:var(--accent)}
+  label.chkchip.on .box::after{transform:rotate(-45deg) scale(1)}
+
+  /* 生成预览 / 导出清单的扫描进度条
+     目录总数事先不知道，所以用不确定进度条 + 实时计数，不假装有百分比 */
+  .scanbar{
+    margin-top:11px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;
+    background:#0f1522;display:flex;flex-direction:column;gap:9px;
+  }
+  .scantop{display:flex;align-items:center;gap:9px;font-size:12px;color:#9fb0d0;min-width:0}
+  .scantxt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+           font-variant-numeric:tabular-nums}
+  .scantime{flex:0 0 auto;color:var(--muted2);font-variant-numeric:tabular-nums}
+  .spin{
+    width:12px;height:12px;flex:0 0 12px;border:2px solid #2b3550;border-top-color:var(--accent);
+    border-radius:50%;animation:spin .7s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .scanline{height:3px;border-radius:99px;background:#12161f;overflow:hidden;position:relative}
+  .scanline i{
+    position:absolute;top:0;bottom:0;left:-40%;width:38%;border-radius:99px;
+    background:linear-gradient(90deg,transparent,#4f7cff,#2fcf94,transparent);
+    animation:sweep 1.3s ease-in-out infinite;
+  }
+  @keyframes sweep{0%{left:-40%}100%{left:102%}}
+
   .oplist{max-height:260px;overflow:auto;font-size:12px;line-height:1.75}
   .oplist div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .oplist .arrow{color:var(--accent);margin:0 6px}
@@ -629,8 +676,9 @@
           <div class="field sm" style="flex:0 0 auto">
             <label>&nbsp;</label>
             <div class="btnbar" style="align-items:flex-end;flex-wrap:wrap">
-              <label class="hint" style="display:flex;align-items:center;gap:6px;margin:0 8px 0 0">
-                <input type="checkbox" id="panRecursive" style="width:auto">含子目录
+              <label class="chkchip" id="recChip"
+                     title="勾选：连同所有子目录一起扫描（文件多时更慢）；不勾选：只处理当前这一层">
+                <input type="checkbox" id="panRecursive"><span class="box"></span>含子目录
               </label>
               <div class="dupseg" id="dupBox" style="margin:0 8px 0 0"
                    title="改名/整理撞到网盘已有的同名文件时：跳过保留旧文件；覆盖则把旧文件挪进备份目录再执行">
@@ -643,6 +691,14 @@
               <button class="btn green" id="btnPanApply" onclick="panApply()" disabled>执行</button>
             </div>
           </div>
+        </div>
+        <div class="scanbar hidden" id="scanBar">
+          <div class="scantop">
+            <span class="spin"></span>
+            <span class="scantxt" id="scanTxt">正在连接网盘…</span>
+            <span class="scantime" id="scanTime"></span>
+          </div>
+          <div class="scanline"><i></i></div>
         </div>
         <div class="msg" id="panMsg"></div>
         <div class="oplist term headroom empty" id="panPreview" data-empty="预览区：先选模式再点「生成预览」，确认无误后点「执行」"></div>
@@ -1088,6 +1144,43 @@ function panUp(){
   panBrowse();
 }
 
+/* ---------- 扫描进度（生成预览 / 导出清单期间轮询后端） ----------
+   递归扫描网盘可能要遍历几千个目录，期间没有任何反馈会让人以为卡死了。
+   后端把进度写进一份内存状态，这里 300ms 拉一次显示。 */
+let scanTimer = null;
+
+function showScan(on){
+  $('scanBar').classList.toggle('hidden', !on);
+  if(on){ $('scanTxt').textContent = '正在连接网盘…'; $('scanTime').textContent = ''; }
+}
+
+function stopScanPoll(){ if(scanTimer){ clearInterval(scanTimer); scanTimer = null; } }
+
+/* render(state, 已耗时秒) 可覆盖：导出清单时把进度画到 aiCount 上 */
+function startScanPoll(render){
+  stopScanPoll();
+  const t0 = Date.now();
+  let sawRunning = false;      // 先确认这次扫描真的跑起来了，否则会画到上一轮的残留快照
+  const tick = async () => {
+    const d = await api('/api/pan_plan_progress');
+    if(!d || !d.ok) return;
+    if(d.running) sawRunning = true;
+    else if(!sawRunning) return;
+    (render || scanPaint)(d, ((Date.now() - t0) / 1000).toFixed(0));
+  };
+  tick();
+  scanTimer = setInterval(tick, 300);
+}
+
+function scanPaint(d, sec){
+  const cur = d.path ? d.path.split('/').pop() : '';
+  $('scanTxt').textContent = d.phase === '生成计划'
+    ? `扫描完成（${d.dirs} 个目录 / ${d.files} 个文件），正在生成计划…`
+    : `正在扫描：已遍历 ${d.dirs} 个目录 · 找到 ${d.files} 个文件`
+      + (cur ? ` · 当前 ${cur}` : '');
+  $('scanTime').textContent = sec + 's';
+}
+
 /* 生成预览（改名 / 整理 / 删除） */
 async function panPlan(){
   const path = $('panPath').value.trim();
@@ -1125,9 +1218,15 @@ async function panPlan(){
   }
 
   $('btnPanPlan').disabled = true;
-  setMsg('panMsg', '正在扫描网盘并生成计划…', null);
-  const d = await api('/api/pan_plan', body);
-  $('btnPanPlan').disabled = false;
+  setMsg('panMsg', '', null);
+  showScan(true);
+  startScanPoll();                     // 边扫边显示进度，扫完由 finally 收尾
+  let d;
+  try{
+    d = await api('/api/pan_plan', body);
+  }finally{
+    stopScanPoll(); showScan(false); $('btnPanPlan').disabled = false;
+  }
   if(!d.ok){ setMsg('panMsg', d.msg, false); return; }
 
   panOps = d.ops || [];
@@ -1169,8 +1268,18 @@ async function panApply(){
 /* 导出清单给 AI */
 async function panExport(){
   $('aiCount').textContent = '正在扫描…';
-  const d = await api('/api/pan_export',
-    {path: $('panPath').value.trim(), recursive: true, limit: 300});
+  showScan(true);
+  startScanPoll((d, sec) => {           // 进度同时画到扫描条和 aiCount
+    scanPaint(d, sec);
+    $('aiCount').textContent = `扫描中：${d.dirs} 目录 · ${d.files} 文件 · ${sec}s`;
+  });
+  let d;
+  try{
+    d = await api('/api/pan_export',
+      {path: $('panPath').value.trim(), recursive: true, limit: 300});
+  }finally{
+    stopScanPoll(); showScan(false);
+  }
   if(!d.ok){ setMsg('panMsg', d.msg, false); $('aiCount').textContent = ''; return; }
   $('aiText').value = d.text;
   $('aiCount').textContent = `已导出 ${d.count} 个文件`;
@@ -1220,6 +1329,13 @@ async function panParse(){
     el.addEventListener('change', scheduleAutoSave);
   });
   panModeChange();          // 改名面板：按当前模式显示对应输入框
+  // 「含子目录」chip：高亮状态跟着 checkbox 走（点击 label 由浏览器切换勾选）
+  const rc = $('panRecursive');
+  if(rc){
+    const syncChip = () => $('recChip').classList.toggle('on', rc.checked);
+    rc.addEventListener('change', syncChip);
+    syncChip();
+  }
   // 卡片4 目录输入框回车即浏览
   const pp = $('panPath');
   if(pp) pp.addEventListener('keydown', e => { if(e.key === 'Enter') panBrowse(); });

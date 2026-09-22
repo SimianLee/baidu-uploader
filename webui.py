@@ -201,6 +201,43 @@ def verify_token():
         return False, f"验证请求失败：{e}"
 
 
+# ---------------- 网盘扫描进度（生成预览时前端轮询） ----------------
+# 扫描跑在 /api/pan_plan（或 /api/pan_export）的请求线程里，进度由另一个请求
+# 线程读取，所以用锁保护。ThreadingHTTPServer 保证两边互不阻塞。
+_scan_lock = threading.Lock()
+_scan = {"running": False, "phase": "", "dirs": 0, "files": 0, "path": "", "t0": 0.0}
+
+
+def scan_begin():
+    with _scan_lock:
+        _scan.update(running=True, phase="扫描目录", dirs=0, files=0,
+                     path="", t0=time.time())
+
+
+def scan_tick(dirs, files, cur):
+    """list_dir 每列完一个目录回调一次"""
+    with _scan_lock:
+        _scan.update(dirs=dirs, files=files, path=cur)
+
+
+def scan_phase(phase):
+    with _scan_lock:
+        _scan["phase"] = phase
+
+
+def scan_end():
+    with _scan_lock:
+        _scan["running"] = False
+
+
+def scan_snapshot():
+    with _scan_lock:
+        snap = dict(_scan)
+    snap["elapsed"] = round(time.time() - snap["t0"], 1) if snap.get("t0") else 0
+    snap.pop("t0", None)
+    return snap
+
+
 # ---------------- HTTP 服务 ----------------
 class Handler(BaseHTTPRequestHandler):
 
@@ -349,6 +386,11 @@ class Handler(BaseHTTPRequestHandler):
                     "/api/pan_export", "/api/pan_validate"):
             return self._handle_pan(path, body)
 
+        # 扫描进度：前端在「生成预览 / 导出清单」期间轮询。
+        # 不放上面那组里——这里不需要构造 PanFiles，也就不该因未授权而失败。
+        if path == "/api/pan_plan_progress":
+            return self._json({"ok": True, **scan_snapshot()})
+
         return self._json({"ok": False, "msg": f"接口不存在：{path}"}, 404)
 
     # ---------------------------------------------------------------
@@ -390,10 +432,15 @@ class Handler(BaseHTTPRequestHandler):
             kind = str(body.get("kind") or "")
             p = str(body.get("path") or sandbox).strip() or sandbox
             recursive = bool(body.get("recursive", False))
+            # 递归扫描可能是几千个目录的活儿，把进度摊给前端轮询
+            scan_begin()
             try:
-                files = pan.list_files(p, recursive=recursive)
+                files = pan.list_files(p, recursive=recursive, on_progress=scan_tick)
             except Exception as e:
                 return self._json({"ok": False, "msg": f"扫描失败：{e}"})
+            finally:
+                scan_end()
+            scan_phase("生成计划")
             if kind == "rename":
                 ops, unchanged = pan_tools.build_rename_plan(
                     files, str(body.get("mode") or "replace"), body.get("params") or {})
@@ -444,10 +491,13 @@ class Handler(BaseHTTPRequestHandler):
             p = str(body.get("path") or sandbox).strip() or sandbox
             recursive = bool(body.get("recursive", True))
             limit = int(body.get("limit", 300) or 300)
+            scan_begin()
             try:
-                files = pan.list_files(p, recursive=recursive)
+                files = pan.list_files(p, recursive=recursive, on_progress=scan_tick)
             except Exception as e:
                 return self._json({"ok": False, "msg": f"扫描失败：{e}"})
+            finally:
+                scan_end()
             files = files[:limit]
             lines = [f'{i+1}\t{f["path"]}\t{f["size"]}' for i, f in enumerate(files)]
             hint = (
