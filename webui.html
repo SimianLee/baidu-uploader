@@ -41,7 +41,7 @@
   ::-webkit-scrollbar-thumb{background:#2b3245;border-radius:9px;border:2px solid transparent;background-clip:padding-box}
   ::-webkit-scrollbar-thumb:hover{background:#3a4360;background-clip:padding-box}
 
-  .wrap{max-width:1240px;margin:0 auto;padding:26px 22px 70px}
+  .wrap{max-width:900px;margin:0 auto;padding:26px 22px 70px}
 
   /* ---------- 顶部 ---------- */
   header.glass{
@@ -71,9 +71,8 @@
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 
   /* ---------- 布局 ---------- */
-  .grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:18px;align-items:start}
+  .grid{display:grid;grid-template-columns:1fr;gap:18px;align-items:start}
   .col{display:flex;flex-direction:column;gap:18px;min-width:0}
-  @media(max-width:940px){.grid{grid-template-columns:1fr}}
 
   /* ---------- 卡片 ---------- */
   .card{
