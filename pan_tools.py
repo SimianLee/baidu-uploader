@@ -20,6 +20,7 @@ pan_tools.py —— 百度网盘（应用沙盒）文件操作库
   build_rename_plan(files, mode, params)
   build_organize_plan(files, by, dest)
   build_delete_plan(files, filters)
+  build_empty_dir_plan(entries, root, skip)   找出空目录（递归为空的）
 
 改名四模式：replace（查找替换）/ affix（加前后缀）/ serial（序号）
           / regex（正则捕获组）/ clean（去广告与括号）
@@ -465,6 +466,89 @@ def build_delete_plan(files, f: dict):
 
 
 # ===========================================================================
+# 空目录：找出「整棵子树里连一个文件都没有」的目录
+# ===========================================================================
+
+def build_empty_dir_plan(entries, root: str, skip: str = ""):
+    """找出能删掉的空目录 → 返回 (ops, info)
+
+    entries: PanFiles.list_dir(root, recursive=True) 的**原始**结果——目录和文件都要。
+             不能用 list_files()，它把目录滤掉了，而这里要判定对象正是目录。
+    root:    扫描起点，**它自己不参与删除**。两个理由：用户正站在这个目录里，
+             把它删掉太意外；而且它下面若全是空的，删掉它的直接子目录同样清得干净。
+    skip:    逗号分隔的名字关键字，命中的目录**连同整棵子树**一并跳过
+             （默认由调用方传 "_覆盖备份" —— 别顺手把备份区连根端了）。
+
+    判定规则：某目录（含所有层级的子目录）里一个文件都没有 ⇒ 空。
+    被 skip 命中的目录自己不算，**它的祖先也一律不算**——否则删掉那个祖先会把
+    受保护的目录一起捎走（典型场景：「只装着一个空的 _覆盖备份」的父目录）。
+    返回的 ops 只含「最外层」空目录——删掉它，嵌在里面的空目录跟着消失。
+    不逐层列出来的原因：一是预览会啰嗦几倍，二是后几条必然报 -9「文件不存在」
+    的假失败（父目录一删，子目录就没了），把真实的失败也淹没掉。
+
+    info = {empty_total 空目录总数, nested 会随根目录一起消失的嵌套数,
+            dirs_scanned 扫到的目录数, files_scanned 扫到的文件数}
+    """
+    root = (root or "").rstrip("/")
+    kws = [k.strip().lower() for k in (skip or "").split(",") if k.strip()]
+
+    dirs, files_scanned = [], 0
+    for e in entries:
+        p = (e.get("path") or "").rstrip("/")
+        if not p:
+            continue
+        if e.get("isdir"):
+            if p != root:           # 兜底：list_dir 本就不会返回起点自己
+                dirs.append(p)
+        else:
+            files_scanned += 1
+
+    def rel_segs(p):
+        rel = p[len(root):] if p.startswith(root) else p
+        return [s.lower() for s in rel.strip("/").split("/") if s]
+
+    def is_skipped(p):
+        """自己或任意一级祖先命中关键字 ⇒ 跳过（整棵子树都不许动）"""
+        return any(k in seg for seg in rel_segs(p) for k in kws)
+
+    # 1. 目录里有没有文件：先标记文件的直属目录，再自下而上传染给祖先。
+    #    被跳过的目录也要照常参与判定——否则「只含一个被跳过的空目录」的父目录
+    #    会被误判成空，进而把受保护的目录一起带走。
+    has_file = {d: False for d in dirs}
+    for e in entries:
+        if e.get("isdir"):
+            continue
+        parent = (e.get("path") or "").rstrip("/").rsplit("/", 1)[0]
+        if parent in has_file:      # 直属 root 的文件：root 不入表，无需标记
+            has_file[parent] = True
+    # 2. 子树里有没有被跳过的目录，同样自下而上传染：父目录即便自己一个文件都没有，
+    #    只要子树里藏着受保护的目录，它就不能算「可删的空目录」——删了会把保护对象带走
+    skip_sub = {d: is_skipped(d) for d in dirs}
+    for d in sorted(dirs, key=lambda x: x.count("/"), reverse=True):
+        parent = d.rsplit("/", 1)[0]
+        if parent not in has_file:
+            continue
+        if has_file[d]:
+            has_file[parent] = True
+        if skip_sub[d]:
+            skip_sub[parent] = True
+
+    # 3. 空的里面，剔掉被 skip 命中的子树（自己命中，或子树里藏着命中的）
+    cand = [d for d in dirs if not has_file[d] and not skip_sub[d]]
+
+    # 4. 只留最外层：父目录也是候选的话，自己会随父目录一起消失，不必单列
+    cand_set = set(cand)
+    roots = [d for d in cand if d.rsplit("/", 1)[0] not in cand_set]
+    roots.sort(key=lambda x: -x.count("/"))    # 深层在前，稳妥
+
+    ops = [{"op": "delete", "path": d, "name": d.rsplit("/", 1)[-1], "isdir": True}
+           for d in roots]
+    info = {"empty_total": len(cand), "nested": len(cand) - len(roots),
+            "dirs_scanned": len(dirs), "files_scanned": files_scanned}
+    return ops, info
+
+
+# ===========================================================================
 # 计划校验（粘贴 AI 生成的 JSON 时用）
 # ===========================================================================
 
@@ -496,7 +580,10 @@ def validate_plan(plan: dict, sandbox: str):
                 errs.append(f"第 {i} 条目标越界：{dest}"); continue
             good.append({"op": "move", "path": path, "dest": dest.rstrip("/")})
         elif op == "delete":
-            good.append({"op": "delete", "path": path})
+            # isdir 要带下去：删空文件夹与删文件在提示文案上必须分开说，
+            # 丢掉这个标记就只能把「删除 12 个空文件夹」写成「删除 12 个文件」
+            good.append({"op": "delete", "path": path,
+                         **({"isdir": True} if o.get("isdir") else {})})
         else:
             errs.append(f"第 {i} 条未知操作: {op}")
     return good, errs

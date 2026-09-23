@@ -504,9 +504,18 @@ class Handler(BaseHTTPRequestHandler):
             # should_stop 让「停止」按钮能在下一个检查点把它刹住（只读，无副作用）
             scan_begin()
             cancelled = False
+            entries = None
             try:
-                files = pan.list_files(p, recursive=recursive, on_progress=scan_tick,
-                                       should_stop=scan_should_stop)
+                if kind == "empty_dir":
+                    # 要判定「目录里有没有文件」就得看到目录本身，list_files 把它们
+                    # 滤掉了；而且必须递归——只看一层根本不知道子目录里是不是还有文件。
+                    # 所以这里无视前端的 recursive 参数，一律按递归扫。
+                    entries = pan.list_dir(p, recursive=True, on_progress=scan_tick,
+                                           should_stop=scan_should_stop)
+                    files = [e for e in entries if not e["isdir"]]
+                else:
+                    files = pan.list_files(p, recursive=recursive, on_progress=scan_tick,
+                                           should_stop=scan_should_stop)
             except pan_tools.ScanCancelled as e:
                 cancelled = True
                 return self._json({"ok": False, "cancelled": True, "msg":
@@ -534,6 +543,12 @@ class Handler(BaseHTTPRequestHandler):
                 ops = pan_tools.build_delete_plan(files, body.get("filters") or {})
                 return self._json({"ok": True, "ops": ops[:2000], "total": len(ops),
                                    "scanned": len(files)})
+            if kind == "empty_dir":
+                # skip 由前端给，默认保护本工具自己的备份区
+                ops, info = pan_tools.build_empty_dir_plan(
+                    entries, p, skip=str(body.get("skip") or "_覆盖备份"))
+                return self._json({"ok": True, "ops": ops[:2000], "total": len(ops),
+                                   "scanned": len(files), **info})
             return self._json({"ok": False, "msg": f"未知的计划类型：{kind}"})
 
         # 执行计划
@@ -561,8 +576,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "msg": f"执行失败：{e}"})
             finally:
                 exec_end()
-            msg = (f"完成：改名 {stat['rename']} / 移动 {stat['move']} / "
-                   f"删除 {stat['delete']}，失败 {len(stat['fails'])}")
+            # 整批都是删空文件夹时，报「删除 12 个空文件夹」比「改名 0 / 移动 0 / 删除 12」
+            # 直观得多——那些 0 对用户毫无信息量
+            dir_del = sum(1 for o in good if o["op"] == "delete" and o.get("isdir"))
+            if dir_del and dir_del == stat["delete"]:
+                msg = f"完成：删除 {stat['delete']} 个空文件夹，失败 {len(stat['fails'])}"
+            else:
+                msg = (f"完成：改名 {stat['rename']} / 移动 {stat['move']} / "
+                       f"删除 {stat['delete']}，失败 {len(stat['fails'])}")
             if stat.get("backup"):
                 msg += (f"；覆盖旧文件 {stat['backup']} 个"
                         f"（已备份到 {stat['backup_dir']}）")

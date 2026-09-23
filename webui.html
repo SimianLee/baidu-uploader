@@ -183,6 +183,11 @@
   label.chkchip input{position:absolute;width:1px;height:1px;opacity:0;margin:0;pointer-events:none}
   label.chkchip.on{background:#1b2231;color:#e6ebf7;font-weight:500}
 
+  /* 被功能强制锁定的开关（空文件夹必须递归，见 panTab）：
+     保持点亮的样子但整体压暗，鼠标提示「此项已固定」，而不是假装可点 */
+  .dupseg.locked{opacity:.55;cursor:not-allowed}
+  .dupseg.locked > label.chkchip{cursor:not-allowed}
+
   /* 生成预览 / 导出清单的扫描进度条
      目录总数事先不知道，所以用不确定进度条 + 实时计数，不假装有百分比 */
   .scanbar{
@@ -585,6 +590,7 @@
           <button class="tab on" id="tabRename" onclick="panTab('rename')">批量改名</button>
           <button class="tab" id="tabOrganize" onclick="panTab('organize')">整理归档</button>
           <button class="tab" id="tabDelete" onclick="panTab('delete')">批量删除</button>
+          <button class="tab" id="tabEmpty" onclick="panTab('empty')">空文件夹</button>
           <button class="tab" id="tabAi" onclick="panTab('ai')">AI 计划</button>
         </div>
 
@@ -664,6 +670,22 @@
           </div>
           <div class="hint" style="color:#ff8f8f">
             ⚠ 删除不可撤销。执行前会列出完整清单，需要你再确认一次。
+          </div>
+        </div>
+
+        <!-- 空文件夹 -->
+        <div class="panel" id="paneEmpty">
+          <div class="row">
+            <div class="field">
+              <label>跳过名字含（逗号分隔）</label>
+              <input id="edSkip" value="_覆盖备份" placeholder="命中的目录及其子目录都不动">
+            </div>
+          </div>
+          <div class="hint">
+            判定：一个目录<b>连同它的所有子目录</b>里一个文件都没有，才算空。预览只列<b>最外层</b>的空目录——
+            删掉它，嵌套在里面的空目录会一并消失，不必逐层列。
+            当前正在浏览的这层目录本身不会被删（免得删掉你正站着的地方）。
+            因为要看整棵子树，这个功能<b>总是递归扫描</b>，并会锁定「含子目录」开关。
           </div>
         </div>
 
@@ -1082,10 +1104,15 @@ function setDup(v, silent){
   }
 }
 
+/* 「空文件夹」页签必须递归扫描，所以会临时锁住「含子目录」开关。
+   这里记住用户原本的选择，离开该页签时原样还原 */
+let panRecSaved = true, panRecLocked = false;
+
 function panTab(k){
   panTab_ = k;
   [['rename','tabRename','paneRename'], ['organize','tabOrganize','paneOrganize'],
-   ['delete','tabDelete','paneDelete'], ['ai','tabAi','paneAi']].forEach(([key, tab, pane]) => {
+   ['delete','tabDelete','paneDelete'], ['empty','tabEmpty','paneEmpty'],
+   ['ai','tabAi','paneAi']].forEach(([key, tab, pane]) => {
     $(tab).classList.toggle('on', key === k);
     $(pane).classList.toggle('on', key === k);
   });
@@ -1093,6 +1120,26 @@ function panTab(k){
   // 避免在改名页选了覆盖、切到别的页签执行时把策略带过去
   if(typeof setDup === 'function') setDup('skip', true);
   $('dupBox').classList.toggle('hidden', !(k === 'rename' || k === 'organize'));
+
+  // 空文件夹页：判定要看整棵子树。不递归只会得出「这一层里没东西＝空」的错误结论，
+  // 所以锁死开关并写明理由，而不是让用户关掉它拿到一个错的答案。
+  const rc = $('panRecursive');
+  const recBox = $('recBox');
+  if(k === 'empty'){
+    if(!panRecLocked){ panRecSaved = rc.checked; panRecLocked = true; }
+    rc.checked = true;
+    rc.disabled = true;
+    recBox.classList.add('locked');
+    recBox.title = '空文件夹必须递归扫描：只看一层无法判断子目录里是否还有文件';
+  }else if(panRecLocked){
+    panRecLocked = false;
+    rc.checked = panRecSaved;
+    rc.disabled = false;
+    recBox.classList.remove('locked');
+    recBox.title = '开启：连同所有子目录一起扫描（文件多时更慢）；关闭：只处理当前这一层';
+  }
+  $('recChip').classList.toggle('on', rc.checked);   // 点亮状态跟着 checkbox 走
+
   panOps = []; panTotal = 0;
   renderPanPreview([], '');
   $('btnPanApply').disabled = true;
@@ -1135,6 +1182,8 @@ function renderPanPreview(ops, tail){
       return `<div><span class="del">改名</span> ${nm} <span class="arrow">→</span> ${esc(o.newname)}</div>`;
     if(o.op === 'move')
       return `<div><span class="arrow">移动</span> ${nm} <span class="arrow">→</span> ${esc(o.dest)}</div>`;
+    if(o.isdir)   // 删的是空文件夹而非文件，画成 📁 名字/，别让人误以为在删文件
+      return `<div><span class="del">删除</span> 📁 ${esc((o.name || '') + '/')}</div>`;
     return `<div><span class="del">删除</span> ${nm}</div>`;
   }).join('');
   el.innerHTML = rows;
@@ -1334,6 +1383,9 @@ async function panPlan(){
     body = {...body, kind: 'delete', filters: {
       exts: $('dlExts').value, keywords: $('dlKw').value,
       regex: $('dlRegex').value, min_mb: +$('dlMin').value || 0, max_mb: +$('dlMax').value || 0}};
+  }else if(panTab_ === 'empty'){
+    // recursive 恒为 true：后端也会强制递归，这里显式写出来免得两头不一致
+    body = {...body, kind: 'empty_dir', recursive: true, skip: $('edSkip').value};
   }else{
     setMsg('panMsg', 'AI 计划请直接在下方粘贴 JSON 后点「解析并预览」', null); return;
   }
@@ -1353,13 +1405,19 @@ async function panPlan(){
 
   panOps = d.ops || [];
   panTotal = d.total || 0;
+  const isEmptyTab = panTab_ === 'empty';
   const dupTxt = panDup === 'overwrite' ? '⚠ 重名将覆盖' : '重名将跳过';
-  const tail = `扫描 ${d.scanned} 个文件 → ${panTotal} 条操作`
-    + (d.unchanged ? `（${d.unchanged} 个无变化）` : '')
-    + ` · ${dupTxt}`;
+  const tail = isEmptyTab
+    ? `扫描 ${d.dirs_scanned || 0} 个目录 / ${d.files_scanned || 0} 个文件 → ${panTotal} 个空文件夹`
+      + (d.nested ? `（另有 ${d.nested} 个嵌套空目录会随之一起删除）` : '')
+    : `扫描 ${d.scanned} 个文件 → ${panTotal} 条操作`
+      + (d.unchanged ? `（${d.unchanged} 个无变化）` : '')
+      + ` · ${dupTxt}`;
   renderPanPreview(panOps, tail);
   $('btnPanApply').disabled = !panOps.length;
-  setMsg('panMsg', panOps.length ? `${tail}，确认后点「执行」` : '没有符合条件的文件', !panOps.length ? false : null);
+  setMsg('panMsg', panOps.length ? `${tail}，确认后点「执行」`
+    : (isEmptyTab ? '没有空的文件夹，很干净' : '没有符合条件的文件'),
+    !panOps.length ? false : null);
 }
 
 /* 执行：删除类操作必须二次确认；覆盖模式同样二次确认 */
@@ -1367,7 +1425,11 @@ async function panApply(){
   if(!panOps.length){ setMsg('panMsg', '没有待执行的操作', false); return; }
   const isDel = panOps.some(o => o.op === 'delete');
   const n = panOps.length;
-  const tip = isDel
+  // 纯空文件夹删除要如实措辞：「删除 N 个文件」会把人吓一跳，其实一个文件都不删
+  const onlyEmptyDirs = panOps.every(o => o.op === 'delete' && o.isdir);
+  const tip = onlyEmptyDirs
+    ? `即将删除 ${n} 个空文件夹（内部不含任何文件），删除后不可恢复。确定继续吗？`
+    : isDel
     ? `⚠ 即将删除 ${n} 个文件，此操作不可撤销。确定继续吗？`
     : panDup === 'overwrite'
     ? `⚠ 即将执行 ${n} 条操作（重名覆盖模式）：撞到的旧文件会先挪进「_覆盖备份」目录再执行，可找回。确定继续吗？`
