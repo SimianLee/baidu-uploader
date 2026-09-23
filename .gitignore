@@ -28,6 +28,8 @@ upload.log
 upload.log.*
 progress.json
 progress.json.tmp
+# 原子写的临时文件现在带进程号（progress.json.12345.tmp），防止两个上传进程互相写坏
+progress.json.*.tmp
 uploaded_log.txt
 uploaded_log.json
 done_log.json

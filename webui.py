@@ -33,6 +33,10 @@ LOCAL_RENAME_LOG = PROJ / "local_rename_log.jsonl"   # 本地改名记录（可�
 PORT = 8765
 LOG_MAX_BYTES = 20 * 1024 * 1024         # 日志超过 20MB 就归档，避免长期任务撑爆磁盘
 
+# 上一次成功读到的进度。progress.json 读失败的瞬间（上传端正在替换它，或读到半截
+# JSON）就沿用它，别把「0 / 0」甩给界面——那看着像任务被重置了
+_last_progress = {}
+
 # 预览文件标题用的人话。前端也有一份同名的，但存进文件里的标题得由后端写，
 # 否则列表在别的地方（比如直接翻 previews/ 目录）看就是一堆代号
 RENAME_MODE_LABELS = {"replace": "查找替换", "affix": "加前后缀", "serial": "序号重命名",
@@ -135,6 +139,19 @@ def start_upload(limit: int = 0):
             cmd += ["--limit", str(limit)]
         cmd += ["--yes"]   # 无交互环境，跳过末尾手动确认（after_upload 用 move/trash/keep）
         rotate_log()       # 上一轮日志太大就先归档，本次从新文件开始写
+        # 立刻把进度重置成「正在扫描」。上传进程要先扫完本地目录才会写 progress.json，
+        # 1.7 万个文件要扫一阵；这期间若还留着上一轮的数字，界面会显示成旧结果，
+        # 看着像新任务已经跑了 90%。这里写一份空进度，界面就老实显示「正在扫描目录…」。
+        # 此刻已确认没有上传进程在跑，所以不存在和它抢写同一个文件的问题
+        global _last_progress
+        _last_progress = {}
+        try:
+            PROGRESS.write_text(json.dumps(
+                {"total": 0, "done": 0, "failed": 0, "current": "",
+                 "finished": False, "time": time.strftime("%H:%M:%S")},
+                ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass       # 进度只是给人看的，写不进去也绝不能挡着上传启动
         f = open(LOGFILE, "a", encoding="utf-8")
         f.write(f"\n==== 启动 {time.strftime('%Y-%m-%d %H:%M:%S')} ====\n")
         f.flush()
@@ -380,12 +397,26 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"ok": False, "msg": f"读取配置失败：{e}"})
         elif path == "/api/progress":
-            prog = {}
-            if PROGRESS.exists():
+            # 读 progress.json 时要容忍两种瞬间：上传端正在原子替换它（Windows 上可能
+            # 回拒绝访问），或它退化成原地写导致我们读到半截 JSON。无论哪种，都**不能
+            # 把进度当成「0 / 0」返回**——界面会闪一下归零，看着像任务被重置了。
+            # 所以解析失败就重读一次，还不行就沿用上一次的好值。
+            global _last_progress
+            prog = None
+            for attempt in (0, 1):
+                if not PROGRESS.exists():
+                    break
                 try:
                     prog = json.loads(PROGRESS.read_text(encoding="utf-8-sig"))
+                    break
                 except Exception:
-                    pass
+                    prog = None
+                    if attempt == 0:
+                        time.sleep(0.03)
+            if prog is None:
+                prog = _last_progress
+            else:
+                _last_progress = prog
             self._json({"ok": True, "running": is_running(),
                         "pid": read_pidfile(),
                         "progress": prog, "log": tail_text(LOGFILE)})

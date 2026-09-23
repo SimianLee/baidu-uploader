@@ -53,6 +53,15 @@ TOKEN_FILE = "token.json"     # 与脚本放一起
 DONE_LOG = "uploaded_log.json"  # 断点记录：已成功上传的本地文件清单
 PID_FILE = "upload.pid"       # 上传进程锁：网页重启后也能认出"还有一个上传在跑"
 MAP_FILE = "upload_map.json"  # 非 mirror 布局的远程名分配记录（断点续传防错位）
+PROGRESS_FILE = "progress.json"  # 上传进度（网页面板轮询它来画进度条）
+
+# 进度落盘的两个保命参数。Windows 上只要有**任何**进程此刻开着 progress.json 的句柄
+# （面板在轮询、杀软在实时扫描、资源管理器在做预览），os.replace 就会报
+# WinError 5「拒绝访问」。实测：持有句柄 20ms 时约一半的替换失败；8 个进程同时轮询
+# 也会稳定撞上。句柄通常是毫秒级释放的，所以「重试几次」足够；而且进度只是给人看的，
+# 绝不能因为它写不进去就把整次上传打死（真被这个崩过一次，几千个文件白传）。
+PROGRESS_MIN_INTERVAL = 0.2      # 进度落盘节流（秒）：几千个文件不必每个都写盘
+PROGRESS_REPLACE_TRIES = 10      # 替换重试次数（退避 10ms 起，最长约 0.5s）
 
 # 常见错误码（够用为主，其余原样打印）
 ERRNO_MAP = {
@@ -83,6 +92,55 @@ def load_json(path: Path, default):
 
 def save_json(path: Path, data):
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def atomic_write_json(path: Path, data: dict, tries: int = PROGRESS_REPLACE_TRIES,
+                      tmp_suffix: str = "", inplace_fallback: bool = True) -> str:
+    """原子写 JSON（先写临时文件再 os.replace）。**任何情况下都不抛异常。**
+
+    返回 "" 表示成功；否则返回一句失败原因，交给调用方决定是记日志还是干脆不管。
+
+    为什么不用 try/except 包一下了事：Windows 的 os.replace 有个坑——目标文件只要被
+    **别的进程**开着句柄（哪怕只是 open 了还没读），MoveFileEx(REPLACE_EXISTING) 就会
+    回 ERROR_ACCESS_DENIED，也就是 WinError 5。实例：网页面板每 2.5s 轮询 /api/progress
+    读这个文件、杀软实时扫描、资源管理器预览，都会把上传进程打到崩溃。
+    实测还发现：让读的那一方用 FILE_SHARE_DELETE 打开**并不能**避免（16/16 仍失败），
+    所以唯一可靠的出路是写端重试。
+
+    inplace_fallback: 重试全失败后，退回「原地直接写」。代价是旁边的读者可能读到半截
+    内容（进度条这种场景它自己能容忍），好处是不会因为某个进程长占句柄就把进度永久
+    冻住。对必须严格原子的场景（配置文件之类）传 False。
+
+    tmp_suffix: 临时文件名后缀，用进程号填上能避免多个上传进程互相写坏临时文件。
+    """
+    tmp = path.with_name(path.name + (tmp_suffix or "") + ".tmp")
+    blob = json.dumps(data, ensure_ascii=False)
+    try:
+        tmp.write_text(blob, encoding="utf-8")
+    except Exception as e:
+        return f"写临时文件失败：{e}"
+    last = ""
+    for attempt in range(max(1, tries)):
+        try:
+            os.replace(tmp, path)
+            return ""
+        except PermissionError as e:
+            # 目标句柄还没被释放——最常见的一种，等一下再试
+            last = f"目标文件被占用（WinError {getattr(e, 'winerror', '?')}）"
+        except OSError as e:
+            last = f"{type(e).__name__}: {e}"
+        time.sleep(0.01 * (attempt + 1))     # 10ms、20ms… 线性退避，累计约 0.55s
+    try:
+        tmp.unlink()                          # 留着只会在目录里越堆越多
+    except OSError:
+        pass
+    if inplace_fallback:
+        try:
+            path.write_text(blob, encoding="utf-8")
+            return ""
+        except Exception as e:
+            return f"{last}；原地写也失败：{e}"
+    return last or "未知原因"
 
 
 def human_size(n: int) -> str:
@@ -853,32 +911,63 @@ def main():
     # 断点记录改为追加写文本（一行一个路径），海量文件下比整份 JSON 重写快得多
     done_log_fh = open(done_log_path.with_suffix(".txt"), "a", encoding="utf-8")
 
-    # 进度状态文件（供网页控制面板轮询）：原子写，随时中断不损坏
-    progress_path = cfg_path.parent / "progress.json"
+    # 进度状态文件（供网页控制面板轮询）：原子写 + 重试，写不进去也绝不中断上传
+    progress_path = cfg_path.parent / PROGRESS_FILE
+    prog_lock = threading.Lock()
+    prog_last = [0.0]      # 上次真正落盘的时刻（节流用）
+    prog_skips = [0]       # 写失败次数（只提示一次，不刷屏）
 
-    def write_progress(current: str = "", finished: bool = False):
-        data = {"total": len(pending), "done": len(all_uploaded),
-                "failed": len(failed), "current": current,
-                "finished": finished, "time": time.strftime("%H:%M:%S")}
-        tmp = progress_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, progress_path)
+    def write_progress(current: str = "", finished: bool = False, force: bool = False):
+        """把进度写进 progress.json 供面板轮询。两件事必须做到：
 
-    write_progress()
+        ① 别写太勤——几千个文件每个都写盘纯属浪费，面板 2.5s 才轮询一次；
+        ② **写不进去也绝不抛异常**。这一条是被真事逼出来的：并发上传时面板正好在读
+           这个文件，os.replace 报 WinError 5，异常从线程池里冒上来，整次上传当场
+           崩掉（几千个文件白传）。进度条只是给人看的，它坏掉不该影响上传。
+        """
+        with prog_lock:
+            if not finished and not force and \
+                    time.time() - prog_last[0] < PROGRESS_MIN_INTERVAL:
+                return
+            prog_last[0] = time.time()
+            try:
+                data = {"total": len(pending), "done": len(all_uploaded),
+                        "failed": len(failed), "current": current,
+                        "finished": finished, "time": time.strftime("%H:%M:%S")}
+                # 临时文件名带上本进程 PID：万一同时存在两个上传进程
+                # （面板刚重启、旧进程还没退干净），也不至于互相写坏临时文件
+                err = atomic_write_json(progress_path, data,
+                                        tmp_suffix=f".{os.getpid()}")
+                if err:
+                    prog_skips[0] += 1
+                    if prog_skips[0] == 1:      # 只提示一次，不刷屏
+                        log(f"  [提示] 进度文件一时写不进去（{err}），"
+                            f"本次跳过、不影响上传；面板进度条可能略有延迟")
+            except Exception as e:              # 兜底中的兜底：进度绝不许影响主流程
+                prog_skips[0] += 1
+                if prog_skips[0] == 1:
+                    log(f"  [提示] 进度文件写入异常（{type(e).__name__}: {e}），已忽略")
+
+    write_progress(force=True)
 
     stat_lock = threading.Lock()
 
     def upload_one(item):
-        """上传单个文件（在线程池里跑）：结果写回共享列表，失败不抛异常"""
+        """上传单个文件（在线程池里跑）：结果写回共享列表，失败不抛异常
+
+        这里**绝不能让异常冒出去**——ThreadPoolExecutor.map 会把它原样抛给主线程，
+        一个文件的意外就足以打断整次上传。所以不止上传本身，建父目录这种附带动作
+        也要兜住（原来它在 try 之外，是个同类隐患）。
+        """
         p, size = item
         rel = p.relative_to(root)
         remote_path = remote_map[p]
-        # 远程父目录不存在则先创建（带缓存：同一目录只请求一次）
-        remote_parent = remote_path.rsplit("/", 1)[0]
-        if remote_parent != remote_base:
-            api.mkdir(remote_parent, quiet=True)
         ok = False
         try:
+            # 远程父目录不存在则先创建（带缓存：同一目录只请求一次）
+            remote_parent = remote_path.rsplit("/", 1)[0]
+            if remote_parent != remote_base:
+                api.mkdir(remote_parent, quiet=True)
             ok = api.upload_file(p, remote_path, chunk_size)
         except Exception as e:
             log(f"  [失败] 异常: {rel} -> {e}")
@@ -906,6 +995,9 @@ def main():
                 if file_interval:
                     time.sleep(file_interval)   # 单文件间隔，降低频控风险
         n_done = len(all_uploaded) + len(failed)
+        # 批次末尾强制落一次盘：节流可能刚好把这一批的收尾状态省掉了，
+        # 而面板正是靠它显示「已完成多少」——批间要暂停十几秒，这里不能含糊
+        write_progress(str(batch[-1][0].relative_to(root)), force=True)
         spent = time.time() - t_start
         speed = len(all_uploaded) / max(spent, 1)
         left = len(pending) - n_done
