@@ -259,6 +259,42 @@ def scan_snapshot():
     return snap
 
 
+# ---------------- 执行进度（点「执行」时前端轮询） ----------------
+# 执行同样跑在请求线程里，进度由轮询线程读，所以一样用锁保护。
+# 不同于扫描的是：执行的总条数事先就知道，所以前端能显示真实百分比。
+_exec_lock = threading.Lock()
+_exec = {"running": False, "phase": "", "done": 0, "total": 0, "fails": 0,
+         "t0": 0.0}
+
+
+def exec_begin(total=0):
+    with _exec_lock:
+        _exec.update(running=True, phase="准备中", done=0, total=int(total or 0),
+                     fails=0, t0=time.time())
+
+
+def exec_tick(snap):
+    """apply_plan 每完成一批回调一次，snap={done,total,phase,fails}"""
+    with _exec_lock:
+        _exec.update(done=snap.get("done", 0) or 0,
+                     total=snap.get("total", 0) or 0,
+                     phase=snap.get("phase", "") or "",
+                     fails=snap.get("fails", 0) or 0)
+
+
+def exec_end():
+    with _exec_lock:
+        _exec.update(running=False)
+
+
+def exec_snapshot():
+    with _exec_lock:
+        snap = dict(_exec)
+    snap["elapsed"] = round(time.time() - snap["t0"], 1) if snap.get("t0") else 0
+    snap.pop("t0", None)
+    return snap
+
+
 # ---------------- HTTP 服务 ----------------
 class Handler(BaseHTTPRequestHandler):
 
@@ -412,6 +448,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/pan_plan_progress":
             return self._json({"ok": True, **scan_snapshot()})
 
+        # 执行进度：点「执行」期间前端轮询（同上，不需要构造 PanFiles）
+        if path == "/api/pan_apply_progress":
+            return self._json({"ok": True, **exec_snapshot()})
+
         # 停止扫描：同样是纯内存操作，不碰网盘
         if path == "/api/pan_cancel":
             stopping = scan_request_stop()
@@ -512,15 +552,26 @@ class Handler(BaseHTTPRequestHandler):
             if len(good) > 2000:
                 return self._json({"ok": False,
                                    "msg": f"一次最多执行 2000 条，当前 {len(good)} 条，请缩小范围"})
+            # 执行可能几百条、要好几分钟，进度交给前端轮询 /api/pan_apply_progress
+            exec_begin(len(good))
             try:
-                stat = pan_tools.apply_plan(pan, good, ondup=ondup)
+                stat = pan_tools.apply_plan(pan, good, ondup=ondup,
+                                            on_progress=exec_tick)
             except Exception as e:
                 return self._json({"ok": False, "msg": f"执行失败：{e}"})
-            return self._json({"ok": True, "stat": stat, "errors": errs,
-                               "msg": (f"完成：改名 {stat['rename']} / 移动 {stat['move']} / "
-                                       f"删除 {stat['delete']}，失败 {len(stat['fails'])}"
-                                       + (f"；覆盖旧文件 {stat['backup']} 个（已备份到 {stat['backup_dir']}）"
-                                          if stat.get("backup") else ""))})
+            finally:
+                exec_end()
+            msg = (f"完成：改名 {stat['rename']} / 移动 {stat['move']} / "
+                   f"删除 {stat['delete']}，失败 {len(stat['fails'])}")
+            if stat.get("backup"):
+                msg += (f"；覆盖旧文件 {stat['backup']} 个"
+                        f"（已备份到 {stat['backup_dir']}）")
+            if stat["fails"]:
+                # 实测：百度对「刚变动过」的文件会回 -9「文件不存在」的假失败，
+                # 而操作其实生效了（130 条全报 -9，刷新目录一看名字全改好了）。
+                # 不提示的话用户会以为白干一场。
+                msg += "；注：百度对刚变动的文件常假报失败，刷新目录核对一下，往往已经生效"
+            return self._json({"ok": True, "stat": stat, "errors": errs, "msg": msg})
 
         # 导出文件清单（给 AI 用）
         if path == "/api/pan_export":

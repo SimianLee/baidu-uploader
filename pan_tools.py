@@ -180,56 +180,84 @@ class PanFiles:
         return r.get("errno", 0) in (0, -8, 12)     # -8/12 = 已存在
 
     # ---------- filemanager 批量操作 ----------
-    def _filemanager(self, opera: str, filelist, ondup: str = "skip"):
-        """提交一批操作，返回 (成功数, 失败明细列表)"""
+    def _filemanager(self, opera: str, filelist, ondup: str = "skip",
+                     on_progress=None):
+        """提交一批操作，返回 (成功数, 失败明细列表)
+
+        filelist 超过 BATCH_LIMIT 会自动拆成多批提交，每批发一次请求。
+        每批处理完调一次 on_progress(本批条数, 本批失败条数)：
+        一次几百条要等好几分钟，没有进度反馈会让人以为卡死了。
+        失败条数必须由这里给出——调用方要等本方法返回后才拿得到 fails，
+        等它统计的话进度里的失败数会滞后一批。
+        """
         import json as _json
         ok, fails = 0, []
         for i in range(0, len(filelist), BATCH_LIMIT):
             chunk = filelist[i:i + BATCH_LIMIT]
+            fails_before = len(fails)
             r = self._post(FILEMANAGER, {"opera": opera, "async": "0"}, data={
                 "filelist": _json.dumps(chunk, ensure_ascii=False),
                 "ondup": ondup,
             })
             errno = r.get("errno", 0)
-            if errno == 0:
-                # 同步模式下 info 里是逐条结果，成功 errno=0
-                ok += len(chunk)
-                for info in r.get("info", []) or []:
-                    if isinstance(info, dict) and info.get("errno", 0) != 0:
-                        ok -= 1
-                        fails.append({"path": info.get("path", "?"),
-                                      "errno": info.get("errno"),
-                                      "msg": errno_text(info.get("errno"))})
+            info = [x for x in (r.get("info") or []) if isinstance(x, dict)]
+            if errno == 0 or info:
+                # 同步模式下 info 里是逐条结果。errno=0 表示这批全成功；
+                # errno=12 是「部分失败」，逐条结果同样在 info 里——必须按条统计，
+                # 否则成功的也会被算成失败，真正的原因码（-8 撞名 / -9 不存在）也丢了。
+                judged = set()
+                for it_ in info:
+                    judged.add(it_.get("path"))
+                    if it_.get("errno", 0) != 0:
+                        fails.append({"path": it_.get("path", "?"),
+                                      "errno": it_.get("errno"),
+                                      "msg": errno_text(it_.get("errno"))})
+                if errno != 0:      # info 没覆盖到的条目，结论只能看外层 errno
+                    for it in chunk:
+                        if it.get("path") not in judged:
+                            fails.append({"path": it.get("path"), "errno": errno,
+                                          "msg": errno_text(errno)})
+                ok += len(chunk) - (len(fails) - fails_before)
             else:
                 for it in chunk:
                     fails.append({"path": it.get("path") if isinstance(it, dict) else it,
                                   "errno": errno, "msg": errno_text(errno)})
+            if on_progress:
+                try:
+                    on_progress(len(chunk), len(fails) - fails_before)
+                except Exception:
+                    pass        # 进度回调只是锦上添花，出错绝不能中断执行
         return ok, fails
 
-    def rename_batch(self, ops, ondup="skip"):
+    def rename_batch(self, ops, ondup="skip", on_progress=None):
         """ops: [{path, newname}]"""
         clean = []
         for o in ops:
             p = self.check_path(o["path"])
             clean.append({"path": p, "newname": o["newname"]})
-        return self._filemanager("rename", clean, ondup=ondup)
+        return self._filemanager("rename", clean, ondup=ondup,
+                                 on_progress=on_progress)
 
-    def move_batch(self, ops, ondup="skip"):
+    def move_batch(self, ops, ondup="skip", on_progress=None):
         """ops: [{path, dest}]  dest 为目标**目录**"""
         clean = []
         for o in ops:
             p = self.check_path(o["path"])
             clean.append({"path": p, "dest": self.check_path(o["dest"])})
-        return self._filemanager("move", clean, ondup=ondup)
+        return self._filemanager("move", clean, ondup=ondup,
+                                 on_progress=on_progress)
 
-    def delete_batch(self, paths):
+    def delete_batch(self, paths, on_progress=None):
         clean = [{"path": self.check_path(p)} for p in paths]
-        return self._filemanager("delete", clean)
+        return self._filemanager("delete", clean, on_progress=on_progress)
 
 
 def errno_text(errno):
+    # 逐条明细里只报简短原因；「百度常假报」这类解释统一放在执行结果提示里，
+    # 每条明细都带一遍会啰嗦到看不清
     return {
-        0: "成功", -6: "Token 无效", -7: "文件不存在", -8: "文件已存在",
+        0: "成功", -6: "Token 无效", -7: "文件或目录名非法", -8: "文件已存在",
+        -9: "文件不存在", -10: "云盘容量不足", -11: "文件超长", -12: "文件名非法",
         2: "参数错误", 12: "批量操作部分失败", 111: "Token 过期",
         31034: "命中频控", 31061: "文件不存在", 31066: "文件不存在或无权限",
     }.get(errno, f"错误码 {errno}")
@@ -509,7 +537,7 @@ def _mkdirs(pan: PanFiles, path: str):
         return False
 
 
-def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip"):
+def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
     """按类型分组执行计划 → 返回统计
 
     ondup: rename/move 撞到同名文件时的策略
@@ -518,6 +546,12 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip"):
                      不生效（实测撞名一律报 -8），所以覆盖用「先挪备份再执行」
                      实现：被撞的旧文件移动到 沙盒/_覆盖备份/时间戳/原目录结构
                      下，不删除、可找回，之后原操作就不会撞名了。
+
+    on_progress(snap): 每完成一批回调一次，用来显示执行进度。snap =
+        {"done": 已完成动作数, "total": 总动作数, "phase": 当前阶段文案,
+         "fails": 失败条数}
+        总动作数 = 改名 + 移动 + 删除，覆盖模式下再加「备份被撞文件」的条数。
+        一次几百条要跑好几分钟，没有这个回调前端只能干等。
     """
     stat = {"rename": 0, "move": 0, "delete": 0, "backup": 0,
             "backup_dir": "", "fails": []}
@@ -525,8 +559,38 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip"):
     mov = [{"path": o["path"], "dest": o["dest"]} for o in ops if o["op"] == "move"]
     dele = [o["path"] for o in ops if o["op"] == "delete"]
 
+    # 进度快照。用可变 dict 而非局部变量：闭包里改它不需要 nonlocal
+    prog = {"done": 0, "total": len(ren) + len(mov) + len(dele),
+            "phase": "", "fails": 0}
+
+    def emit(phase=None):
+        if phase:
+            prog["phase"] = phase
+        if on_progress:
+            try:
+                on_progress(dict(prog))
+            except Exception:
+                pass        # 进度显示出问题，绝不能影响真正的执行
+
+    def tick(phase):
+        """生成「一批提交完成」的回调：累加进度与失败数，然后汇报
+
+        失败数由底层连同本批条数一起给出。不能等本函数返回后再从 stat 里数，
+        那样进度上的失败数会滞后一批。
+        """
+        def cb(k, nf=0):
+            prog["done"] += k
+            prog["fails"] += nf
+            emit(phase)
+        return cb
+
+    # 第一批返回前可能等好几分钟（百度按批处理），文案得让人知道是在等网盘，
+    # 而不是「准备中」那种看不出进展的说法
+    emit("提交中")
+
     # 覆盖模式：先找出撞名文件，挪进带时间戳的备份目录（保留原路径结构）
     if ondup == "overwrite" and (ren or mov):
+        emit("检查重名文件")
         conflicts = _find_conflicts(pan, ren, mov)
         if conflicts:
             bdir = f"{pan.sandbox}/_覆盖备份/{time.strftime('%Y%m%d-%H%M%S')}"
@@ -536,7 +600,9 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip"):
                 bdest = f"{bdir}/{str(PurePosixPath(rel).parent)}"
                 _mkdirs(pan, bdest)
                 mv_ops.append({"path": cf, "dest": bdest})
-            ok, fails = pan.move_batch(mv_ops)
+            # 备份也是要实现的动作，算进总数；否则进度条先跑到别处再卡住，看着像死机
+            prog["total"] += len(mv_ops)
+            ok, fails = pan.move_batch(mv_ops, on_progress=tick("备份被撞的旧文件"))
             stat["backup"] = ok
             stat["backup_dir"] = bdir
             stat["fails"] += fails
@@ -548,19 +614,23 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip"):
             time.sleep(0.5)            # 等索引同步，避免紧跟着的操作读到旧状态
 
     # 移动前先把目标目录都建好（百度 move 不会自动建）
-    for d in sorted({m["dest"] for m in mov}):
+    dirs = sorted({m["dest"] for m in mov})
+    for i, d in enumerate(dirs, 1):
         try:
             pan.mkdir(d)
         except Exception as e:
             stat["fails"].append({"path": d, "msg": f"建目录失败 {e}"})
+            prog["fails"] += 1
+        emit(f"准备目标目录 {i}/{len(dirs)}")     # 目录多时也得让人看到在动
 
     if ren:
-        ok, fails = pan.rename_batch(ren, ondup="skip")
+        ok, fails = pan.rename_batch(ren, ondup="skip", on_progress=tick("正在改名"))
         stat["rename"] = ok; stat["fails"] += fails
     if mov:
-        ok, fails = pan.move_batch(mov, ondup="skip")
+        ok, fails = pan.move_batch(mov, ondup="skip", on_progress=tick("正在移动"))
         stat["move"] = ok; stat["fails"] += fails
     if dele:
-        ok, fails = pan.delete_batch(dele)
+        ok, fails = pan.delete_batch(dele, on_progress=tick("正在删除"))
         stat["delete"] = ok; stat["fails"] += fails
+    emit("已完成")
     return stat

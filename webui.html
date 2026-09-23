@@ -214,6 +214,19 @@
   }
   @keyframes sweep{0%{left:-40%}100%{left:102%}}
 
+  /* 执行计划的进度条：和扫描条同一族外观，区别在于总条数事先已知，
+     所以用真实百分比的确定进度条（扫描那条只能是不确定流动线） */
+  .execline{height:5px;border-radius:99px;background:#12161f;overflow:hidden}
+  .execline i{
+    display:block;height:100%;width:0%;border-radius:99px;
+    background:linear-gradient(90deg,#4f7cff,#2fcf94);
+    box-shadow:0 0 10px -2px #2fcf9488;
+    transition:width .35s cubic-bezier(.4,0,.2,1);
+  }
+  .execpct{
+    flex:0 0 auto;color:#7fa0ff;font-weight:600;font-variant-numeric:tabular-nums;
+  }
+
   .oplist{max-height:260px;overflow:auto;font-size:12px;line-height:1.75}
   .oplist div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .oplist .arrow{color:var(--accent);margin:0 6px}
@@ -705,6 +718,16 @@
                     title="中断这次扫描。扫描是只读的，停下来不会对网盘做任何改动">停止</button>
           </div>
           <div class="scanline"><i></i></div>
+        </div>
+        <!-- 执行计划进度：几百条操作要跑几分钟，这里显示真实百分比 -->
+        <div class="scanbar hidden" id="execBar">
+          <div class="scantop">
+            <span class="spin"></span>
+            <span class="scantxt" id="execTxt">正在执行…</span>
+            <span class="execpct" id="execPct"></span>
+            <span class="scantime" id="execTime"></span>
+          </div>
+          <div class="execline"><i id="execFill"></i></div>
         </div>
         <div class="msg" id="panMsg"></div>
         <div class="oplist term headroom empty" id="panPreview" data-empty="预览区：先选模式再点「生成预览」，确认无误后点「执行」"></div>
@@ -1233,6 +1256,52 @@ function scanPaint(d, sec){
   $('scanTime').textContent = sec + 's';
 }
 
+/* ---------- 执行进度（点「执行」期间轮询后端） ----------
+   执行是分批提交给百度的（每批 100 条），后端每批回报一次进度。
+   和扫描不同的是：总条数事先就知道，所以这里显示真实百分比——
+   几百条操作要跑几分钟，没有这个条只能干瞪眼。 */
+let execTimer = null;
+
+function showExec(on){
+  $('execBar').classList.toggle('hidden', !on);
+  if(on){
+    $('execTxt').textContent = '正在提交操作…';
+    $('execPct').textContent = '';
+    $('execTime').textContent = '';
+    $('execFill').style.width = '0%';
+  }
+}
+
+function stopExecPoll(){ if(execTimer){ clearInterval(execTimer); execTimer = null; } }
+
+function startExecPoll(){
+  stopExecPoll();
+  const t0 = Date.now();
+  let sawRunning = false;    // 先看到 running 再画，否则会画到上一轮的残留快照
+  const tick = async () => {
+    const d = await api('/api/pan_apply_progress');
+    if(!d || !d.ok) return;
+    if(d.running) sawRunning = true;
+    else if(!sawRunning) return;
+    execPaint(d, ((Date.now() - t0) / 1000).toFixed(0));
+  };
+  tick();
+  execTimer = setInterval(tick, 300);
+}
+
+function execPaint(d, sec){
+  const total = d.total || 0, done = d.done || 0;
+  const pct = total ? Math.min(100, Math.floor(done / total * 100)) : 0;
+  $('execFill').style.width = pct + '%';
+  $('execPct').textContent = total ? pct + '%' : '';
+  // 阶段文案自带计数时（如「准备目标目录 3/60」）就不再拼 done/total，免得出现
+  // 「准备目标目录 3/60 0 / 60」这种重复读起来不知在看哪个数
+  const phase = d.phase || '执行中';
+  const count = phase.indexOf('/') >= 0 ? '' : (total ? ` ${done} / ${total}` : '');
+  $('execTxt').textContent = phase + count + (d.fails ? ` · 失败 ${d.fails}` : '');
+  $('execTime').textContent = sec + 's';
+}
+
 /* 生成预览（改名 / 整理 / 删除） */
 async function panPlan(){
   const path = $('panPath').value.trim();
@@ -1306,16 +1375,40 @@ async function panApply(){
   if(!confirm(tip)) return;
 
   $('btnPanApply').disabled = true;
-  setMsg('panMsg', '正在执行…', null);
-  const d = await api('/api/pan_apply', {ops: panOps, ondup: panDup});
-  $('btnPanApply').disabled = false;
-  if(!d.ok){ setMsg('panMsg', d.msg, false); return; }
+  $('btnPanPlan').disabled = true;      // 执行期间不许再生成预览：两边同时操作网盘只会互相干扰
+  setMsg('panMsg', '正在执行，请勿关闭页面…（进度见上方进度条）', null);
+  const execT0 = Date.now();
+  showExec(true); startExecPoll();
+
+  let d;
+  try{
+    d = await api('/api/pan_apply', {ops: panOps, ondup: panDup});
+  } finally {
+    // 收起前补画一次最终进度：最后一批的完成回调常常来不及被 300ms 的轮询画出来，
+    // 直接收起会让进度条停在 76% 这种位置，看着像没跑完
+    const fin = await api('/api/pan_apply_progress');
+    if(fin && fin.ok) execPaint(fin, ((Date.now() - execT0) / 1000).toFixed(0));
+    await new Promise(r => setTimeout(r, 450));
+    stopExecPoll(); showExec(false);
+    $('btnPanPlan').disabled = false;
+  }
+
+  if(!d || !d.ok){
+    setMsg('panMsg', (d && d.msg) || '执行失败：连不上后台服务', false);
+    $('btnPanApply').disabled = false;
+    return;
+  }
   const st = d.stat || {};
-  setMsg('panMsg', d.msg + (st.fails && st.fails.length ? `：${st.fails.slice(0,2).join('；')}` : ''), true);
+  const failTxt = st.fails && st.fails.length
+    ? '；' + st.fails.slice(0, 2)
+        .map(f => `${(f.path || '').split('/').pop()} ${f.msg || '失败'}`).join('；')
+    : '';
   panOps = []; panTotal = 0;
   renderPanPreview([], '');
   $('btnPanApply').disabled = true;
-  panBrowse();     // 刷新目录列表
+  await panBrowse();     // 先刷新目录列表（它自己会写一条提示）
+  // 结果提示放最后写，否则会被上面「列出 N 个文件」的提示盖掉，看不到执行战果
+  setMsg('panMsg', (d.msg || '执行完成') + failTxt, true);
 }
 
 /* 导出清单给 AI */
