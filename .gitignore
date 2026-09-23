@@ -34,6 +34,8 @@ done_log.json
 upload.pid
 upload_map.json
 local_rename_log.jsonl
+# 预览文件（生成预览的落盘缓存）：内容随网盘状态变，属于本机运行产物
+previews/
 *.log
 
 # ---------- 推送日志 ----------
@@ -41,6 +43,7 @@ push-logs/
 
 # ---------- 临时 / 测试文件（下划线开头）----------
 _*
+shots/
 !.gitignore
 
 # ---------- 编辑器 / 系统 ----------

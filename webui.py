@@ -19,6 +19,8 @@ from pathlib import Path
 
 import requests
 
+import preview_store                # 计划预览的本地存盘（同目录模块）
+
 PROJ = Path(__file__).resolve().parent
 PY = sys.executable                      # 用当前解释器跑上传子进程
 CONFIG = PROJ / "config.json"
@@ -30,6 +32,29 @@ PIDFILE = PROJ / "upload.pid"            # 上传进程锁：面板重启也能�
 LOCAL_RENAME_LOG = PROJ / "local_rename_log.jsonl"   # 本地改名记录（可整批回退）
 PORT = 8765
 LOG_MAX_BYTES = 20 * 1024 * 1024         # 日志超过 20MB 就归档，避免长期任务撑爆磁盘
+
+# 预览文件标题用的人话。前端也有一份同名的，但存进文件里的标题得由后端写，
+# 否则列表在别的地方（比如直接翻 previews/ 目录）看就是一堆代号
+RENAME_MODE_LABELS = {"replace": "查找替换", "affix": "加前后缀", "serial": "序号重命名",
+                      "regex": "正则替换", "clean": "去广告清理", "title": "只保留书名"}
+ORGANIZE_LABELS = {"category": "按大类", "ext": "按后缀", "date": "按修改月份"}
+
+
+def filter_label(f):
+    """把删除的筛选条件写成一句人能读的话，用作预览文件标题"""
+    f = f or {}
+    bits = []
+    if f.get("exts"):
+        bits.append("后缀 " + str(f["exts"]))
+    if f.get("keywords"):
+        bits.append("含 " + str(f["keywords"]))
+    if f.get("regex"):
+        bits.append("正则 " + str(f["regex"]))
+    if f.get("min_mb"):
+        bits.append(f"大于 {f['min_mb']}MB")
+    if f.get("max_mb"):
+        bits.append(f"小于 {f['max_mb']}MB")
+    return "、".join(bits) or "无条件（全部文件）"
 
 # ---------------- 上传子进程管理 ----------------
 _state = {"proc": None, "lock": threading.Lock()}
@@ -481,6 +506,25 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "stopping": stopping,
                 "msg": "正在停止…" if stopping else "当前没有正在进行的扫描"})
 
+        # ---------------- 预览文件（本地存盘，避免反复重扫网盘）----------------
+        # 这一组都不需要构造 PanFiles（除了 preview_load 要拿沙盒路径做越界校验），
+        # 所以放在 pan_* 那组外面，未授权时也能看列表
+        if path == "/api/preview_list":
+            return self._json({"ok": True, "items": preview_store.list_previews(PROJ),
+                               "dir": preview_store.DIR_NAME,
+                               "max_keep": preview_store.MAX_KEEP})
+        if path == "/api/preview_load":
+            return self._preview_load(body)
+        if path == "/api/preview_delete":
+            pid = str(body.get("id") or "")
+            ok = preview_store.delete_preview(PROJ, pid)
+            return self._json({"ok": ok, "id": pid,
+                               "msg": "预览文件已删除" if ok else "找不到这份预览文件"})
+        if path == "/api/preview_clean":
+            n = preview_store.clean_executed(PROJ)
+            return self._json({"ok": True, "cleaned": n,
+                               "msg": f"已清理 {n} 份执行过的预览文件"})
+
         # ---------------- 本地改名（上传前预处理，动的是磁盘上的真文件）----------------
         if path == "/api/local_rename_preview":
             return self._local_rename_preview(body)
@@ -490,6 +534,56 @@ class Handler(BaseHTTPRequestHandler):
             return self._local_rename_undo()
 
         return self._json({"ok": False, "msg": f"接口不存在：{path}"}, 404)
+
+    # ---------------------------------------------------------------
+    # 预览文件：复用 / 载入 / 删除
+    # ---------------------------------------------------------------
+    @staticmethod
+    def _preview_resp(rec, reused=False):
+        """把一份预览记录翻成与 /api/pan_plan 完全同形的响应
+
+        同形是关键：前端不必为「新扫的」和「复用的」写两条渲染路径。
+        info 里存的是那次扫描的统计（scanned / unchanged / auto / nested …）。
+        """
+        resp = {"ok": True, "ops": rec.get("ops") or [],
+                "total": int(rec.get("total") or 0),
+                "preview_id": rec.get("id"), "preview_ts": rec.get("ts", ""),
+                "preview_age": int(max(0, time.time() - (rec.get("t0") or 0))),
+                "preview_kind": rec.get("kind", ""),
+                "preview_executed": bool(rec.get("executed")),
+                "reused": bool(reused)}
+        resp.update(rec.get("info") or {})
+        return resp
+
+    def _preview_load(self, body):
+        """载入一份存下来的预览，准备执行
+
+        **必须重新校验一遍路径**：预览文件就是磁盘上的普通 JSON，能被手改，也可能
+        是换了 remote_dir 之前生成的。拿一份越界的清单去执行，后果比重新扫一次严重
+        得多，所以这里一律过 pan_tools.validate_plan。
+        """
+        import pan_tools
+        rec = preview_store.load_preview(PROJ, str(body.get("id") or ""))
+        if not rec:
+            return self._json({"ok": False, "msg": "找不到这份预览文件（可能已被清理）"})
+        try:
+            _, sandbox = self._pan()
+        except Exception as e:
+            return self._json({"ok": False, "msg": str(e)})
+        good, errs = pan_tools.validate_plan({"ops": rec.get("ops") or []}, sandbox)
+        if not good and errs:
+            return self._json({"ok": False,
+                               "msg": "这份预览已不可用：" + "；".join(errs[:3])})
+        resp = self._preview_resp(rec, reused=True)
+        # 用**原始** ops 而不是校验后的 good：校验会把 name / auto / isdir 这些
+        # 只用于展示的字段抹掉，预览区就分不出「空文件夹」和「普通文件」了。
+        # 真正的把关在执行那一步——/api/pan_apply 会再校验一次
+        resp["total"] = len(rec.get("ops") or [])
+        if errs:
+            resp["errors"] = errs[:8]
+        resp["msg"] = (f"已载入 {rec.get('ts', '')} 生成的预览（{resp['total']} 条）"
+                       + (f"，其中 {len(errs)} 条会在执行时被拦下" if errs else ""))
+        return self._json(resp)
 
     # ---------------------------------------------------------------
     # 本地改名：预览 → 执行 → （改错了）回退
@@ -590,6 +684,25 @@ class Handler(BaseHTTPRequestHandler):
             kind = str(body.get("kind") or "")
             p = str(body.get("path") or sandbox).strip() or sandbox
             recursive = bool(body.get("recursive", False))
+            refresh = bool(body.get("refresh"))     # 「重新生成」= 忽略缓存，强制重扫
+
+            # 把「影响结果的全部输入」归一化：它既是判断「同参数」的指纹依据（决定能
+            # 不能复用旧预览），也随预览文件一起存下来，事后能看清这份计划是拿什么算的
+            payload = {"path": p, "recursive": recursive}
+            for k in ("mode", "params", "by", "dest", "filters", "skip"):
+                if k in body:
+                    payload[k] = body[k]
+            if kind == "empty_dir":
+                payload["recursive"] = True         # 后端强制递归，指纹按实际口径算
+
+            # ① 同参数的老预览还在 → 直接复用，一个网盘请求都不发。这就是这个功能的
+            #    主要目的：反复调参反复看预览时，不该每次都把几千个目录重走一遍
+            if not refresh:
+                old = preview_store.find_recent(
+                    PROJ, preview_store.fingerprint(kind, payload, sandbox))
+                if old:
+                    return self._json(self._preview_resp(old, reused=True))
+
             # 递归扫描可能是几千个目录的活儿，把进度摊给前端轮询；
             # should_stop 让「停止」按钮能在下一个检查点把它刹住（只读，无副作用）
             scan_begin()
@@ -616,31 +729,50 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 scan_end(cancelled=cancelled)
             scan_phase("生成计划")
+
+            # 每种计划各自的统计信息（info）与标题（label）。info 会被原样塞回响应
+            # 并存进预览文件，所以键名必须和前端读的一致（scanned/unchanged/auto…）
             if kind == "rename":
+                mode = str(body.get("mode") or "replace")
                 ops, unchanged, auto = pan_tools.build_rename_plan(
-                    files, str(body.get("mode") or "replace"), body.get("params") or {})
-                return self._json({"ok": True, "ops": ops[:2000], "total": len(ops),
-                                   "unchanged": len(unchanged), "auto": auto,
-                                   "scanned": len(files)})
-            if kind == "organize":
+                    files, mode, body.get("params") or {})
+                info = {"unchanged": len(unchanged), "auto": auto, "scanned": len(files)}
+                label = "批量改名·" + RENAME_MODE_LABELS.get(mode, mode)
+            elif kind == "organize":
                 dest = str(body.get("dest") or "").strip()
                 if not dest:
                     return self._json({"ok": False, "msg": "请填写归档目标目录"})
-                ops = pan_tools.build_organize_plan(
-                    files, str(body.get("by") or "category"), dest, sandbox)
-                return self._json({"ok": True, "ops": ops[:2000], "total": len(ops),
-                                   "scanned": len(files)})
-            if kind == "delete":
-                ops = pan_tools.build_delete_plan(files, body.get("filters") or {})
-                return self._json({"ok": True, "ops": ops[:2000], "total": len(ops),
-                                   "scanned": len(files)})
-            if kind == "empty_dir":
+                by = str(body.get("by") or "category")
+                ops = pan_tools.build_organize_plan(files, by, dest, sandbox)
+                info = {"scanned": len(files)}
+                label = "整理归档·" + ORGANIZE_LABELS.get(by, by) + " → " + dest
+            elif kind == "delete":
+                flt = body.get("filters") or {}
+                ops = pan_tools.build_delete_plan(files, flt)
+                info = {"scanned": len(files)}
+                label = "批量删除·" + filter_label(flt)
+            elif kind == "empty_dir":
                 # skip 由前端给，默认保护本工具自己的备份区
-                ops, info = pan_tools.build_empty_dir_plan(
+                ops, einfo = pan_tools.build_empty_dir_plan(
                     entries, p, skip=str(body.get("skip") or "_覆盖备份"))
-                return self._json({"ok": True, "ops": ops[:2000], "total": len(ops),
-                                   "scanned": len(files), **info})
-            return self._json({"ok": False, "msg": f"未知的计划类型：{kind}"})
+                info = {"scanned": len(files), **einfo}
+                label = "空文件夹"
+            else:
+                return self._json({"ok": False, "msg": f"未知的计划类型：{kind}"})
+
+            full = len(ops)
+            ops = ops[:2000]        # 与执行上限一致：再多也执行不了，不必塞进预览文件
+            # 标题带上目录和扫描范围：下拉框里两份「批量改名·只保留书名」如果只有
+            # 条数不同，根本认不出哪份是含子目录的、哪份是只扫本级的
+            scope = "含子目录" if payload["recursive"] else "仅本级"
+            # ② 落盘成预览文件。存失败（比如磁盘满）不影响本次预览——只是没了缓存
+            rec = preview_store.save_preview(
+                PROJ, kind, ops, {"total": full, **info}, payload,
+                sandbox=sandbox, path=p, label=f"{label} · {p}（{scope}）")
+            resp = {"ok": True, "ops": ops, "total": full, "reused": False, **info}
+            if rec:
+                resp.update(preview_id=rec["id"], preview_ts=rec["ts"], preview_age=0)
+            return self._json(resp)
 
         # 执行计划
         if path == "/api/pan_apply":
@@ -683,7 +815,13 @@ class Handler(BaseHTTPRequestHandler):
                 # 而操作其实生效了（130 条全报 -9，刷新目录一看名字全改好了）。
                 # 不提示的话用户会以为白干一场。
                 msg += "；注：百度对刚变动的文件常假报失败，刷新目录核对一下，往往已经生效"
-            return self._json({"ok": True, "stat": stat, "errors": errs, "msg": msg})
+            # 执行过的预览文件盖个戳：列表里显示「已执行」，而且不再被复用——
+            # 网盘已经不是那份预览生成时的样子，再拿它当「当前状态」就是错的了
+            preview_id = str(body.get("preview_id") or "")
+            if preview_id:
+                preview_store.mark_executed(PROJ, preview_id, stat, msg)
+            return self._json({"ok": True, "stat": stat, "errors": errs, "msg": msg,
+                               "preview_id": preview_id})
 
         # 导出文件清单（给 AI 用）
         if path == "/api/pan_export":

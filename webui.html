@@ -753,10 +753,29 @@
                         onclick="setDup('overwrite')">重名覆盖</button>
               </div>
               <button class="btn ghost" id="btnPanPlan" onclick="panPlan()">生成预览</button>
+              <button class="btn ghost" id="btnPanFresh" onclick="panPlan(true)"
+                      title="忽略已存下来的同参数预览，重新扫一遍网盘">重新生成</button>
               <button class="btn green" id="btnPanApply" onclick="panApply()" disabled>执行</button>
             </div>
           </div>
         </div>
+        <!-- 预览文件：每次「生成预览」都把计划落盘成一份文件。同参数再点一次直接复用，
+             不必把网盘重扫一遍；也可以从这份列表里挑一份旧的载入后直接执行 -->
+        <div class="row" style="margin-top:12px">
+          <div class="field" style="margin-bottom:0">
+            <label>预览文件</label>
+            <select id="pvList" onchange="pvLoad()"></select>
+          </div>
+          <div class="field" style="flex:0 0 auto;min-width:0;margin-bottom:0">
+            <label>&nbsp;</label>
+            <div class="btnbar">
+              <button class="btn ghost sm" onclick="pvRefresh()">刷新</button>
+              <button class="btn ghost sm" id="btnPvDel" onclick="pvDelete()" disabled>删除这份</button>
+              <button class="btn ghost sm" onclick="pvClean()">清理已执行</button>
+            </div>
+          </div>
+        </div>
+        <div class="hint" id="pvHint"></div>
         <div class="scanbar hidden" id="scanBar">
           <div class="scantop">
             <span class="spin"></span>
@@ -1278,9 +1297,11 @@ function panTab(k){
   $('recChip').classList.toggle('on', rc.checked);   // 点亮状态跟着 checkbox 走
 
   panOps = []; panTotal = 0;
+  pvCurrent = ''; pvCurAge = 0; pvCurDone = false;   // 换了页签就别再认着上一份预览了
   renderPanPreview([], '');
   $('btnPanApply').disabled = true;
   setMsg('panMsg', '', null);
+  if(typeof pvRefresh === 'function') pvRefresh('');
 }
 
 /* 改名模式切换：只显示当前模式需要的输入框 */
@@ -1492,8 +1513,113 @@ function execPaint(d, sec){
   $('execTime').textContent = sec + 's';
 }
 
-/* 生成预览（改名 / 整理 / 删除） */
-async function panPlan(){
+/* ---------- 预览文件（本地存盘，避免反复重扫网盘） ----------
+   每点一次「生成预览」都会把计划写进 previews/ 下的一个文件；带了「指纹」，
+   同参数再点一次直接复用，一个网盘请求都不发。下面是这份文件列表的全部交互：
+   载入（挑一份旧的直接执行）、删除、清理已执行。 */
+let pvItems   = [];    // 服务端给的预览文件摘要列表
+let pvCurrent = '';    // 当前载入的预览 id（执行完要在它上面盖「已执行」戳）
+let pvCurAge  = 0;     // 当前这份的年龄（秒），执行前用来提示可能已过期
+let pvCurDone = false; // 当前这份是否已经执行过（再执行一遍要额外警告）
+let pvMaxKeep = 50;    // 服务端最多保留多少份（只用于提示文案）
+
+function pvAge(sec){
+  sec = Math.max(0, Math.floor(sec || 0));
+  if(sec < 60)    return sec + ' 秒前';
+  if(sec < 3600)  return Math.floor(sec / 60) + ' 分钟前';
+  if(sec < 86400) return Math.floor(sec / 3600) + ' 小时前';
+  return Math.floor(sec / 86400) + ' 天前';
+}
+
+/* 下拉选项文案：15:30 · 批量改名·只保留书名 · 123 条 [· 已执行 15:42] */
+function pvText(it){
+  let s = `${String(it.ts || '').slice(11, 16)} · ${it.label || it.kind} · ${it.total} 条`;
+  if(it.executed) s += ` · 已执行 ${String(it.executed_ts || '').slice(11, 16)}`;
+  return s;
+}
+
+function pvPaintHint(){
+  const h = $('pvHint'); if(!h) return;
+  if(!pvItems.length){
+    h.innerHTML = '还没有存下来的预览。点「生成预览」会自动存一份到 '
+      + '<code>previews/</code> 目录；同参数再点一次直接复用，不再扫描网盘。';
+    return;
+  }
+  const n = pvItems.filter(x => x.executed).length;
+  h.innerHTML = `本地存了 <b>${pvItems.length}</b> 份预览（<code>previews/</code> 目录，最多留 ${pvMaxKeep} 份）。`
+    + `同参数再点「生成预览」会直接复用，不再扫描网盘；要强制重扫点「重新生成」。`
+    + (n ? `其中 <b>${n}</b> 份已执行过，不会再被复用（网盘已经不是当时的样子了）。` : '')
+    + ` 选一份载入即可直接「执行」。`;
+}
+
+async function pvRefresh(keepId){
+  const d = await api('/api/preview_list', {});
+  if(!d || !d.ok) return;
+  pvItems = d.items || [];
+  if(d.max_keep) pvMaxKeep = d.max_keep;
+  const sel = $('pvList');
+  const want = (keepId !== undefined) ? keepId : sel.value;
+  sel.innerHTML = pvItems.length
+    ? pvItems.map(it => `<option value="${esc(it.id)}">${esc(pvText(it))}</option>`).join('')
+    : '<option value="">（还没有存下来的预览）</option>';
+  // 尽量保住原来选中的那份；它被删了（或第一次加载）就落到第一份上
+  if(want && pvItems.some(it => it.id === want)) sel.value = want;
+  const cur = pvItems.find(it => it.id === sel.value);
+  pvCurAge = cur ? cur.age : 0;
+  $('btnPvDel').disabled = !cur;
+  pvPaintHint();
+}
+
+/* 点下拉里的一份预览 → 立刻载入（两步就能执行：选、点执行） */
+async function pvLoad(){
+  const id = $('pvList').value;
+  if(!id) return;
+  setMsg('panMsg', '正在载入预览文件…', null);
+  const d = await api('/api/preview_load', {id});
+  if(!d || !d.ok){ setMsg('panMsg', (d && d.msg) || '载入失败', false); return; }
+  panOps = d.ops || [];
+  panTotal = d.total || 0;
+  pvCurrent = d.preview_id || id;
+  pvCurAge = d.preview_age || 0;
+  pvCurDone = !!d.preview_executed;
+  const src = `来自预览文件 ${d.preview_ts}（${pvAge(pvCurAge)}生成） · ${panTotal} 条`
+    + (pvCurDone ? ' · ⚠ 这份已经执行过' : '');
+  renderPanPreview(panOps, src);
+  $('btnPanApply').disabled = !panOps.length;
+  setMsg('panMsg', `${d.msg}，确认后点「执行」`
+    + (pvCurDone ? '；注意：这份已经执行过一次了' : '')
+    + (d.errors && d.errors.length ? `；注意：${d.errors.slice(0,2).join('；')}` : ''),
+    pvCurDone ? false : null);
+}
+
+async function pvDelete(){
+  const id = $('pvList').value;
+  if(!id) return;
+  if(!confirm('删掉这份预览文件？\n只删本地存下来的计划记录，不会动网盘上的任何东西。')) return;
+  const d = await api('/api/preview_delete', {id});
+  setMsg('panMsg', (d && d.msg) || '删除失败', !!(d && d.ok));
+  if(d && d.ok && id === pvCurrent){
+    // 正载入的这份被删了 → 清掉预览区，免得拿着一份已经不存在的计划去执行
+    pvCurrent = ''; pvCurAge = 0; pvCurDone = false; panOps = []; panTotal = 0;
+    renderPanPreview([], ''); $('btnPanApply').disabled = true;
+  }
+  await pvRefresh('');
+}
+
+async function pvClean(){
+  if(!confirm('删除所有「已执行过」的预览文件？\n只清本地记录，不影响网盘。')) return;
+  const d = await api('/api/preview_clean', {});
+  setMsg('panMsg', (d && d.msg) || '清理失败', !!(d && d.ok));
+  if(d && d.ok){
+    pvCurrent = ''; pvCurAge = 0; pvCurDone = false; panOps = []; panTotal = 0;
+    renderPanPreview([], ''); $('btnPanApply').disabled = true;
+  }
+  await pvRefresh('');
+}
+
+/* 生成预览（改名 / 整理 / 删除）。refresh=true 表示「重新生成」：忽略已存下来的
+   同参数预览，强制重扫网盘 */
+async function panPlan(refresh){
   const path = $('panPath').value.trim();
   const recursive = $('panRecursive').checked;
   let body = {path, recursive};
@@ -1532,21 +1658,27 @@ async function panPlan(){
     setMsg('panMsg', 'AI 计划请直接在下方粘贴 JSON 后点「解析并预览」', null); return;
   }
 
+  body.refresh = !!refresh;            // 后端据此跳过「同参数预览」的复用
   $('btnPanPlan').disabled = true;
-  setMsg('panMsg', '', null);
+  $('btnPanFresh').disabled = true;
+  setMsg('panMsg', refresh ? '重新生成中（忽略已存下来的预览）…' : '', null);
   showScan(true);
   startScanPoll();                     // 边扫边显示进度，扫完由 finally 收尾
   let d;
   try{
     d = await api('/api/pan_plan', body);
   }finally{
-    stopScanPoll(); showScan(false); $('btnPanPlan').disabled = false;
+    stopScanPoll(); showScan(false);
+    $('btnPanPlan').disabled = false; $('btnPanFresh').disabled = false;
   }
   // 用户点了「停止」→ 中性提示（这不是报错，扫描是只读的，什么都没改）
   if(!d.ok){ setMsg('panMsg', d.msg, d.cancelled ? null : false); return; }
 
   panOps = d.ops || [];
   panTotal = d.total || 0;
+  pvCurrent = d.preview_id || '';      // 之后点「执行」时回写「已执行」戳用得上
+  pvCurAge = d.reused ? (d.preview_age || 0) : 0;
+  pvCurDone = false;                   // 能被复用的预览必然没执行过，见预览文件规则
   const isEmptyTab = panTab_ === 'empty';
   const dupTxt = panDup === 'overwrite' ? '⚠ 重名将覆盖' : '重名将跳过';
   const tail = isEmptyTab
@@ -1558,11 +1690,17 @@ async function panPlan(){
       // 这事必须说出来——悄悄改名字比让人看见更糟
       + (d.auto ? ` · ${d.auto} 个撞名已自动编号 (2)(3)` : '')
       + ` · ${dupTxt}`;
-  renderPanPreview(panOps, tail);
+  // 复用/落盘的结果如实写出来：用户得知道眼前这份是刚扫的还是拿旧文件顶上的
+  const srcTxt = d.reused
+    ? `♻ 复用了 ${pvAge(d.preview_age)}生成的同参数预览，没有重新扫描网盘`
+    : (d.preview_ts ? `已存为预览文件 ${String(d.preview_ts).slice(11)}` : '');
+  renderPanPreview(panOps, tail + (srcTxt ? ` · ${srcTxt}` : ''));
   $('btnPanApply').disabled = !panOps.length;
-  setMsg('panMsg', panOps.length ? `${tail}，确认后点「执行」`
+  setMsg('panMsg', panOps.length
+    ? `${tail}${srcTxt ? '；' + srcTxt : ''}，确认后点「执行」`
     : (isEmptyTab ? '没有空的文件夹，很干净' : '没有符合条件的文件'),
     !panOps.length ? false : null);
+  pvRefresh(d.preview_id || '');       // 列表里把刚生成的这份选中
 }
 
 /* 执行：删除类操作必须二次确认；覆盖模式同样二次确认 */
@@ -1579,17 +1717,29 @@ async function panApply(){
     : panDup === 'overwrite'
     ? `⚠ 即将执行 ${n} 条操作（重名覆盖模式）：撞到的旧文件会先挪进「_覆盖备份」目录再执行，可找回。确定继续吗？`
     : `即将对 ${n} 个文件执行操作（重名跳过），确定继续吗？`;
-  if(!confirm(tip)) return;
+  // 载入的是旧预览时要说清楚：网盘可能已经变了，别让人以为清单是刚刚核实的
+  const oldTip = (pvCurrent && pvCurAge > 600)
+    ? `\n\n注意：这份预览是 ${pvAge(pvCurAge)}生成的，网盘内容可能已经变了；`
+      + `不存在的路径会执行失败并记在明细里。想保险就先点「重新生成」。`
+    : '';
+  const doneTip = (pvCurrent && pvCurDone)
+    ? `\n\n⚠ 这份预览已经执行过一次了：清单里的大多数路径可能已经不存在，`
+      + `再执行一遍多半只会得到一堆失败。确定还要继续吗？`
+    : '';
+  if(!confirm(tip + oldTip + doneTip)) return;
 
   $('btnPanApply').disabled = true;
   $('btnPanPlan').disabled = true;      // 执行期间不许再生成预览：两边同时操作网盘只会互相干扰
+  $('btnPanFresh').disabled = true;
   setMsg('panMsg', '正在执行，请勿关闭页面…（进度见上方进度条）', null);
   const execT0 = Date.now();
   showExec(true); startExecPoll();
 
   let d;
   try{
-    d = await api('/api/pan_apply', {ops: panOps, ondup: panDup});
+    // preview_id 带过去，执行成功后后端会在那份预览文件上盖「已执行」戳：
+    // 列表里能看出来，而且它不会再被复用（网盘已经变了）
+    d = await api('/api/pan_apply', {ops: panOps, ondup: panDup, preview_id: pvCurrent});
   } finally {
     // 收起前补画一次最终进度：最后一批的完成回调常常来不及被 300ms 的轮询画出来，
     // 直接收起会让进度条停在 76% 这种位置，看着像没跑完
@@ -1597,7 +1747,7 @@ async function panApply(){
     if(fin && fin.ok) execPaint(fin, ((Date.now() - execT0) / 1000).toFixed(0));
     await new Promise(r => setTimeout(r, 450));
     stopExecPoll(); showExec(false);
-    $('btnPanPlan').disabled = false;
+    $('btnPanPlan').disabled = false; $('btnPanFresh').disabled = false;
   }
 
   if(!d || !d.ok){
@@ -1610,10 +1760,15 @@ async function panApply(){
     ? '；' + st.fails.slice(0, 2)
         .map(f => `${(f.path || '').split('/').pop()} ${f.msg || '失败'}`).join('；')
     : '';
+  const execId = pvCurrent;      // 记住刚执行的是哪份，刷完列表选回去好让人看见「已执行」
   panOps = []; panTotal = 0;
+  // 清掉「当前载入的是哪份预览」：不然接着粘贴一份 AI 计划去执行时，会把「已执行」
+  // 的戳盖到这份无辜的预览文件上
+  pvCurrent = ''; pvCurAge = 0; pvCurDone = false;
   renderPanPreview([], '');
   $('btnPanApply').disabled = true;
-  await panBrowse();     // 先刷新目录列表（它自己会写一条提示）
+  await pvRefresh(execId);   // 那份预览现在带着「已执行」戳了，重新拉一遍列表
+  await panBrowse();         // 先刷新目录列表（它自己会写一条提示）
   // 结果提示放最后写，否则会被上面「列出 N 个文件」的提示盖掉，看不到执行战果
   setMsg('panMsg', (d.msg || '执行完成') + failTxt, true);
 }
@@ -1668,6 +1823,9 @@ async function panParse(){
   }
   panOps = d.ops || [];
   panTotal = d.total || 0;
+  // AI 计划不是从预览文件来的：把「当前预览」清干净，免得执行时把「已执行」的戳
+  // 盖到上一次载入的那份预览上
+  pvCurrent = ''; pvCurAge = 0; pvCurDone = false;
   renderPanPreview(panOps, '');
   $('btnPanApply').disabled = !panOps.length;
 }
@@ -1697,6 +1855,7 @@ async function panParse(){
   // 卡片4 目录输入框回车即浏览
   const pp = $('panPath');
   if(pp) pp.addEventListener('keydown', e => { if(e.key === 'Enter') panBrowse(); });
+  pvRefresh();              // 预览文件列表：拉一次，看看本地存了哪些计划
 })();
 
 loadConfig();
