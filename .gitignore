@@ -33,6 +33,7 @@ uploaded_log.json
 done_log.json
 upload.pid
 upload_map.json
+local_rename_log.jsonl
 *.log
 
 # ---------- 推送日志 ----------

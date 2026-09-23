@@ -27,6 +27,7 @@ LOGFILE = PROJ / "upload.log"
 PROGRESS = PROJ / "progress.json"
 HTMLFILE = PROJ / "webui.html"
 PIDFILE = PROJ / "upload.pid"            # 上传进程锁：面板重启也能认出还在跑的上传
+LOCAL_RENAME_LOG = PROJ / "local_rename_log.jsonl"   # 本地改名记录（可整批回退）
 PORT = 8765
 LOG_MAX_BYTES = 20 * 1024 * 1024         # 日志超过 20MB 就归档，避免长期任务撑爆磁盘
 
@@ -151,6 +152,14 @@ def tail_text(path: Path, max_chars: int = 6000, max_lines: int = 60):
         return out[-max_chars:]
     except Exception:
         return ""
+
+
+def read_config():
+    """读 config.json；文件缺失或坏了就返回空字典（调用方自己给出可读的提示）"""
+    try:
+        return json.loads(CONFIG.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
 
 
 # ---------------- 授权相关 ----------------
@@ -332,7 +341,17 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/config":
             try:
                 cfg = json.loads(CONFIG.read_text(encoding="utf-8-sig"))
-                self._json({"ok": True, "config": cfg})
+                # 顺带回传「有没有可回退的本地改名」，前端好决定撤销按钮亮不亮
+                undo = {}
+                try:
+                    import local_rename
+                    rec = local_rename.last_undoable(LOCAL_RENAME_LOG)
+                    if rec:
+                        undo = {"available": True, "ts": rec.get("ts"),
+                                "count": len(rec.get("items") or [])}
+                except Exception:
+                    pass
+                self._json({"ok": True, "config": cfg, "rename_undo": undo})
             except Exception as e:
                 self._json({"ok": False, "msg": f"读取配置失败：{e}"})
         elif path == "/api/progress":
@@ -400,6 +419,9 @@ class Handler(BaseHTTPRequestHandler):
             # upload_layout（网盘目录布局）只允许四种，防手改 config.json 写错
             if cfg.get("upload_layout") not in ("mirror", "flat", "by_category", "by_ext"):
                 cfg["upload_layout"] = "mirror"
+            # pre_rename（上传前本地改名方式）只允许三种；默认不改名最安全
+            if cfg.get("pre_rename") not in ("none", "title", "clean"):
+                cfg["pre_rename"] = "none"
             if not str(cfg.get("done_dir", "")).strip():
                 cfg["done_dir"] = str(Path(cfg["local_dir"]).parent / "已上传")
             CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -459,7 +481,75 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True, "stopping": stopping,
                 "msg": "正在停止…" if stopping else "当前没有正在进行的扫描"})
 
+        # ---------------- 本地改名（上传前预处理，动的是磁盘上的真文件）----------------
+        if path == "/api/local_rename_preview":
+            return self._local_rename_preview(body)
+        if path == "/api/local_rename_apply":
+            return self._local_rename_apply(body)
+        if path == "/api/local_rename_undo":
+            return self._local_rename_undo()
+
         return self._json({"ok": False, "msg": f"接口不存在：{path}"}, 404)
+
+    # ---------------------------------------------------------------
+    # 本地改名：预览 → 执行 → （改错了）回退
+    # ---------------------------------------------------------------
+    def _local_rename_preview(self, body):
+        import local_rename
+        cfg = read_config()
+        if not str(cfg.get("local_dir") or "").strip():
+            return self._json({"ok": False, "msg": "请先在「目录」里填好本地上传目录"})
+        mode = str(body.get("mode") or "title")
+        try:
+            files, skipped = local_rename.scan_local(cfg)
+        except FileNotFoundError as e:
+            return self._json({"ok": False, "msg": str(e)})
+        except Exception as e:
+            return self._json({"ok": False, "msg": f"扫描失败：{e}"})
+        rows, unchanged = local_rename.plan_local(files, mode, body.get("params") or {})
+        ops = [{"op": "rename", "name": r["name"], "newname": r["newname"],
+                "path": r["path"], "auto": r.get("auto", False)} for r in rows]
+        return self._json({
+            "ok": True, "ops": ops[:2000], "total": len(ops),
+            "unchanged": unchanged, "scanned": len(files),
+            "auto": sum(1 for r in rows if r.get("auto")),
+            "skipped": skipped, "mode_label": local_rename.MODE_LABELS.get(mode, mode),
+            "dir": str(cfg.get("local_dir"))})
+
+    def _local_rename_apply(self, body):
+        import local_rename
+        # 上传正在跑时改名会让脚本对不上号（它按路径记录已传清单），必须先停
+        if is_running():
+            return self._json({"ok": False, "msg": "上传进行中，请先停止再改名"})
+        cfg = read_config()
+        if not str(cfg.get("local_dir") or "").strip():
+            return self._json({"ok": False, "msg": "请先填好本地上传目录"})
+        mode = str(body.get("mode") or "title")
+        try:
+            files, skipped = local_rename.scan_local(cfg)
+        except Exception as e:
+            return self._json({"ok": False, "msg": f"扫描失败：{e}"})
+        rows, _ = local_rename.plan_local(files, mode, body.get("params") or {})
+        if not rows:
+            return self._json({"ok": True, "renamed": 0, "fails": [], "skipped": skipped,
+                               "msg": "没有需要改名的文件"})
+        done, fails = local_rename.apply_local(rows, LOCAL_RENAME_LOG)
+        return self._json({"ok": True, "renamed": len(done), "fails": fails[:50],
+                           "fail_count": len(fails), "skipped": skipped,
+                           "auto": sum(1 for r in rows if r.get("auto")),
+                           "sample": done[:40],
+                           "log": LOCAL_RENAME_LOG.name})
+
+    def _local_rename_undo(self):
+        import local_rename
+        if is_running():
+            return self._json({"ok": False, "msg": "上传进行中，请先停止再回退"})
+        done, fails, rec = local_rename.undo_last(LOCAL_RENAME_LOG)
+        if rec is None:
+            return self._json({"ok": False, "msg": "没有可回退的改名记录"})
+        return self._json({"ok": True, "reverted": len(done), "fails": fails[:50],
+                           "fail_count": len(fails), "ts": rec.get("ts"),
+                           "sample": done[:40]})
 
     # ---------------------------------------------------------------
     def _pan(self):
@@ -527,10 +617,11 @@ class Handler(BaseHTTPRequestHandler):
                 scan_end(cancelled=cancelled)
             scan_phase("生成计划")
             if kind == "rename":
-                ops, unchanged = pan_tools.build_rename_plan(
+                ops, unchanged, auto = pan_tools.build_rename_plan(
                     files, str(body.get("mode") or "replace"), body.get("params") or {})
                 return self._json({"ok": True, "ops": ops[:2000], "total": len(ops),
-                                   "unchanged": len(unchanged), "scanned": len(files)})
+                                   "unchanged": len(unchanged), "auto": auto,
+                                   "scanned": len(files)})
             if kind == "organize":
                 dest = str(body.get("dest") or "").strip()
                 if not dest:

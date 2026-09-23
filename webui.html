@@ -481,6 +481,31 @@
           每批 500 · 批间暂停 5s；大小上限 4096MB（非会员单文件上限），超出的自动跳过不传。
         </div>
 
+        <div class="sec">上传前先改名（可选）</div>
+        <div class="row">
+          <div class="field">
+            <label>改名方式</label>
+            <select id="pre_rename" onchange="preRenameChange()">
+              <option value="none">不改名，原样上传</option>
+              <option value="title">只保留书名（整理小说用）</option>
+              <option value="clean">去广告/括号清理</option>
+            </select>
+            <div class="hint">
+              改的是<b>本地磁盘上的真文件</b>，上传上去自然就是干净名字。每次改名都会写一份记录
+              （local_rename_log.jsonl），可以整批回退。扫描口径与上传一致：被排除规则命中、
+              空文件、超上限的文件都不动。
+            </div>
+          </div>
+        </div>
+        <div class="btnbar" style="margin-top:2px">
+          <button class="btn ghost sm" id="btnRenamePreview" onclick="localRenamePreview()">预览改名</button>
+          <button class="btn ghost sm" id="btnRenameUndo" onclick="localRenameUndo()" disabled>回退上一次改名</button>
+          <div class="spacer"></div>
+          <span class="autosave" id="preRenameStat"></span>
+        </div>
+        <pre class="term headroom hidden" id="preRenameBox" style="max-height:180px"></pre>
+        <div class="msg" id="preRenameMsg"></div>
+
         <div class="divider"></div>
 
         <div class="sec">上传成功后，本地文件怎么处理</div>
@@ -605,6 +630,7 @@
                 <option value="serial">序号重命名</option>
                 <option value="regex">正则替换</option>
                 <option value="clean">去广告/括号清理</option>
+                <option value="title">只保留书名（整理小说用）</option>
               </select>
             </div>
             <div class="field sm" id="rnFindBox">
@@ -807,7 +833,7 @@ async function api(path, body){
 /* ---------- 配置 ---------- */
 const FIELDS = ['app_key','secret_key','local_dir','remote_dir','done_dir','after_upload',
                 'batch_size','batch_pause_sec','file_interval_sec','max_file_size_mb',
-                'workers','recursive','exclude_patterns','upload_layout'];
+                'workers','recursive','exclude_patterns','upload_layout','pre_rename'];
 
 /* 推荐默认值：海量小文件场景（9.9 万文件 / 21GB）实测调优 */
 const DEFAULTS = {
@@ -820,6 +846,9 @@ const DEFAULTS = {
   workers: 8,
   recursive: 'true',
   upload_layout: 'mirror',
+  // 默认不改名：只保留书名会清掉「Movie (2019).mkv」里的年份，非小说目录会误伤。
+  // 想用的人自己选一次，选项会随配置存下来。
+  pre_rename: 'none',
   exclude_patterns: 'Thumbs.db, desktop.ini, *.tmp, ~$*, *.partial'
 };
 
@@ -869,6 +898,10 @@ async function loadConfig(){
   $('recursive').value = String(!!c.recursive);
   updateRecHint();
   layoutHint();
+  // 上传前改名：选择随配置存下来；顺带按「有没有可回退的记录」点亮撤销按钮
+  $('pre_rename').value = c.pre_rename || DEFAULTS.pre_rename;
+  preRenameChange(true);          // true=回填，不触发自动保存
+  updateUndoBtn(d.rename_undo);
   // 卡片4 的「操作目录」默认取上传用的远程目录
   const rd = String(c.remote_dir || DEFAULTS.remote_dir).replace(/\/+$/, '');
   if(!$('panPath').value) $('panPath').value = rd;
@@ -1006,7 +1039,111 @@ async function verifyToken(){
 }
 
 /* ---------- 上传控制 ---------- */
+/* ---------- 上传前本地改名 ---------- */
+// skipSave：loadConfig 里回填下拉时用。回填不是「用户改了配置」，
+// 不带这个开关的话每次打开页面都会白写一次 config.json（值还没变）
+function preRenameChange(skipSave){
+  const off = $('pre_rename').value === 'none';
+  $('btnRenamePreview').disabled = off;
+  if(off){
+    $('preRenameBox').classList.add('hidden');
+    $('preRenameStat').textContent = '';
+    setMsg('preRenameMsg', '', null);
+  }
+  if(!skipSave) scheduleAutoSave();
+}
+
+function updateUndoBtn(info){
+  const b = $('btnRenameUndo');
+  if(!b) return;
+  if(info && info.available){
+    b.disabled = false;
+    b.textContent = `回退上一次改名（${info.count} 个）`;
+    b.title = `上一次改名：${info.ts}，共 ${info.count} 个文件`;
+  }else{
+    b.disabled = true;
+    b.textContent = '回退上一次改名';
+    b.title = '没有可回退的改名记录';
+  }
+}
+
+/* 预览本地改名：只读扫描，不动任何文件 */
+async function localRenamePreview(quiet){
+  const mode = $('pre_rename').value;
+  if(mode === 'none'){
+    if(!quiet) setMsg('preRenameMsg', '当前设为「不改名，原样上传」', false);
+    return null;
+  }
+  const btn = $('btnRenamePreview');
+  const old = btn.textContent;
+  btn.disabled = true; btn.textContent = '扫描中…';
+  if(!quiet) setMsg('preRenameMsg', '正在扫描本地目录，文件多时慢一点…');
+  try{
+    const d = await api('/api/local_rename_preview', {mode});
+    if(!d.ok){ setMsg('preRenameMsg', d.msg, false); return null; }
+    const box = $('preRenameBox');
+    if(d.total){
+      box.textContent = d.ops.map(o =>
+        `改名  ${o.name}  →  ${o.newname}` + (o.auto ? '   （撞名，已编号）' : '')
+      ).join('\n') + (d.total > d.ops.length ? `\n… 仅显示前 ${d.ops.length} 条` : '');
+      box.classList.remove('hidden');
+    }else{
+      box.textContent = '';
+      box.classList.add('hidden');
+    }
+    $('preRenameStat').textContent =
+      `扫描 ${d.scanned} 个 → 将改名 ${d.total} 个` + (d.auto ? `（${d.auto} 个撞名已编号）` : '');
+    setMsg('preRenameMsg', d.total
+      ? `将把 ${d.total} 个文件改成下面的样子；点「开始上传」时会再确认一次`
+      : '没有需要改名的文件，名字已经够干净了', d.total ? null : true);
+    return d;
+  }finally{
+    btn.disabled = $('pre_rename').value === 'none';
+    btn.textContent = old;
+  }
+}
+
+async function localRenameUndo(){
+  if(!confirm('把最近一次改名回退回去？\n文件名会还原成改名前的样子；'
+              + '已被移走或原名被占用的会跳过。')) return;
+  const btn = $('btnRenameUndo');
+  btn.disabled = true;
+  try{
+    const d = await api('/api/local_rename_undo', {});
+    setMsg('preRenameMsg', d.ok
+      ? `已回退 ${d.reverted} 个文件名`
+        + (d.fail_count ? `，${d.fail_count} 个跳过（文件已不在或原名被占用）` : '')
+      : d.msg, d.ok && !d.fail_count);
+    if(d.ok) await localRenamePreview(true);
+  }finally{
+    const c = await api('/api/config');
+    if(c.ok) updateUndoBtn(c.rename_undo);
+  }
+}
+
 async function startUpload(){
+  // 先改名再上传：改名动的是真文件，所以在这里把计划摊开确认一次再动手
+  const mode = $('pre_rename').value;
+  if(mode && mode !== 'none'){
+    const pb = await localRenamePreview(true);
+    if(pb === null){
+      setMsg('ctlMsg', '改名预览失败，已中止上传（避免把脏名字传上网盘）', false);
+      return;
+    }
+    if(pb.total){
+      const head = pb.ops.slice(0, 8).map(o => `  ${o.name}  →  ${o.newname}`).join('\n');
+      const more = pb.total > 8 ? `\n  …另有 ${pb.total - 8} 个` : '';
+      if(!confirm(`上传前先把 ${pb.total} 个本地文件改名：\n\n${head}${more}\n\n`
+                  + `改的是磁盘上的真文件，记录写在 local_rename_log.jsonl，可整批回退。\n`
+                  + `确定继续吗？`)) return;
+      const r = await api('/api/local_rename_apply', {mode});
+      if(!r.ok){ setMsg('ctlMsg', '改名失败，已中止上传：' + (r.msg || ''), false); return; }
+      setMsg('preRenameMsg', `已改名 ${r.renamed} 个`
+        + (r.fail_count ? `，${r.fail_count} 个跳过` : '') + '，接着开始上传…',
+        !r.fail_count);
+      await localRenamePreview(true);
+    }
+  }
   const d = await api('/api/start', {limit: +($('limit').value || 0)});
   setMsg('ctlMsg', d.msg, d.ok);
   if(d.ok){ $('drybox').classList.add('hidden'); pollNow(); }
@@ -1164,7 +1301,10 @@ function panModeChange(){
     affix:   '统一加前缀 / 后缀，扩展名不受影响。',
     serial:  '按顺序编号。模板里 {n}=序号、{name}=原文件名。',
     regex:   '正则作用于「文件名（不含扩展名）」，可用 \\1 \\2 引用捕获组。',
-    clean:   '自动去掉网址、广告词、多余括号和空格；清理后为空则保留原名。'
+    clean:   '自动去掉网址、广告词、多余括号和空格；清理后为空则保留原名。',
+    title:   '按 书名号 → 残缺书名号 → 作者标记 → 前导标签 → 空格-空格 的次序提取书名，'
+             + '再清掉尾部标注（全本/完结/番外/TXT/卷次）。'
+             + '五种信号都没命中就原样保留——宁可不动，也不乱改。'
   }[m] || '';
 }
 
@@ -1179,7 +1319,8 @@ function renderPanPreview(ops, tail){
   const rows = ops.slice(0, 300).map(o => {
     const nm = esc(o.name || o.path.split('/').pop());
     if(o.op === 'rename')
-      return `<div><span class="del">改名</span> ${nm} <span class="arrow">→</span> ${esc(o.newname)}</div>`;
+      return `<div><span class="del">改名</span> ${nm} <span class="arrow">→</span> ${esc(o.newname)}`
+        + (o.auto ? ` <span style="color:#d9a24a">（撞名，已编号）</span>` : '') + `</div>`;
     if(o.op === 'move')
       return `<div><span class="arrow">移动</span> ${nm} <span class="arrow">→</span> ${esc(o.dest)}</div>`;
     if(o.isdir)   // 删的是空文件夹而非文件，画成 📁 名字/，别让人误以为在删文件
@@ -1367,7 +1508,8 @@ async function panPlan(){
       serial:  {start: +$('rnStart').value || 1, width: +$('rnWidth').value || 3,
                 template: $('rnTpl').value},
       regex:   {pattern: $('rnPattern').value, repl: $('rnRepl2').value},
-      clean:   {}
+      clean:   {},
+      title:   {}
     })[m];
     if(m === 'replace' && !body.params.find){
       setMsg('panMsg', '请先填写「查找」内容', false); return;
@@ -1412,6 +1554,9 @@ async function panPlan(){
       + (d.nested ? `（另有 ${d.nested} 个嵌套空目录会随之一起删除）` : '')
     : `扫描 ${d.scanned} 个文件 → ${panTotal} 条操作`
       + (d.unchanged ? `（${d.unchanged} 个无变化）` : '')
+      // 只保留书名会把「《A》作者：甲」「A - 乙」压成同一个 A，撞车的自动加了 (2)(3)，
+      // 这事必须说出来——悄悄改名字比让人看见更糟
+      + (d.auto ? ` · ${d.auto} 个撞名已自动编号 (2)(3)` : '')
       + ` · ${dupTxt}`;
   renderPanPreview(panOps, tail);
   $('btnPanApply').disabled = !panOps.length;

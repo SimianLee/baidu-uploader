@@ -17,13 +17,16 @@ pan_tools.py —— 百度网盘（应用沙盒）文件操作库
   delete_batch(paths)              批量删除（危险，调用方必须二次确认）
 
 以及「计划」构建（先出计划、预览、再执行，绝不直接改）：
-  build_rename_plan(files, mode, params)
+  build_rename_plan(files, mode, params, occupied)  → (ops, unchanged, auto)
   build_organize_plan(files, by, dest)
   build_delete_plan(files, filters)
   build_empty_dir_plan(entries, root, skip)   找出空目录（递归为空的）
 
-改名四模式：replace（查找替换）/ affix（加前后缀）/ serial（序号）
-          / regex（正则捕获组）/ clean（去广告与括号）
+改名五模式：replace（查找替换）/ affix（加前后缀）/ serial（序号）
+          / regex（正则捕获组）/ clean（去广告与括号）/ title（只保留书名）
+
+命名规则（rename_one / title_name）也被 local_rename.py 复用来改本地文件名——
+两边必须是同一套规则，否则「先改名再上传」和「上传后在网盘改名」结果会不一样。
 
 依赖：requests；Token 复用 upload_baidu.py 的 BaiduAuth（token.json）。
 """
@@ -265,7 +268,7 @@ def errno_text(errno):
 
 
 # ===========================================================================
-# 改名：四种模式
+# 改名：五种模式
 # ===========================================================================
 
 # 常见下载站/资源站的广告尾巴（clean 模式用）
@@ -315,6 +318,138 @@ def clean_name(name: str) -> str:
     return f"{s}.{ext}" if ext else s
 
 
+# ---------------------------------------------------------------------------
+# title 模式：「只保留书名」（整理小说名用）
+#
+# 规则是**按信号强度级联**的，命中即停，都没命中就原样返回——宁可不动，也别乱改。
+# 依据是本地 6 万个小说文件名的实际形态统计：
+#   完整书名号《…》6.4% | 残缺右书名号 …》1.0% | 作者标记 3.6%
+#   前导方括号标签 1.7% | 空格-空格 作者 0.5% | 其余本来就不脏
+# ---------------------------------------------------------------------------
+
+# 括号里只要出现这些词，**整组**都是标注。
+# 必须整组丢：只删关键词会把「(全+二番外)」掏成「(全+二)」，比不删更难看。
+_TITLE_TAIL_KW = re.compile(
+    r"[（(\[【][^（()）\[\]【】]{0,32}"
+    r"(?:全本|全集|完结|番外|出书版|网络版|校对版|精校版|完整版|无删减|修订版|"
+    r"TXT|txt|电子书|上部|下部|第[一二三四五六七八九十百\d]{1,3}[部卷册篇]|"
+    r"[\d一二三四五六七八九十百]{1,3}[部卷册集篇])"
+    r"[^（()）\[\]【】]{0,32}[）)\]】]")
+
+# 括号里就一个单字卷次标记：【全】、（上）、（下）
+# 单独一支而不是并进上面：并进去的话「（李上校）」这种会被「含上字」误伤
+_TITLE_TAIL_SINGLE = re.compile(r"[（(\[【]\s*[上下全]\s*[）)\]】]")
+
+# 括号里只有一个「卷次 / 册数 / 区间」：(1-7)、（3）、(12)、（第5卷）
+#
+# 单个数字那一支必须 (?<!\s)——**前面有空格就不动**。因为撞名自动编号生成的就是
+# 「同名 (2)」，若把它也当卷次清掉，第二次扫描会再把「同名 (2)」改回「同名」，
+# 名字被反复搅动、永不收敛（实测踩过：改名后重扫仍有 2 条待改）。
+_TITLE_TAIL_VOL = re.compile(
+    r"(?<!\s)[（(\[【]\s*(?:第)?[\d一二三四五六七八九十百千]{1,4}"
+    r"(?:[\-~～—–至,，、][\d一二三四五六七八九十百千]{1,4})*"
+    r"\s*(?:[部卷册集篇])?\s*[）)\]】]")
+
+# 收尾的裸标注：全TXT格式电子书_003 / 全本 / 完结 / +番外
+_TITLE_TAIL_BARE = re.compile(
+    r"(?:全?\s*TXT\s*格式\s*电子书|全本\s*TXT|TXT\s*格式|电子书|"
+    r"\+\s*番外|番外|完结|全本|全集)(?:[_\-\s]*\d{1,4})?\s*$", re.I)
+
+# 作者标记。by 必须卡边界，否则 "Baby"、"Hobby" 会被啃掉半截。
+# 而且 by 后面要求是「：」或中日韩字——不然英文书名里的 "Stand by Me" 会被切成
+# "Stand"。中文上传者写的 by 后面几乎都是中文名，这个限制代价很小。
+_RE_AUTHOR = re.compile(
+    r"[\s\-_.·]*\s*(?:作者|著者)\s*[：:]?\s*"
+    r"|[\s\-_.·]*\s*(?<![A-Za-z])(?:BY|By|by)\s*[：:]\s*"
+    r"|[\s\-_.·]*\s*(?<![A-Za-z])(?:BY|By|by)\s*(?=[\u4e00-\u9fff])")
+
+_RE_LEAD_TAG = re.compile(r"^\s*[\(\[【][^\)\]】]{0,24}[\)\]】]\s*")
+# 「空格-横杠-空格」是作者分隔符的常见写法：边荒传说 - 黄易 / Rework - Jason Fried
+# 要求两侧都有空格：不然「半-城」这种书名里的连字符会被误当分隔符
+_RE_SEP = re.compile(r"\s+[-—–]\s+")
+# 前导序号：16、书名 → 书名。分隔符必须显式存在，否则「24个比利」会被啃成「个比利」
+_RE_LEAD_NUM = re.compile(r"^\s*\d{1,4}\s*[、.．,，]\s*(?=[^\d\s])")
+_RE_LEAD_JUNK = re.compile(r"^[\s\-_—–、,，.。·@]+|[\s\-_—–、,，.。·@]+$")
+# 「整个名字就是一对括号」的情况。内容里必须不含任何括号字符——否则
+# 首尾各是一个括号的 [棋魂]因为爱你 作者：一叶（亮光） 会被错拆成
+# 「棋魂]因为爱你 作者：一叶（亮光」（内容可以吞掉中间的 ]，fullmatch 照样成立）
+_RE_WHOLE_WRAP = re.compile(r"[（(\[【]\s*([^（()）\[\]【】]{1,60}?)\s*[）)\]】]")
+
+
+def title_name(name: str) -> str:
+    """title 模式：把小说文件名清成「只有书名」，无变化时返回原名
+
+    级联顺序（先强信号，后弱信号）：
+      1. 完整书名号《…》→ 取括号内。天然跳过《《一光年之恋》》这种错套：
+         因为要求内容里不含书名号，第一个能配上的其实是内层那一对。
+      2. 残缺书名号 → 取最靠左的那个符号，右残取它前面、左残取它后面。
+         真实数据里这种残缺名很多：暗香情撩》by：季安 / 单飞雪《甜上眉梢
+      3. 作者标记（作者：/著者/BY：）→ 取标记之前的部分
+      4. 前导标签 [悬疑] / 【类型】 → 去掉
+      5. 「空格-空格」作者分隔 → 取前面：边荒传说 - 黄易 / Rework - Jason Fried
+    最后统一清尾部标注（全本/完结/番外/TXT/卷次，整组丢）。
+    清成空名字时返回原名——宁可保留脏名字，也不能产生无名文件。
+    """
+    base, ext = split_name(name)
+    s = base.strip()
+    if not s:
+        return name
+
+    # 先把广告尾巴去掉，它们会把书名号切碎（[xxx.com]《书名》这种）
+    for pat in _AD_PATTERNS:
+        s = re.sub(pat, "", s, flags=re.I)
+    s = s.strip()
+    if not s:
+        return name
+
+    m = re.search(r"《([^《》]{1,80})》", s)
+    if m:
+        s = m.group(1)
+    else:
+        # 残缺书名号：谁在前面谁说了算
+        pos_close, pos_open = s.find("》"), s.find("《")
+        if pos_close > 0 and (pos_open < 0 or pos_close < pos_open):
+            s = s[:pos_close]
+        elif pos_open >= 0 and pos_open + 1 < len(s):
+            s = s[pos_open + 1:]
+        else:
+            # 整个名字就是一对括号包着的：【美人】→ 美人
+            mw = _RE_WHOLE_WRAP.fullmatch(s)
+            if mw and mw.group(1).strip():
+                s = mw.group(1)
+            else:
+                ma = _RE_AUTHOR.search(s)
+                if ma:
+                    s = s[:ma.start()]
+                else:
+                    s2 = _RE_LEAD_TAG.sub("", s)
+                    if s2 != s:
+                        s = s2
+                    else:
+                        ms = _RE_SEP.search(s)
+                        if ms:
+                            s = s[:ms.start()]
+
+    # 尾部标注清理：反复擦到不动为止（「（全本）+番外」要两轮才干净）
+    for _ in range(4):
+        prev = s
+        s = _TITLE_TAIL_KW.sub("", s)
+        s = _TITLE_TAIL_SINGLE.sub("", s)
+        s = _TITLE_TAIL_VOL.sub("", s)
+        s = _TITLE_TAIL_BARE.sub("", s)
+        s = _RE_LEAD_TAG.sub("", s)
+        s = _RE_LEAD_NUM.sub("", s)
+        s = s.replace("《", "").replace("》", "")
+        s = _RE_LEAD_JUNK.sub("", s)
+        s = re.sub(r"\s{2,}", " ", s).strip()
+        if s == prev or not s:
+            break
+
+    if not s:
+        return name
+    return f"{s}.{ext}" if ext else s
+
+
 def rename_one(name: str, mode: str, p: dict, index: int = 0) -> str:
     """按模式算出一个文件的新名字；无变化时返回原名"""
     base, ext = split_name(name)
@@ -352,6 +487,9 @@ def rename_one(name: str, mode: str, p: dict, index: int = 0) -> str:
     elif mode == "clean":
         return clean_name(name)
 
+    elif mode == "title":
+        return title_name(name)
+
     else:
         return name
 
@@ -362,8 +500,47 @@ def rename_one(name: str, mode: str, p: dict, index: int = 0) -> str:
     return new
 
 
-def build_rename_plan(files, mode: str, params: dict):
-    """files: [{path, name, size}] → 返回 ops（只含真正改名的）"""
+def dedupe_newnames(rows, occupied=None):
+    """新名字撞车时自动加 (2)(3)…
+
+    rows: [{"dir": 所在目录, "name": 原名, "newname": 目标名}]，**原地改写** newname
+    occupied: {目录: {已占用的小写名字}}。本地改名时用磁盘实况填（同目录里不会
+              改名的那些文件）；网盘侧事先不知道目录内容，只能做「本批内部」去重，
+              撞到网盘上已有的同名文件由 ondup 策略（跳过/覆盖）兜底。
+
+    为什么必须去重：只保留书名会把「《A》作者：甲.txt」「A - 乙.txt」压成同一个
+    「A.txt」。执行时两条争一个名字，必然一条成功一条报错，还会留下说不清的半截
+    状态。加个 (2) 就都保住了，信息量也比丢掉一条强。
+
+    返回被自动编号的条数（要如实告诉用户，不能悄悄改名）。
+    """
+    used = {}
+    if occupied:
+        for d, names in occupied.items():
+            used[d] = {n.lower() for n in names}
+    auto = 0
+    for r in rows:
+        pool = used.setdefault(r["dir"], set())
+        want = r["newname"]
+        if want.lower() in pool:
+            base, ext = split_name(want)
+            k = 2
+            while True:
+                cand = f"{base} ({k})" + (f".{ext}" if ext else "")
+                if cand.lower() not in pool:
+                    break
+                k += 1
+            r["newname"] = cand
+            auto += 1
+        pool.add(r["newname"].lower())
+    return auto
+
+
+def build_rename_plan(files, mode: str, params: dict, occupied=None):
+    """files: [{path, name, size}] → 返回 (ops, unchanged, auto)
+
+    ops 只含真正改名的；auto 是撞名被自动编号的条数。
+    """
     ops, unchanged = [], []
     for i, f in enumerate(files):
         new = rename_one(f["name"], mode, params, i)
@@ -372,7 +549,15 @@ def build_rename_plan(files, mode: str, params: dict):
                         "newname": new})
         else:
             unchanged.append(f["path"])
-    return ops, unchanged
+    rows = [{"dir": o["path"].rpartition("/")[0], "name": o["name"],
+             "newname": o["newname"]} for o in ops]
+    before = [r["newname"] for r in rows]
+    auto = dedupe_newnames(rows, occupied) if rows else 0
+    for o, r, b in zip(ops, rows, before):
+        o["newname"] = r["newname"]
+        if r["newname"] != b:
+            o["auto"] = True        # 撞名被自动编号，预览里要标出来
+    return ops, unchanged, auto
 
 
 # ===========================================================================

@@ -11,6 +11,7 @@
   "chunk_size_mb": 4,
   "recursive": true,
   "upload_layout": "mirror",
+  "pre_rename": "none",
   "done_dir": "",
   "after_upload": "keep",
   "exclude_patterns": ["Thumbs.db", "desktop.ini", "*.tmp", "~$*", "*.partial"]
