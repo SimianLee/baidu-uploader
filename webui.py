@@ -671,7 +671,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 items = pan.list_dir(p, recursive=False)
             except Exception as e:
-                return self._json({"ok": False, "msg": f"列目录失败：{e}"})
+                # e 已是 pan_tools 给的人话（含路径），别再套一层前缀
+                return self._json({"ok": False, "msg": str(e)})
             dirs = sorted([i for i in items if i["isdir"]], key=lambda x: x["name"])
             files = sorted([i for i in items if not i["isdir"]], key=lambda x: x["name"])
             return self._json({"ok": True, "path": p, "sandbox": sandbox,
@@ -708,24 +709,31 @@ class Handler(BaseHTTPRequestHandler):
             scan_begin()
             cancelled = False
             entries = None
+            # 列不开的子目录（百度脏条目）：不中断整次扫描，但也绝不能装作没看见——
+            # 结果不完整这件事必须传到前端，否则用户会以为「就这些文件」
+            failures = []
             try:
                 if kind == "empty_dir":
                     # 要判定「目录里有没有文件」就得看到目录本身，list_files 把它们
                     # 滤掉了；而且必须递归——只看一层根本不知道子目录里是不是还有文件。
                     # 所以这里无视前端的 recursive 参数，一律按递归扫。
                     entries = pan.list_dir(p, recursive=True, on_progress=scan_tick,
-                                           should_stop=scan_should_stop)
+                                           should_stop=scan_should_stop,
+                                           failures=failures)
                     files = [e for e in entries if not e["isdir"]]
                 else:
                     files = pan.list_files(p, recursive=recursive, on_progress=scan_tick,
-                                           should_stop=scan_should_stop)
+                                           should_stop=scan_should_stop,
+                                           failures=failures)
             except pan_tools.ScanCancelled as e:
                 cancelled = True
                 return self._json({"ok": False, "cancelled": True, "msg":
                                    f"已停止扫描（已遍历 {e.dirs} 个目录 / "
                                    f"找到 {e.files} 个文件），没有做任何改动"})
             except Exception as e:
-                return self._json({"ok": False, "msg": f"扫描失败：{e}"})
+                # PanError 的文案已经是给人看的（含路径和原因），别再套一层前缀
+                m = str(e) if isinstance(e, pan_tools.PanError) else f"扫描失败：{e}"
+                return self._json({"ok": False, "msg": m})
             finally:
                 scan_end(cancelled=cancelled)
             scan_phase("生成计划")
@@ -752,13 +760,21 @@ class Handler(BaseHTTPRequestHandler):
                 info = {"scanned": len(files)}
                 label = "批量删除·" + filter_label(flt)
             elif kind == "empty_dir":
-                # skip 由前端给，默认保护本工具自己的备份区
+                # skip 由前端给，默认保护本工具自己的备份区；
+                # unreadable 是这次扫不进去的目录——「不知道里面有什么」绝不能
+                # 当成「里面什么都没有」，那会删掉用户的真数据
                 ops, einfo = pan_tools.build_empty_dir_plan(
-                    entries, p, skip=str(body.get("skip") or "_覆盖备份"))
+                    entries, p, skip=str(body.get("skip") or "_覆盖备份"),
+                    unreadable=[f["path"] for f in failures])
                 info = {"scanned": len(files), **einfo}
                 label = "空文件夹"
             else:
                 return self._json({"ok": False, "msg": f"未知的计划类型：{kind}"})
+
+            # 有目录没扫进去 ⇒ 这次结果是不完整的。带上前 30 个明细，让用户能自己去看
+            if failures:
+                info["skipped_total"] = len(failures)
+                info["skipped_dirs"] = failures[:30]
 
             full = len(ops)
             ops = ops[:2000]        # 与执行上限一致：再多也执行不了，不必塞进预览文件
@@ -830,30 +846,41 @@ class Handler(BaseHTTPRequestHandler):
             limit = int(body.get("limit", 300) or 300)
             scan_begin()
             cancelled = False
+            failures = []       # 同上：清单不完整得让 AI 和用户都知道
             try:
                 files = pan.list_files(p, recursive=recursive, on_progress=scan_tick,
-                                       should_stop=scan_should_stop)
+                                       should_stop=scan_should_stop, failures=failures)
             except pan_tools.ScanCancelled as e:
                 cancelled = True
                 return self._json({"ok": False, "cancelled": True, "msg":
                                    f"已停止扫描（已遍历 {e.dirs} 个目录 / "
                                    f"找到 {e.files} 个文件），清单未生成"})
             except Exception as e:
-                return self._json({"ok": False, "msg": f"扫描失败：{e}"})
+                m = str(e) if isinstance(e, pan_tools.PanError) else f"扫描失败：{e}"
+                return self._json({"ok": False, "msg": m})
             finally:
                 scan_end(cancelled=cancelled)
             files = files[:limit]
             lines = [f'{i+1}\t{f["path"]}\t{f["size"]}' for i, f in enumerate(files)]
+            # 清单不完整时把这件事写进注释：AI 拿到的是残缺清单，得让它知道
+            # 有些目录根本没扫进去，别把「清单里没有」当成「网盘里没有」
+            skip_note = ""
+            if failures:
+                sample = "；".join(f["path"].rsplit("/", 1)[-1] for f in failures[:3])
+                skip_note = (f"# 注意：有 {len(failures)} 个目录列不开（百度侧脏条目），"
+                             f"它们下面的文件不在清单里，例如：{sample}\n")
             hint = (
                 f"# 以下是百度网盘沙盒目录 {p} 下的 {len(files)} 个文件（路径\t大小字节）。\n"
-                f"# 请按要求生成操作计划，输出严格的 JSON，格式：\n"
+                + skip_note
+                + f"# 请按要求生成操作计划，输出严格的 JSON，格式：\n"
                 f'# {{"ops":[{{"op":"rename","path":"...","newname":"..."}},'
                 f'{{"op":"move","path":"...","dest":"..."}},'
                 f'{{"op":"delete","path":"..."}}]}}\n'
                 f"# 约束：1) path 必须是上面列出的完整路径，不要自造；"
                 f"2) 只允许操作 {sandbox} 内的文件；3) 不要输出解释文字，只输出 JSON。\n")
             return self._json({"ok": True, "text": hint + "\n".join(lines),
-                               "count": len(files), "total": len(files)})
+                               "count": len(files), "total": len(files),
+                               "skipped_total": len(failures)})
 
         # 校验粘贴进来的 AI 计划
         if path == "/api/pan_validate":

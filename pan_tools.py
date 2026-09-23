@@ -117,7 +117,7 @@ class PanFiles:
 
     # ---------- 列目录 ----------
     def list_dir(self, path: str, recursive: bool = False, limit: int = 1000,
-                 on_progress=None, should_stop=None):
+                 on_progress=None, should_stop=None, failures=None):
         """列出目录内容；recursive=True 时递归全部子目录。
         返回 [{path, name, size, isdir, mtime}]
 
@@ -126,19 +126,42 @@ class PanFiles:
 
         should_stop() 返回真值时立刻抛 ScanCancelled 中断扫描（用户点了「停止」）。
         检查点放在「每层目录开始前」和「同层分页拉取前」——后者保证一个几万条的
-        大目录在翻页途中也能被刹住，而不是必须读完这一层。"""
+        大目录在翻页途中也能被刹住，而不是必须读完这一层。
+
+        failures: 传一个 list 进来即开启**容错模式**。子目录列不开时不再中断整次扫描，
+                  而是把 {"path", "errno", "msg"} 追加进去后跳过，继续扫别的。
+                  为什么需要：实测百度会返回这种脏条目——父目录的列表里有它
+                  （isdir=1），拿它自己的 path 去列却稳定回 -9；试过 trim 尾部空白、
+                  全角空格换半角、去掉全角空格等变体全部无效（见 _probe_ls2.py：
+                  69 个子目录里就 1 个这样）。几千个目录的大扫描里只要摊上一个，
+                  整次预览就全废了，而它跟其余 99.9% 的目录毫无关系。
+                  调用方拿到的是同一个 list 对象（可变），不需要接返回值。
+                  注意：**起点目录**列不开时无论是否容错都照样抛错——那说明路径或
+                  沙盒配置本身有问题，必须让用户当场看见，而不是给个空结果。
+        """
         root = self.check_path(path)
         out, stack, dirs_done, files_seen = [], [root], 0, 0
         while stack:
             d = stack.pop()
             start = 0
+            broken = False
             while True:
                 if should_stop and should_stop():
                     raise ScanCancelled(dirs_done, files_seen)
                 r = self._get(LIST_URL, {"dir": d, "start": start,
                                          "limit": limit, "order": "name"})
-                if r.get("errno", 0) != 0:
-                    raise PanError(f"列目录失败 {d}: errno={r.get('errno')} {r}")
+                e = r.get("errno", 0)
+                if e != 0:
+                    # 这几种是全局性的（授权坏了 / 被限流），跳过没有任何意义：
+                    # 后面每个目录都会同样失败，此时静默跳过只会给出一个假结果
+                    if (failures is not None and d != root
+                            and e not in _FATAL_LIST_ERRNOS):
+                        if len(failures) < 500:     # 兜个上限，别让响应体爆炸
+                            failures.append({"path": d, "errno": e,
+                                             "msg": errno_text(e)})
+                        broken = True
+                        break
+                    raise PanError(list_dir_error(d, e))
                 items = r.get("list", [])
                 for it in items:
                     rec = {
@@ -163,6 +186,8 @@ class PanFiles:
                     on_progress(dirs_done, files_seen, d)
                 except Exception:
                     pass        # 进度回调只是锦上添花，出错绝不能中断扫描
+            if broken:
+                continue        # 这个目录列不开，已记进 failures；接着扫栈里剩下的
             if not recursive:
                 break
         if should_stop and should_stop():       # 收尾前最后一道检查
@@ -170,11 +195,12 @@ class PanFiles:
         return out
 
     def list_files(self, path: str, recursive: bool = True, on_progress=None,
-                   should_stop=None):
-        """只要文件，不要目录"""
+                   should_stop=None, failures=None):
+        """只要文件，不要目录（failures 的语义见 list_dir）"""
         return [f for f in self.list_dir(path, recursive=recursive,
                                          on_progress=on_progress,
-                                         should_stop=should_stop)
+                                         should_stop=should_stop,
+                                         failures=failures)
                 if not f["isdir"]]
 
     # ---------- 建目录 ----------
@@ -265,6 +291,30 @@ def errno_text(errno):
         2: "参数错误", 12: "批量操作部分失败", 111: "Token 过期",
         31034: "命中频控", 31061: "文件不存在", 31066: "文件不存在或无权限",
     }.get(errno, f"错误码 {errno}")
+
+
+# 列目录时「跳过没意义、必须当场报错」的几种错误：授权类是全局性的（后面每个
+# 目录都会同样失败），31034 是限流（_get 里已经退避重试过，还失败说明真被限住了，
+# 继续扫下去只会满屏失败、给出一个假的「扫完了」）
+_FATAL_LIST_ERRNOS = {-6, 111, 31034}
+
+
+def list_dir_error(path: str, errno) -> str:
+    """把「列目录失败」翻成人话。
+
+    之前是直接把原始响应 JSON 甩出去（errno=-9 {'errno': -9, 'request_id': ...}），
+    用户看到一串方块字码点，既不知道出了什么事，也不知道该怎么办。
+    """
+    why = {
+        -6: "授权已失效，请先重新授权",
+        111: "授权已过期，请先重新授权",
+        31034: "请求太频繁，被百度限流了，歇几分钟再试",
+        -9: "目录不存在，可能已被移动或改名",
+        31061: "目录不存在，可能已被移动或改名",
+        31066: "目录不存在，或没有访问权限",
+        -7: "目录名不合法",
+    }.get(errno, errno_text(errno))
+    return f"列目录失败（{why}）：{path}"
 
 
 # ===========================================================================
@@ -654,7 +704,7 @@ def build_delete_plan(files, f: dict):
 # 空目录：找出「整棵子树里连一个文件都没有」的目录
 # ===========================================================================
 
-def build_empty_dir_plan(entries, root: str, skip: str = ""):
+def build_empty_dir_plan(entries, root: str, skip: str = "", unreadable=None):
     """找出能删掉的空目录 → 返回 (ops, info)
 
     entries: PanFiles.list_dir(root, recursive=True) 的**原始**结果——目录和文件都要。
@@ -663,6 +713,10 @@ def build_empty_dir_plan(entries, root: str, skip: str = ""):
              把它删掉太意外；而且它下面若全是空的，删掉它的直接子目录同样清得干净。
     skip:    逗号分隔的名字关键字，命中的目录**连同整棵子树**一并跳过
              （默认由调用方传 "_覆盖备份" —— 别顺手把备份区连根端了）。
+    unreadable: 扫描时**列不开**的目录路径列表（list_dir 的 failures）。
+             这些目录里有没有文件是无从得知的，必须当成「非空」保护起来，
+             否则「不知道有什么」会被当成「什么都没有」而删掉——那是用户的真数据。
+             （实测百度会返回这种东西：父目录里有它，拿它的 path 去列回 -9。）
 
     判定规则：某目录（含所有层级的子目录）里一个文件都没有 ⇒ 空。
     被 skip 命中的目录自己不算，**它的祖先也一律不算**——否则删掉那个祖先会把
@@ -718,8 +772,21 @@ def build_empty_dir_plan(entries, root: str, skip: str = ""):
         if skip_sub[d]:
             skip_sub[parent] = True
 
-    # 3. 空的里面，剔掉被 skip 命中的子树（自己命中，或子树里藏着命中的）
-    cand = [d for d in dirs if not has_file[d] and not skip_sub[d]]
+    # 2b. 打不开的目录（list_dir 的 failures）：里面装了什么我们**根本不知道**，
+    #     绝不能当空目录删掉——就是那个「肖申克的救赎 斯蒂芬•金　」，天知道底下
+    #     有没有书。它的祖先同样不能算空：删掉祖先会把它一起带走。所以把「它自己
+    #     加上到 root 为止的每一级祖先」整条链都打上保护（精确路径匹配，不走 skip
+    #     那套关键字——关键字是给人配的，这个是扫描的客观结果）
+    prot = set()
+    for u in (unreadable or []):
+        p = (u or "").rstrip("/")
+        while p and p != root and p.startswith(root + "/"):
+            prot.add(p)
+            p = p.rsplit("/", 1)[0]
+
+    # 3. 空的里面，剔掉被 skip 命中的子树（自己命中，或子树里藏着命中的），
+    #    以及所有打不开、无法确认是否真的空的目录
+    cand = [d for d in dirs if not has_file[d] and not skip_sub[d] and d not in prot]
 
     # 4. 只留最外层：父目录也是候选的话，自己会随父目录一起消失，不必单列
     cand_set = set(cand)
@@ -729,7 +796,8 @@ def build_empty_dir_plan(entries, root: str, skip: str = ""):
     ops = [{"op": "delete", "path": d, "name": d.rsplit("/", 1)[-1], "isdir": True}
            for d in roots]
     info = {"empty_total": len(cand), "nested": len(cand) - len(roots),
-            "dirs_scanned": len(dirs), "files_scanned": files_scanned}
+            "dirs_scanned": len(dirs), "files_scanned": files_scanned,
+            "protected": len(prot)}
     return ops, info
 
 

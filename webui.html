@@ -1681,24 +1681,52 @@ async function panPlan(refresh){
   pvCurDone = false;                   // 能被复用的预览必然没执行过，见预览文件规则
   const isEmptyTab = panTab_ === 'empty';
   const dupTxt = panDup === 'overwrite' ? '⚠ 重名将覆盖' : '重名将跳过';
-  const tail = isEmptyTab
+  // 有目录没扫进去 ⇒ 这次结果不完整。悄悄少扫一个目录比直接报错更危险：
+  // 用户会以为「就这些文件」，然后照着这份「完整」清单去改名/删除。
+  // 空文件夹那一栏还要额外说清楚：打不开的目录不会被当成空的删掉
+  const skips = d.skipped_dirs || [];
+  const sk = d.skipped_total || 0;
+  const skipTxt = sk
+    ? (isEmptyTab
+        ? ` · ⚠ ${sk} 个目录打不开（无法确认里面是否为空，已排除、不会删）`
+        : ` · ⚠ ${sk} 个目录打不开，里面的文件没扫到（结果不完整）`)
+    : '';
+  const skipDetail = skips.length
+    ? `打不开的目录：` + skips.slice(0, 3).map(x =>
+        `「${x.path.split('/').pop()}」(${x.msg})`).join('、')
+      + (sk > skips.length ? ` 等 ${sk} 个` : '')
+    : '';
+  const tail = (isEmptyTab
     ? `扫描 ${d.dirs_scanned || 0} 个目录 / ${d.files_scanned || 0} 个文件 → ${panTotal} 个空文件夹`
       + (d.nested ? `（另有 ${d.nested} 个嵌套空目录会随之一起删除）` : '')
+      // 整棵树一个文件都没有 ⇒ 多半是「先建好分类骨架、书还没往里放」的目录。
+      // 这种时候「68 个空文件夹」就只是个数字，顺手一删分类结构也没了，
+      // 得把这句话摆出来
+      + ((d.files_scanned || 0) === 0 && panTotal > 0
+          ? ' · ⚠ 这棵树里一个文件都没有（纯目录骨架），删掉后分类结构会一起消失'
+          : '')
     : `扫描 ${d.scanned} 个文件 → ${panTotal} 条操作`
       + (d.unchanged ? `（${d.unchanged} 个无变化）` : '')
       // 只保留书名会把「《A》作者：甲」「A - 乙」压成同一个 A，撞车的自动加了 (2)(3)，
       // 这事必须说出来——悄悄改名字比让人看见更糟
       + (d.auto ? ` · ${d.auto} 个撞名已自动编号 (2)(3)` : '')
-      + ` · ${dupTxt}`;
+      + ` · ${dupTxt}`) + skipTxt;
   // 复用/落盘的结果如实写出来：用户得知道眼前这份是刚扫的还是拿旧文件顶上的
   const srcTxt = d.reused
     ? `♻ 复用了 ${pvAge(d.preview_age)}生成的同参数预览，没有重新扫描网盘`
     : (d.preview_ts ? `已存为预览文件 ${String(d.preview_ts).slice(11)}` : '');
   renderPanPreview(panOps, tail + (srcTxt ? ` · ${srcTxt}` : ''));
   $('btnPanApply').disabled = !panOps.length;
+  // 一条计划都没有时的收尾文案。有目录打不开就**不能说「很干净」**——
+  // 那些目录里到底有没有东西，我们压根不知道
+  const noneTxt = isEmptyTab
+    ? (sk ? `${sk} 个目录打不开，无法确认里面是否为空（已排除、不会删）`
+          : '没有空的文件夹，很干净')
+    : (sk ? `没有符合条件的文件（另有 ${sk} 个目录没扫到）` : '没有符合条件的文件');
   setMsg('panMsg', panOps.length
     ? `${tail}${srcTxt ? '；' + srcTxt : ''}，确认后点「执行」`
-    : (isEmptyTab ? '没有空的文件夹，很干净' : '没有符合条件的文件'),
+      + (skipDetail ? `。${skipDetail}` : '')
+    : noneTxt + (skipDetail ? `。${skipDetail}` : ''),
     !panOps.length ? false : null);
   pvRefresh(d.preview_id || '');       // 列表里把刚生成的这份选中
 }
@@ -1794,8 +1822,12 @@ async function panExport(){
     return;
   }
   $('aiText').value = d.text;
-  $('aiCount').textContent = `已导出 ${d.count} 个文件`;
-  setMsg('panMsg', '清单已生成，点「复制到剪贴板」后粘到 WorkBuddy 对话里', true);
+  // 有目录没扫进去 ⇒ 清单是残缺的，说清楚，别让 AI 按「完整清单」去规划
+  const sk = d.skipped_total || 0;
+  $('aiCount').textContent = `已导出 ${d.count} 个文件` + (sk ? `（${sk} 个目录打不开已跳过）` : '');
+  setMsg('panMsg', '清单已生成，点「复制到剪贴板」后粘到 WorkBuddy 对话里'
+    + (sk ? `；注意有 ${sk} 个目录打不开，清单里不含它们下面的文件（已在清单开头注明）` : ''),
+    true);
 }
 
 async function copyPanText(){
