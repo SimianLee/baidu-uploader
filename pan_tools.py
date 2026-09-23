@@ -68,6 +68,8 @@ class PanFiles:
         self.token = access_token
         self.sandbox = sandbox.rstrip("/")     # 例如 /apps/baidu_uploader
         self.timeout = timeout
+        # 最近一次批量提交为什么提前停了（连接失效时填），供调用方如实告知用户
+        self.last_stop_reason = ""
 
     # ---------- 安全校验 ----------
     def check_path(self, path: str) -> str:
@@ -210,6 +212,19 @@ class PanFiles:
         return r.get("errno", 0) in (0, -8, 12)     # -8/12 = 已存在
 
     # ---------- filemanager 批量操作 ----------
+    def _alive(self) -> bool:
+        """轻量健康检查：token / 连接还好使吗。
+
+        只在「整批整批地报错」时用来分辨两种完全不同的情况：
+          · 连接好使 → 是百度的**假失败**（操作其实生效了），该批记下来事后核对
+          · 连接也坏 → 是真的断了（token 过期等），后面再提交也是白跑，必须停
+        """
+        try:
+            r = self._get(LIST_URL, {"dir": self.sandbox, "start": 0, "limit": 1})
+        except Exception:
+            return False
+        return r.get("errno", 0) == 0
+
     def _filemanager(self, opera: str, filelist, ondup: str = "skip",
                      on_progress=None):
         """提交一批操作，返回 (成功数, 失败明细列表)
@@ -219,9 +234,20 @@ class PanFiles:
         一次几百条要等好几分钟，没有进度反馈会让人以为卡死了。
         失败条数必须由这里给出——调用方要等本方法返回后才拿得到 fails，
         等它统计的话进度里的失败数会滞后一批。
+
+        **整批报错 ≠ 整批失败**：百度 filemanager 在高并发（比如同时还有上传任务
+        在跑）、大批量时会整批回一个错误码，而 info 是空的；实测一次 2000 条的
+        批量移动里，18 批分别回了 -9 和 111，但源目录里那 2000 个文件一个不剩、
+        全都到了目标目录。所以这里的处理是：
+          · 该批标 uncertain（结果未知），不直接算失败——由 apply_plan 执行完
+            以后按磁盘事实核对
+          · 如果是连接级错误码（-6/111/31034）就先探一下连接：真断了立刻停，
+            剩下的批次如实标「未执行」，不做无谓的重复提交
         """
         import json as _json
         ok, fails = 0, []
+        link_ok = None          # None=还没探过；探过且正常就不再重复探
+        stop_reason = ""
         for i in range(0, len(filelist), BATCH_LIMIT):
             chunk = filelist[i:i + BATCH_LIMIT]
             fails_before = len(fails)
@@ -246,17 +272,34 @@ class PanFiles:
                     for it in chunk:
                         if it.get("path") not in judged:
                             fails.append({"path": it.get("path"), "errno": errno,
-                                          "msg": errno_text(errno)})
+                                          "msg": errno_text(errno),
+                                          "uncertain": True})
                 ok += len(chunk) - (len(fails) - fails_before)
             else:
+                # 请求级错误：info 是空的，这批到底动没动，只有网盘自己知道。
+                # 连接级错误码先验证连接，别在真断线时把剩下几十批白跑一遍
+                if errno in _FATAL_LIST_ERRNOS:
+                    if link_ok is None:
+                        link_ok = self._alive()
+                    if not link_ok:
+                        stop_reason = f"连接已失效（{errno_text(errno)}）"
+                        for it in filelist[i:]:
+                            fails.append({
+                                "path": it.get("path") if isinstance(it, dict) else it,
+                                "errno": None, "not_run": True,
+                                "msg": f"未执行（{stop_reason}）"})
+                        break
                 for it in chunk:
                     fails.append({"path": it.get("path") if isinstance(it, dict) else it,
-                                  "errno": errno, "msg": errno_text(errno)})
+                                  "errno": errno, "msg": errno_text(errno),
+                                  "uncertain": True})
             if on_progress:
                 try:
                     on_progress(len(chunk), len(fails) - fails_before)
                 except Exception:
                     pass        # 进度回调只是锦上添花，出错绝不能中断执行
+        if stop_reason:
+            self.last_stop_reason = stop_reason
         return ok, fails
 
     def rename_batch(self, ops, ondup="skip", on_progress=None):
@@ -877,6 +920,69 @@ def _mkdirs(pan: PanFiles, path: str):
         return False
 
 
+def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict):
+    """给「整批报错、结果未知」的条目做一次实地复核。
+
+    背景：百度 filemanager 在高并发（比如同时还有上传任务在跑）、大批量提交时，
+    会整批回一个错误码而 info 是空的。实测一次 2000 条的批量移动，18 批分别回了
+    -9「文件不存在」和 111「Token 过期」，可源目录里那 2000 个文件**一个不剩**、
+    全都到了目标目录。直接采信响应的话，用户会以为白干了 1800 条，甚至重复执行。
+
+    判据（两个证据要同时成立，避免把「本来就不存在」也算成生效）：
+      源目录里已经没有这个文件名  且  目标处（move 的 dest / rename 的新名）有它
+    目录按需去重，每个只 list 一次——2000 条同源目录的操作，两三次请求就能核完。
+
+    返回 (已确认生效的条数 {op: n}, 剩下的真失败列表)。
+    """
+    unc = [f for f in fails if f.get("uncertain")]
+    rest = [f for f in fails if not f.get("uncertain")]
+    if not unc:
+        return {}, rest
+
+    jobs = []                       # (fails 条目, 源目录, 源名, 目标目录, 目标名, op)
+    need = {}                       # 目录 -> 只在核对用得上，这里只统计要不要 list
+    for f in unc:
+        p = str(f.get("path") or "")
+        d, _, n = p.rpartition("/")
+        o = op_of.get(p) or {}
+        op = o.get("op") or ""
+        dst_d = dst_n = ""
+        if op == "move":
+            dst_d, dst_n = o.get("dest", ""), n
+        elif op == "rename":
+            dst_d, dst_n = d, o.get("newname", "")
+        jobs.append((f, d, n, dst_d, dst_n, op))
+        need[d] = True
+        if dst_d:
+            need[dst_d] = True
+
+    listed = {}
+    for d in need:
+        try:
+            listed[d] = {e["name"].lower() for e in pan.list_dir(d, recursive=False)
+                         if not e["isdir"]}
+        except Exception:
+            listed[d] = None        # None = 这个目录读不到，无从核对
+
+    done, still = {}, []
+    for f, d, n, dst_d, dst_n, op in jobs:
+        src = listed.get(d)
+        if src is None or n.lower() in src:
+            # 目录读不到，或文件**还在原处** —— 那就是真失败，如实保留
+            f.pop("uncertain", None)
+            still.append(f)
+            continue
+        if dst_d:
+            dt = listed.get(dst_d)
+            if dt is None or (dst_n and dst_n.lower() not in dt):
+                f.pop("uncertain", None)
+                f["msg"] = f"{f.get('msg')}（原处已无，目标处也没有）"
+                still.append(f)
+                continue
+        done[op or "other"] = done.get(op or "other", 0) + 1
+    return done, still
+
+
 def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
     """按类型分组执行计划 → 返回统计
 
@@ -894,7 +1000,9 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
         一次几百条要跑好几分钟，没有这个回调前端只能干等。
     """
     stat = {"rename": 0, "move": 0, "delete": 0, "backup": 0,
-            "backup_dir": "", "fails": []}
+            "backup_dir": "", "fails": [],
+            "verified": 0,          # 复核后确认已生效的条数（响应报错、实际成功）
+            "stop_reason": ""}
     ren = [{"path": o["path"], "newname": o["newname"]} for o in ops if o["op"] == "rename"]
     mov = [{"path": o["path"], "dest": o["dest"]} for o in ops if o["op"] == "move"]
     dele = [o["path"] for o in ops if o["op"] == "delete"]
@@ -972,5 +1080,20 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
     if dele:
         ok, fails = pan.delete_batch(dele, on_progress=tick("正在删除"))
         stat["delete"] = ok; stat["fails"] += fails
+
+    # 站到磁盘上复核：整批报错但结果未知的那些，到底动没动。
+    # 这一步是必须的——百度在并发下会整批回错误码，操作其实已经生效，
+    # 不核对就会把成功报成失败（实测 2000 条移动里 1800 条是如此）。
+    if stat["fails"]:
+        emit("核对执行结果")
+        by_op = {o["path"]: o for o in ops}
+        vdone, rest = _verify_uncertain(pan, stat["fails"], by_op)
+        for op, n in vdone.items():
+            stat[op] = stat.get(op, 0) + n
+            stat["verified"] += n
+        stat["fails"] = rest
+    stop_reason = getattr(pan, "last_stop_reason", "")
+    if stop_reason:
+        stat["stop_reason"] = stop_reason
     emit("已完成")
     return stat

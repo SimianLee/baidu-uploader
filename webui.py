@@ -849,6 +849,9 @@ class Handler(BaseHTTPRequestHandler):
             if len(good) > 2000:
                 return self._json({"ok": False,
                                    "msg": f"一次最多执行 2000 条，当前 {len(good)} 条，请缩小范围"})
+            # 上传任务是否在跑：不拦着执行，但必须让用户知道风险。
+            # 两个进程握的是同一个 access_token，一起猛敲百度会整批整批地回假错误
+            _upload_busy = is_running()
             # 执行可能几百条、要好几分钟，进度交给前端轮询 /api/pan_apply_progress
             exec_begin(len(good))
             try:
@@ -869,11 +872,22 @@ class Handler(BaseHTTPRequestHandler):
             if stat.get("backup"):
                 msg += (f"；覆盖旧文件 {stat['backup']} 个"
                         f"（已备份到 {stat['backup_dir']}）")
+            # 百度在高并发/大批量下会整批回错误码而操作其实生效，核对结果如实报出来。
+            # 实测一次 2000 条移动：18 批分别回 -9 / 111，1800 条被报成失败，
+            # 而源目录里那 2000 个文件一个不剩、全都到了目标目录。
+            verified = stat.get("verified") or 0
+            if verified:
+                msg += (f"；其中 {verified} 条百度返回了错误码，已按网盘实际内容核对确认生效"
+                        f"（已计入上面的数字）")
             if stat["fails"]:
-                # 实测：百度对「刚变动过」的文件会回 -9「文件不存在」的假失败，
-                # 而操作其实生效了（130 条全报 -9，刷新目录一看名字全改好了）。
-                # 不提示的话用户会以为白干一场。
-                msg += "；注：百度对刚变动的文件常假报失败，刷新目录核对一下，往往已经生效"
+                msg += f"；另有 {len(stat['fails'])} 条复核后确认未生效"
+            if stat.get("stop_reason"):
+                msg += (f"；⚠ 中途停止：{stat['stop_reason']}，剩余操作没有提交，"
+                        f"可以重新生成预览后继续")
+            if _upload_busy:
+                # 两个进程用同一个账号猛敲百度，正是本次大规模假失败的诱因
+                msg += ("；⚠ 执行时上传任务正在运行，两者同时操作网盘容易触发百度假失败，"
+                        "建议错开进行")
             # 执行过的预览文件盖个戳：列表里显示「已执行」，而且不再被复用——
             # 网盘已经不是那份预览生成时的样子，再拿它当「当前状态」就是错的了
             preview_id = str(body.get("preview_id") or "")
