@@ -562,9 +562,22 @@
 
         <div class="btnbar" style="align-items:flex-end;margin-top:10px">
           <button class="btn ghost" onclick="dryrun()" id="btnDry">干跑预览</button>
+          <button class="btn ghost" id="btnRescan" onclick="rescanUpload()"
+                  title="忽略断点记录：本地扫到的文件全部重新上传一遍。用于「记录说传完了、担心其实有漏」时做一次彻底核对">重新扫描上传</button>
           <div class="spacer"></div>
           <button class="btn green" id="btnStart" onclick="startUpload()">开始上传</button>
           <button class="btn danger" id="btnStop" onclick="stopUpload()" disabled>停止</button>
+        </div>
+        <div class="btnbar" style="align-items:center;margin-top:9px">
+          <div class="dupseg" id="nrBox" style="margin:0"
+               title="勾上后本次不看上传记录，把本地扫到的文件全部纳入上传。网盘里已有相同内容的会走秒传，基本不耗流量、不重复占空间">
+            <label class="chkchip" id="nrChip">
+              <input type="checkbox" id="noResumeChk">忽略断点记录
+            </label>
+          </div>
+          <span class="hint" style="margin:0">
+            勾上再点「干跑预览」= 核对本地还有哪些文件没传过
+          </span>
         </div>
         <div class="msg" id="ctlMsg"></div>
 
@@ -1163,9 +1176,33 @@ async function startUpload(){
       await localRenamePreview(true);
     }
   }
-  const d = await api('/api/start', {limit: +($('limit').value || 0)});
+  const d = await api('/api/start', {limit: +($('limit').value || 0), no_resume: noResumeOn()});
   setMsg('ctlMsg', d.msg, d.ok);
   if(d.ok){ $('drybox').classList.add('hidden'); pollNow(); }
+}
+
+/* 「忽略断点记录」开关：勾上=本次不看上传记录，本地扫到的文件全部纳入上传 */
+function noResumeOn(){
+  const c = $('noResumeChk');
+  return !!(c && c.checked);
+}
+
+function setNoResume(v){
+  const c = $('noResumeChk');
+  if(!c) return;
+  c.checked = !!v;
+  const chip = $('nrChip');
+  if(chip) chip.classList.toggle('on', c.checked);
+}
+
+async function rescanUpload(){
+  if(!confirm('重新扫描上传：\n\n'
+    + '• 忽略断点记录，把本地扫到的文件全部重新上传一遍\n'
+    + '• 网盘里已有相同内容的会走「秒传」，基本不耗流量、也不会重复占空间\n'
+    + '• 适合「记录说都传完了、但担心其实有漏」时做一次彻底核对\n\n'
+    + '确定继续吗？')) return;
+  setNoResume(true);
+  return startUpload();
 }
 
 async function stopUpload(){
@@ -1176,15 +1213,17 @@ async function stopUpload(){
 
 async function dryrun(){
   $('btnDry').disabled = true;
-  $('btnDry').textContent = '分析中…';
+  $('btnDry').textContent = noResumeOn() ? '核对中…' : '分析中…';
   setMsg('ctlMsg', '干跑分析中，文件多时可能要等半分钟…');
   try{
-    const d = await api('/api/dryrun', {});
+    const d = await api('/api/dryrun', {no_resume: noResumeOn()});
     const el = $('dryout');
     el.textContent = d.output || d.msg || '(无输出)';
     el.classList.toggle('empty', !el.textContent.trim());
     $('drybox').classList.remove('hidden');
-    setMsg('ctlMsg', d.ok ? '干跑完成，结果见下方' : '干跑失败', d.ok);
+    setMsg('ctlMsg', d.ok ? (noResumeOn()
+      ? '核对完成：看上面「待上传」有多少个 —— 那就是本地还没传过的文件数'
+      : '干跑完成，结果见下方') : '干跑失败', d.ok);
   } finally {
     $('btnDry').disabled = false;
     $('btnDry').textContent = '干跑预览';
@@ -1883,6 +1922,12 @@ async function panParse(){
     const syncChip = () => $('recChip').classList.toggle('on', rc.checked);
     rc.addEventListener('change', syncChip);
     syncChip();
+  }
+  // 「忽略断点记录」（上传页）：同款 .chkchip，点 label 由浏览器原生切换勾选，
+  // 这里只负责把高亮同步过去（不勾=默认安全：按断点记录续传）
+  const nrc = $('noResumeChk');
+  if(nrc){
+    nrc.addEventListener('change', () => $('nrChip').classList.toggle('on', nrc.checked));
   }
   // 卡片4 目录输入框回车即浏览
   const pp = $('panPath');

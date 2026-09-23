@@ -25,6 +25,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat as _stat
 import sys
 import threading
 import time
@@ -141,6 +142,27 @@ def atomic_write_json(path: Path, data: dict, tries: int = PROGRESS_REPLACE_TRIE
         except Exception as e:
             return f"{last}；原地写也失败：{e}"
     return last or "未知原因"
+
+
+# ---------------- Windows 长路径（MAX_PATH）----------------
+# 路径超过 260 字符时，所有老式 Win32 API 都直接报「系统找不到指定的路径」
+# (ERROR_PATH_NOT_FOUND = 3)。要命的不是这个报错，而是 Python 的
+# Path.is_file() / exists() 会把异常吞掉、返回 False —— 长路径文件在**扫描阶段**
+# 就被当成「这不是个文件」静默跳过：不报错、不进统计、界面上什么都不显示。
+# 实例：某目录磁盘上实有 1142 个文件，工具只看到 1135 个，剩下 7 个（路径
+# 264~286 字符）从来没被上传过，而界面一直说「扫描到的文件此前全都上传成功过了」。
+#
+# 具体实现在 winpath.py（改名工具也复用同一套）。这里的名字保留下来，
+# 是为了让本文件各处读起来不用带模块前缀。
+from winpath import (                                    # noqa: E402
+    LONG_PATH_MIN, LP_PREFIX, LP_UNC,
+    long_path, stat_any, exists_any, is_dir_any, open_any, move_any, rel_display,
+    entry_is_dir, iter_entries,
+)
+
+# 兼容内部旧叫法（测试里也按这个名字打桩）
+_iter_entries = iter_entries
+
 
 
 def human_size(n: int) -> str:
@@ -389,11 +411,15 @@ class PanApi:
     # ---- 计算分片 MD5 ----
     @staticmethod
     def block_md5s(path: Path, chunk_size: int):
-        """返回 (文件大小, [每片md5])，顺便流式读取避免大文件占内存"""
+        r"""返回 (文件大小, [每片md5])，顺便流式读取避免大文件占内存。
+
+        open_any：长路径（>260 字符）用原生 open 会报「系统找不到指定的路径」，
+        内置 \\?\ 前缀兜底。
+        """
         md5s = []
         size = 0
         h_all = hashlib.md5()  # 仅用于本地完整性展示，不上传用
-        with open(path, "rb") as f:
+        with open_any(path, "rb") as f:
             while True:
                 buf = f.read(chunk_size)
                 if not buf:
@@ -451,7 +477,7 @@ class PanApi:
         # 第 2 步：上传缺失的分片（顶层 block_list 是需要传的分片序号）
         need_parts = r.get("block_list", list(range(len(md5s))))
         total = len(need_parts)
-        with open(local, "rb") as f:
+        with open_any(local, "rb") as f:
             for idx, partseq in enumerate(need_parts, 1):
                 f.seek(partseq * chunk_size)
                 chunk = f.read(chunk_size)
@@ -473,33 +499,56 @@ class PanApi:
 
 
 # ---------------- 文件收集 ----------------
+# 遍历与类型判定都用 winpath 里的长路径安全版本（见文件头部说明）：
+#   iter_entries()  一层层 scandir，超长路径的子树也进得去
+#   stat_any()      拿大小/判类型，绝不用 Path.is_file()
+
+
 def collect_files(cfg, root: Path):
     """收集待上传文件：按配置过滤、按大小分拣。
-    返回 (待上传, 超大跳过, 统计) —— 统计用于在"扫到 0 个"时说清楚到底卡在哪一步。"""
+
+    返回 (待上传, 超大跳过, 统计)；统计用于在"扫到 0 个"时说清楚卡在哪一步。
+
+    类型判定统一走 stat_any()，**绝不用 Path.is_file()**：路径超过 260 字符时
+    is_file() 会把异常吞成 False，文件就被静默跳过 —— 不报错、不进统计、界面上
+    一点痕迹都没有。真读不了的条目单独记进 stats["unreadable"]，最后列给用户看。
+    """
     patterns = cfg.get("exclude_patterns", ["Thumbs.db", "desktop.ini", "*.tmp", "~$*"])
     max_mb = cfg.get("max_file_size_mb", 4096)
     recursive = cfg.get("recursive", True)
     max_bytes = max_mb * 1024 * 1024
-    to_upload, too_big = [], []
-    stats = {"scanned": 0, "excluded": 0, "empty": 0, "subdirs": 0}
+    to_upload, too_big, unreadable = [], [], []
+    stats = {"scanned": 0, "excluded": 0, "empty": 0, "subdirs": 0,
+             "long_path": 0, "unreadable": unreadable}
 
-    it = root.rglob("*") if recursive else root.glob("*")
-    for p in sorted(it):
-        if not p.is_file():
-            if p.is_dir() and p.parent == root:
+    for p in _iter_entries(root, recursive):
+        # 先按原生路径 stat：拿到了就是普通文件；失败才走长路径（\\?\）二次尝试。
+        # 这一步同时告诉我们「哪些文件是旧版本会凭空漏掉的」，好如实报给用户。
+        try:
+            st = os.stat(p)
+            native_ok = True
+        except OSError:
+            st = stat_any(p)
+            native_ok = False
+        if st is None:                       # 存在但读不了：绝不能当它不存在
+            unreadable.append(p)
+            print(f"[跳过-读不了] {rel_display(p, root)}")
+            continue
+        if _stat.S_ISDIR(st.st_mode):
+            if p.parent == root:
                 stats["subdirs"] += 1
             continue
         stats["scanned"] += 1
         # 排除脚本自身产生的记录文件
         if p.name in (DONE_LOG, TOKEN_FILE):
             continue
-        rel = p.relative_to(root)
-        if any(fnmatch.fnmatch(p.name, pat) or fnmatch.fnmatch(str(rel), pat)
+        rel = rel_display(p, root)
+        if any(fnmatch.fnmatch(p.name, pat) or fnmatch.fnmatch(rel, pat)
                for pat in patterns):
             stats["excluded"] += 1
             print(f"[跳过-排除规则] {rel}")
             continue
-        size = p.stat().st_size
+        size = st.st_size
         if size == 0:
             stats["empty"] += 1
             print(f"[跳过-空文件] {rel}")
@@ -507,6 +556,8 @@ def collect_files(cfg, root: Path):
         if size > max_bytes:
             too_big.append((p, size))
             continue
+        if not native_ok:
+            stats["long_path"] += 1         # 只有靠 \\?\ 才读到的：旧版本一律漏掉
         to_upload.append((p, size))
     return to_upload, too_big, stats
 
@@ -514,12 +565,17 @@ def collect_files(cfg, root: Path):
 def explain_empty(stats, cfg, root: Path, skipped_done: int, too_big_n: int):
     """扫到 0 个待上传文件时，把可能的原因一条条讲清楚（避免只丢一句'收工'让人一头雾水）"""
     recursive = cfg.get("recursive", True)
+    unread = stats.get("unreadable") or []
     print("\n" + "=" * 56)
     print("[提示] 本次没有需要上传的文件。排查信息如下：")
     print(f"  扫描模式    ：{'当前目录 + 所有子目录' if recursive else '仅当前目录下的文件'}")
     print(f"  扫到的文件数：{stats['scanned']}")
     print(f"  其中被排除  ：{stats['excluded']}   空文件：{stats['empty']}")
     print(f"  超大跳过    ：{too_big_n}   此前已上传过：{skipped_done}")
+    if unread:
+        print(f"  读不了的条目：{len(unread)}")
+    if stats.get("long_path"):
+        print(f"  超长路径文件：{stats['long_path']} 个（已自动加 \\\\?\\ 前缀处理，不影响上传）")
     if not recursive:
         sub = stats.get("subdirs", 0)
         deep = 0
@@ -536,9 +592,16 @@ def explain_empty(stats, cfg, root: Path, skipped_done: int, too_big_n: int):
             print("\n  整个目录里一个文件都没有（含子目录），换个本地目录试试。")
         elif skipped_done >= stats["scanned"]:
             print("\n  扫描到的文件此前全都上传成功过了 —— 属于正常情况，真的传完了。")
-            print(f"  断点记录：{cfg.get('_cfg_dir', '.')}/uploaded_log.txt（删掉可强制重传）")
+            print("  想强制重传：命令行加 --no-resume，或在网页面板上点「重新扫描上传」")
+            print(f"  （断点记录：{cfg.get('_cfg_dir', '.')}/uploaded_log.txt）")
         else:
             print("\n  文件被排除规则/空文件/超大文件过滤掉了，可到配置里放宽条件。")
+    if unread:
+        print(f"\n  ⚠ 另有 {len(unread)} 个条目读不了、已跳过（它们不是「不存在」，只是读不到）。前 5 个：")
+        for p in unread[:5]:
+            print(f"     {p}")
+        print("     多数是路径过长或权限问题；这些文件不会出现在待上传清单里，"
+              "请先排查，别以为已经传完了。")
     print("=" * 56)
 
 
@@ -678,7 +741,7 @@ def handle_uploaded(uploaded, mode, done_dir):
     fails = []
 
     for p, _ in uploaded:
-        if not p.exists():          # 已经被删掉了（比如上一轮处理过）
+        if not exists_any(p):       # 已经被删掉了（比如上一轮处理过）
             n_ok += 1
             continue
         warn = ""                   # 非致命提示：删了但接口报错
@@ -687,19 +750,26 @@ def handle_uploaded(uploaded, mode, done_dir):
                 dest = done_dir / p.name
                 # 重名自动加序号，绝不覆盖
                 i = 1
-                while dest.exists():
+                while exists_any(dest):
                     dest = done_dir / f"{p.stem}({i}){p.suffix}"
                     i += 1
-                shutil.move(str(p), str(dest))
+                # 长路径：源/目标都要带 \\?\ 前缀，否则 move 直接报「找不到路径」
+                shutil.move(long_path(p), long_path(dest))
             elif mode == "trash":
                 if not HAS_SEND2TRASH:
                     print("  [警告] 未安装 send2trash，无法送回收站。pip install send2trash")
                     return
                 try:
-                    send2trash(str(p))
+                    send2trash(long_path(p))
                 except Exception:
-                    # 大概率是 Windows 在 ProgramData 下的误报，下面按实际结果判定
-                    warn = "接口误报"
+                    try:
+                        if long_path(p) != str(p):   # 回收站接口不认 \\?\ 时退回原生
+                            send2trash(str(p))
+                        else:
+                            warn = "接口误报"
+                    except Exception:
+                        # 大概率是 Windows 在 ProgramData 下的误报，下面按实际结果判定
+                        warn = "接口误报"
         except Exception as e:
             print(f"  [错误] 处理 {p} 失败: {e}")
             n_fail += 1
@@ -707,7 +777,7 @@ def handle_uploaded(uploaded, mode, done_dir):
             continue
 
         # 以磁盘事实为准
-        if not p.exists():
+        if not exists_any(p):
             n_ok += 1
             if warn:
                 n_warn += 1
@@ -724,10 +794,10 @@ def handle_uploaded(uploaded, mode, done_dir):
                     done_dir.mkdir(parents=True, exist_ok=True)
                     dest = done_dir / p.name
                     i = 1
-                    while dest.exists():
+                    while exists_any(dest):
                         dest = done_dir / f"{p.stem}({i}){p.suffix}"
                         i += 1
-                    shutil.move(str(p), str(dest))
+                    shutil.move(long_path(p), long_path(dest))
                     print(f"  [回退-已移动] 删除失败，改移动到: {dest}")
                     n_ok += 1
                     continue
@@ -761,6 +831,9 @@ def build_argparser():
     ap.add_argument("--limit", type=int, help="本次最多上传多少个文件（测试用）")
     ap.add_argument("--yes", action="store_true",
                     help="跳过手动确认，直接按配置里的 after_upload 处理（ask 视为 keep）")
+    ap.add_argument("--no-resume", dest="no_resume", action="store_true",
+                    help="重新扫描上传：忽略断点记录，本地扫到的文件全部纳入本次上传"
+                         "（怀疑记录与实际不符时用；网盘已有的会走秒传，不重复占空间）")
     return ap
 
 
@@ -794,7 +867,8 @@ def main():
         api = PanApi(auth)
 
     root = Path(cfg["local_dir"]).expanduser()
-    if not root.is_dir():
+    _root_st = stat_any(root)
+    if _root_st is None or not _stat.S_ISDIR(_root_st.st_mode):
         print(f"[错误] 本地目录不存在: {root}")
         sys.exit(1)
 
@@ -812,17 +886,34 @@ def main():
     cfg["_cfg_dir"] = str(cfg_path.parent)
     to_upload, too_big, stats = collect_files(cfg, root)
 
+    # 扫描健康度：长路径文件、读不了的条目都要说出来，绝不静默吞掉
+    if stats.get("long_path"):
+        print(f"[提示] 其中 {stats['long_path']} 个文件路径超过 260 字符（Windows MAX_PATH），"
+              f"已自动用长路径方式读取 —— 旧版本会把它们当成「不存在」漏掉")
+    unread = stats.get("unreadable") or []
+    if unread:
+        print(f"\n[!] 有 {len(unread)} 个条目读不了，本次跳过（前 5 个）：")
+        for p in unread[:5]:
+            print(f"    {p}")
+
     # 超大文件清单：宁可跳过也不浪费上传时间
     if too_big:
         print("\n[!] 以下文件超过大小上限，本次跳过（可在 config 里调 max_file_size_mb）：")
         for p, size in too_big:
             print(f"    {human_size(size):>12}  {p}")
 
-    # 断点续传：跳过历史已成功文件
-    pending = [(p, s) for p, s in to_upload if str(p) not in done_log]
-    skipped = len(to_upload) - len(pending)
-    if skipped:
-        print(f"\n[断点] 检测到 {skipped} 个文件此前已成功上传，本次自动跳过")
+    if args.no_resume:
+        # 重新扫描上传：完全不理断点记录，本地扫到的全部纳入本次上传
+        pending = list(to_upload)
+        skipped = 0
+        print(f"\n[重新扫描] 已忽略断点记录：本地扫到 {len(to_upload)} 个文件，本次全部纳入上传")
+        print("           网盘里已存在的内容会走秒传，不会重复占用空间，也不必担心重传")
+    else:
+        # 断点续传：跳过历史已成功文件
+        pending = [(p, s) for p, s in to_upload if str(p) not in done_log]
+        skipped = len(to_upload) - len(pending)
+        if skipped:
+            print(f"\n[断点] 检测到 {skipped} 个文件此前已成功上传，本次自动跳过")
     if args.limit:
         pending = pending[:args.limit]
 
@@ -851,6 +942,11 @@ def main():
         print(f"\n[干跑] 扫描 {stats['scanned']} 个文件 → 排除 {stats['excluded']} / "
               f"空文件 {stats['empty']} / 超大 {len(too_big)} / 已传过 {skipped} / "
               f"待上传 {len(pending)}")
+        if stats.get("long_path"):
+            print(f"[干跑]   其中 {stats['long_path']} 个文件路径超过 260 字符，"
+                  f"已用长路径方式读取（旧版本会漏掉）")
+        if unread:
+            print(f"[干跑]   ⚠ {len(unread)} 个条目读不了，未计入上面的数字")
         wrk = args.workers or int(cfg.get("workers", 6) or 1)
         print(f"[干跑] 上传时并发：{max(1, min(wrk, 32))} 路（想改就在配置里调 workers）")
         print(f"[干跑] 目录布局：{LAYOUT_NAMES[layout]}"

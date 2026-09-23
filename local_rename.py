@@ -19,10 +19,13 @@ local_rename.py —— 上传前把本地文件名清理干净
 import fnmatch
 import json
 import os
+import stat as _stat
 import time
 from pathlib import Path
 
 import pan_tools
+from winpath import (exists_any, is_dir_any, iter_entries,  # noqa: F401
+                     rel_display, rename_any, stat_any)
 
 LOG_NAME = "local_rename_log.jsonl"
 DEFAULT_EXCLUDES = ["Thumbs.db", "desktop.ini", "*.tmp", "~$*", "*.partial"]
@@ -48,7 +51,7 @@ def scan_local(cfg, root=None):
     max_file_size_mb 的文件都不改名——它们本来就不会被上传，改了也没意义。
     """
     root = Path(root or cfg.get("local_dir") or "").expanduser()
-    if not root.is_dir():
+    if not is_dir_any(root):
         raise FileNotFoundError(f"本地目录不存在：{root}")
     patterns = cfg.get("exclude_patterns") or DEFAULT_EXCLUDES
     # 不能先 int() 再乘：配置里写成 0.5（MB）时 int() 会先变成 0，上限成了 0 字节，
@@ -56,21 +59,25 @@ def scan_local(cfg, root=None):
     max_bytes = float(cfg.get("max_file_size_mb", 4096) or 4096) * 1024 * 1024
     recursive = bool(cfg.get("recursive", True))
 
-    out, skipped = [], {"excluded": 0, "empty": 0, "too_big": 0}
-    for p in sorted(root.rglob("*") if recursive else root.glob("*")):
-        if not p.is_file():
+    out, skipped = [], {"excluded": 0, "empty": 0, "too_big": 0, "unreadable": 0}
+    # 遍历与类型判定都走 winpath：旧的 root.rglob("*") + p.is_file() 在路径超过
+    # 260 字符时会静默漏文件（is_file 把 OSError 吞成 False），上传那边已经栽过一次，
+    # 这里口径必须一致——否则「预览说会改 N 个」和「上传实际传的那批」会对不上号。
+    for p in iter_entries(root, recursive):
+        st = stat_any(p)
+        if st is None:
+            skipped["unreadable"] += 1
+            continue
+        if _stat.S_ISDIR(st.st_mode):
             continue
         if p.name in _SELF_FILES:
             continue
-        rel = p.relative_to(root)
-        if any(fnmatch.fnmatch(p.name, pat) or fnmatch.fnmatch(str(rel), pat)
+        rel = rel_display(p, root)
+        if any(fnmatch.fnmatch(p.name, pat) or fnmatch.fnmatch(rel, pat)
                for pat in patterns):
             skipped["excluded"] += 1
             continue
-        try:
-            size = p.stat().st_size
-        except OSError:
-            continue
+        size = st.st_size
         if size == 0:
             skipped["empty"] += 1
             continue
@@ -115,9 +122,10 @@ def _dedupe_against_disk(rows):
     for d in {r["dir"] for r in rows}:
         names = set()
         try:
-            for e in os.scandir(d):
-                if e.is_file():
-                    names.add(e.name.lower())
+            for q in iter_entries(d, recursive=False):
+                st = stat_any(q)
+                if st is not None and not _stat.S_ISDIR(st.st_mode):
+                    names.add(q.name.lower())
         except OSError:
             pass
         occupied[d] = {n for n in names if (d, n) not in renaming}
@@ -140,11 +148,11 @@ def apply_local(rows, log_path):
         dst = Path(r["dir"]) / r["newname"]
         # 只改大小写的重命名（A.txt → a.txt）在 Windows 上 dst 也算「已存在」，
         # 那是同一个文件，不是撞名，必须放行。
-        if dst.exists() and str(dst).lower() != str(src).lower():
+        if exists_any(dst) and str(dst).lower() != str(src).lower():
             fails.append({"path": str(src), "msg": f"目标已存在，跳过：{r['newname']}"})
             continue
         try:
-            os.rename(str(src), str(dst))
+            rename_any(src, dst)
         except OSError as e:
             fails.append({"path": str(src), "msg": e.strerror or str(e)})
             continue
@@ -203,14 +211,14 @@ def undo_last(log_path):
     for it in rec["items"]:
         src = Path(it["dir"]) / it["new"]
         dst = Path(it["dir"]) / it["old"]
-        if not src.exists():
+        if not exists_any(src):
             fails.append({"path": str(src), "msg": "文件已不在（可能被移动或删除）"})
             continue
-        if dst.exists() and str(dst).lower() != str(src).lower():
+        if exists_any(dst) and str(dst).lower() != str(src).lower():
             fails.append({"path": str(src), "msg": f"原名已被占用，跳过：{it['old']}"})
             continue
         try:
-            os.rename(str(src), str(dst))
+            rename_any(src, dst)
         except OSError as e:
             fails.append({"path": str(src), "msg": e.strerror or str(e)})
             continue

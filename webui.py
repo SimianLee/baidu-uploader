@@ -125,7 +125,12 @@ def kill_pid(pid: int) -> bool:
         return False
 
 
-def start_upload(limit: int = 0):
+def start_upload(limit: int = 0, no_resume: bool = False):
+    """启动上传子进程。
+
+    no_resume=True → 带上 --no-resume：忽略断点记录，本地扫到的文件全部重新上传
+    （面板上的「重新扫描上传」）。百度有秒传，已存在的文件基本不耗流量。
+    """
     with _state["lock"]:
         p = _state["proc"]
         if p is not None and p.poll() is None:
@@ -137,6 +142,8 @@ def start_upload(limit: int = 0):
         cmd = [PY, "-X", "utf8", "-u", str(PROJ / "upload_baidu.py")]
         if limit and limit > 0:
             cmd += ["--limit", str(limit)]
+        if no_resume:
+            cmd += ["--no-resume"]
         cmd += ["--yes"]   # 无交互环境，跳过末尾手动确认（after_upload 用 move/trash/keep）
         rotate_log()       # 上一轮日志太大就先归档，本次从新文件开始写
         # 立刻把进度重置成「正在扫描」。上传进程要先扫完本地目录才会写 progress.json，
@@ -153,11 +160,12 @@ def start_upload(limit: int = 0):
         except Exception:
             pass       # 进度只是给人看的，写不进去也绝不能挡着上传启动
         f = open(LOGFILE, "a", encoding="utf-8")
-        f.write(f"\n==== 启动 {time.strftime('%Y-%m-%d %H:%M:%S')} ====\n")
+        f.write(f"\n==== 启动 {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                f"{'（重新扫描：忽略断点记录，全部重传）' if no_resume else ''} ====\n")
         f.flush()
         _state["proc"] = subprocess.Popen(
             cmd, cwd=str(PROJ), env=_base_env(), stdout=f, stderr=subprocess.STDOUT)
-        return True, "上传已启动"
+        return True, "上传已启动（重新扫描全部文件）" if no_resume else "上传已启动"
 
 
 def stop_upload():
@@ -485,7 +493,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/start":
             limit = int(body.get("limit", 0) or 0)
-            ok, msg = start_upload(limit)
+            no_resume = bool(body.get("no_resume"))
+            ok, msg = start_upload(limit, no_resume)
             return self._json({"ok": ok, "msg": msg})
 
         if path == "/api/stop":
@@ -496,9 +505,12 @@ class Handler(BaseHTTPRequestHandler):
             if is_running():
                 return self._json({"ok": False, "msg": "上传进行中，不能干跑"})
             try:
+                cmd = [PY, "-X", "utf8", str(PROJ / "upload_baidu.py"), "--dry-run", "--quiet"]
+                if body.get("no_resume"):
+                    # 核对用：按「忽略断点记录」算，才能看出本地到底还有哪些文件没传过
+                    cmd.append("--no-resume")
                 r = subprocess.run(
-                    [PY, "-X", "utf8", str(PROJ / "upload_baidu.py"), "--dry-run", "--quiet"],
-                    cwd=str(PROJ), env=_base_env(), capture_output=True,
+                    cmd, cwd=str(PROJ), env=_base_env(), capture_output=True,
                     text=True, encoding="utf-8", timeout=600)
                 out = (r.stdout or "") + (r.stderr or "")
                 return self._json({"ok": r.returncode == 0, "output": out[-8000:]})
