@@ -160,6 +160,10 @@ from winpath import (                                    # noqa: E402
     entry_is_dir, iter_entries,
 )
 
+# 进程锁的判活/读写统一在 proclock.py：这逻辑原本文档三处各写一份，
+# 判活写错一次（OpenProcess 成功 ≠ 进程还活着）就会把上传挡在门外
+import proclock                                          # noqa: E402
+
 # 兼容内部旧叫法（测试里也按这个名字打桩）
 _iter_entries = iter_entries
 
@@ -188,37 +192,11 @@ def log(*a):
         print(*a)
 
 
-def pid_alive(pid: int) -> bool:
-    """跨进程判断 PID 是否还活着（Windows 用 OpenProcess，避开 os.kill 的语义差异）"""
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        import ctypes
-        try:
-            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            h = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-            if h:
-                ctypes.windll.kernel32.CloseHandle(h)
-                return True
-            return False
-        except Exception:
-            return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except Exception:
-        return False
-
-
 def acquire_pidfile(path: Path):
     """占住进程锁：已有活着的上传进程就返回 (False, 那个PID)，否则写入自己的 PID 并注册退出清理"""
-    if path.exists():
-        try:
-            old = int(path.read_text(encoding="utf-8").strip())
-        except Exception:
-            old = -1
-        if pid_alive(old):
-            return False, old
+    old = proclock.read_pidfile(path)      # 文件坏了/进程已退出都算「没有锁」
+    if old:
+        return False, old
     path.write_text(str(os.getpid()), encoding="utf-8")
     me = os.getpid()
 

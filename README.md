@@ -202,6 +202,16 @@ API 却返回 `ERROR_FILE_NOT_FOUND (2)`，于是日志里刷一片：
   上传成功过了」。现在遍历与类型判定都走 `winpath.py`：`os.scandir(\\?\ 前缀)` 自己走目录树
   （`os.walk`/`rglob` 进超长子目录时会整棵静默跳过）、`stat_any` 取大小、`open_any` 读内容。
   另外**读不了的条目会单独列出来**并计数，宁可报出来让你看一眼，也不静默吞掉。
+- **上传进程锁判活：`OpenProcess` 成功 ≠ 进程还活着**。Windows 上只要还有句柄
+  指向进程对象（最典型的就是父进程里没释放的 `subprocess.Popen`），子进程退出后
+  `OpenProcess` 照样能开出句柄。实测同一个刚 `wait()` 返回的子进程：
+  `OpenProcess -> OK`，而 `GetExitCodeProcess -> 0`（真活着时是 `259 STILL_ACTIVE`）。
+  旧实现只看 `OpenProcess`，于是上传**跑完或被强杀之后**，面板因为自己还攥着
+  Popen 句柄，会一直认为上传在跑、拒绝启动新上传——只能重启面板才解得开。
+  现在判活统一走 `proclock.py`（`OpenProcess` + `GetExitCodeProcess` 双检），
+  面板、上传主程序、`organize_all.py` 三处共用同一份实现。`upload.pid` 是靠
+  `atexit` 删除的，被强杀（蓝屏 / 关机 / 任务管理器结束进程）时会残留——
+  残留本身无害，只要判活可靠，「残留」和「真在跑」就分得清。
 
 ## 六·五、本地还有没有没传的文件？（重新扫描上传）
 

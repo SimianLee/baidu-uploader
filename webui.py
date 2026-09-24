@@ -20,6 +20,7 @@ from pathlib import Path
 import requests
 
 import preview_store                # 计划预览的本地存盘（同目录模块）
+import proclock                     # 上传进程锁的判活/读写（同目录模块）
 
 PROJ = Path(__file__).resolve().parent
 PY = sys.executable                      # 用当前解释器跑上传子进程
@@ -80,49 +81,19 @@ def rotate_log():
         pass    # 轮转失败不影响上传本身
 
 
-def pid_alive(pid: int) -> bool:
-    """判断 PID 是否还活着（Windows 用 OpenProcess，避开 os.kill 的语义差异）"""
-    if pid <= 0:
-        return False
-    if os.name == "nt":
-        import ctypes
-        try:
-            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-            if h:
-                ctypes.windll.kernel32.CloseHandle(h)
-                return True
-            return False
-        except Exception:
-            return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except Exception:
-        return False
-
-
 def read_pidfile() -> int:
-    """返回锁文件里记录的、且确实活着的上传进程 PID（没有则 0）"""
-    try:
-        if not PIDFILE.exists():
-            return 0
-        pid = int(PIDFILE.read_text(encoding="utf-8").strip())
-        return pid if pid_alive(pid) else 0
-    except Exception:
-        return 0
+    """返回锁文件里记录的、且确实活着的上传进程 PID（没有则 0）
+
+    判活一律走 proclock —— 曾经这里是「OpenProcess 成功即活着」，而面板自己
+    就持有上传子进程的 Popen 句柄，子进程退出后判活照样返回真，于是上传跑完
+    或被强杀之后，面板会一直以为它在跑、拒绝启动新上传。
+    """
+    return proclock.read_pidfile(PIDFILE)
 
 
 def kill_pid(pid: int) -> bool:
     """按 PID 结束上传进程（Windows 用 taskkill，带子进程一起收）"""
-    try:
-        if os.name == "nt":
-            r = subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                               capture_output=True, timeout=20)
-            return r.returncode == 0
-        os.kill(pid, 15)
-        return True
-    except Exception:
-        return False
+    return proclock.kill_pid(pid)
 
 
 def start_upload(limit: int = 0, no_resume: bool = False):

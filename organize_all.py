@@ -18,6 +18,13 @@ organize_all.py —— 整理归档「循环执行」版
     # 确认无误后真跑
     python -X utf8 organize_all.py --path "..." --by ext --dest /apps/baidu_uploader/归档
 
+    # 归档目标里已经有同名文件时，加 --ondup overwrite（否则它们搬不走，见下）
+
+关于重名：默认策略是 skip —— 撞到同名就跳过。但被跳过的是**源目录里那个文件**，
+它会留在原地，下一轮重新扫描又扫到、又撞名、又被跳过，永远搬不完。脚本每轮
+会把这个数字报出来；要连这些一起搬就加 --ondup overwrite，撞到的旧文件会先
+挪进「_覆盖备份/时间戳/」再覆盖，能找回。
+
 关于并发：脚本默认**拒绝**在上传任务运行时执行。实测过——上传和整理同时操作
 网盘（同一个 access_token），百度会整批整批地回假错误（-9 / 111），一次 2000 条
 的移动里 1800 条被报成失败，虽然实际都生效了，但看着像白干。想强行跑加 --force。
@@ -33,8 +40,19 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "libs"))
 
 import pan_tools  # noqa: E402
+import proclock   # noqa: E402
 
 EXEC_LIMIT = 2000          # 与面板一致：单轮最多提交多少条
+
+
+def dup_skipped(fails) -> int:
+    """统计因「归档处已有同名」而没搬走的条数（百度 errno=-8）。
+
+    重名策略是 skip（默认）时，撞名的文件会被跳过并**留在源目录**。下一轮
+    重新扫描又扫到它、又撞名、又被跳过 —— 它永远搬不走。不明确报出来，
+    用户会看着「移动 7000 个」以为搬完了，其实源目录里还窝着一批。
+    """
+    return sum(1 for f in (fails or []) if f.get("errno") == -8)
 
 
 def load_pan():
@@ -53,15 +71,16 @@ def load_pan():
     return pan_tools.PanFiles(tk["access_token"], sandbox), sandbox
 
 
-def upload_running():
-    """上传任务在跑吗（读 PID 锁文件）。同时操作网盘是假失败的诱因"""
-    f = HERE / "upload.pid"
-    if not f.exists():
-        return 0
-    try:
-        return int(f.read_text(encoding="utf-8").strip() or 0)
-    except Exception:
-        return 0
+def upload_running(pidfile=None):
+    """上传任务在跑吗？读 PID 锁文件后**必须确认那个进程真的还活着**。
+
+    进程被强杀（蓝屏/关机/任务管理器结束进程）时跑不到 atexit 清理，
+    upload.pid 会一直留着。曾经的实现只读文件不看存活，结果把早就没了的
+    任务报成「正在运行」，把脚本自己挡在门外 —— 实测就撞上一次：
+    文件里写着 PID 24456，进程列表里根本没这个进程。
+    """
+    f = Path(pidfile) if pidfile else (HERE / "upload.pid")
+    return proclock.read_pidfile(f)
 
 
 def main():
@@ -73,7 +92,8 @@ def main():
                     help="整理方式：ext 按后缀 / category 按大类 / date 按修改月份")
     ap.add_argument("--dest", required=True, help="归档目标目录，会在此之下按分类建子目录")
     ap.add_argument("--ondup", default="skip", choices=("skip", "overwrite"),
-                    help="撞到同名文件时：skip 跳过（默认）/ overwrite 先备份再覆盖")
+                    help="撞到同名文件时：skip 跳过（默认，撞名的会留在源目录搬不走）"
+                         " / overwrite 先把旧文件备份到 _覆盖备份/ 再覆盖")
     ap.add_argument("--limit", type=int, default=EXEC_LIMIT,
                     help=f"每轮最多执行多少条（默认 {EXEC_LIMIT}，与面板一致）")
     ap.add_argument("--rounds", type=int, default=0,
@@ -165,6 +185,12 @@ def main():
             print(f"  ⚠ 中途停止：{stat['stop_reason']}")
             print(f"  已执行的部分是有效的，稍后重跑本脚本会从剩下的继续")
             break
+        dup = dup_skipped(stat["fails"])
+        if dup:
+            print(f"  ⚠ {dup} 个文件因「归档处已有同名」被跳过，仍留在源目录")
+            print(f"     默认策略下它们每轮都会被重新扫到、再被跳过，永远搬不走。")
+            print(f"     要连这些一起搬，加参数：--ondup overwrite")
+            print(f"     （覆盖前旧文件会先挪进 {sandbox}/_覆盖备份/时间戳/，可找回）")
         if not stat["move"] and stat["fails"]:
             # 一条都没动：再循环下去只是重复报错，不如停下来让人看原因
             print("  本轮没有任何文件被移动，停止。失败原因见下：")
@@ -179,6 +205,11 @@ def main():
         print(f"未生效 {len(all_fails)} 个，前 10 条：")
         for f in all_fails[:10]:
             print(f"    {f.get('path', '?')}　{f.get('msg', '')}")
+    dup_all = dup_skipped(all_fails)
+    if dup_all:
+        print()
+        print(f"⚠ 其中 {dup_all} 个是「归档处已有同名」被跳过的，还留在源目录里。")
+        print(f"  想连这些一起搬：--ondup overwrite（旧文件先备份，可找回）")
     if args.dry_run:
         print("（干跑模式，网盘没有任何改动）")
     print("=" * 62)
