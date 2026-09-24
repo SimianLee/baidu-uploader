@@ -294,13 +294,14 @@ def scan_snapshot():
 # 不同于扫描的是：执行的总条数事先就知道，所以前端能显示真实百分比。
 _exec_lock = threading.Lock()
 _exec = {"running": False, "phase": "", "done": 0, "total": 0, "fails": 0,
-         "t0": 0.0}
+         "round": 0, "rounds": 0, "stop": False, "t0": 0.0}
 
 
-def exec_begin(total=0):
+def exec_begin(total=0, rounds=0):
     with _exec_lock:
         _exec.update(running=True, phase="准备中", done=0, total=int(total or 0),
-                     fails=0, t0=time.time())
+                     fails=0, round=0, rounds=int(rounds or 0), stop=False,
+                     t0=time.time())
 
 
 def exec_tick(snap):
@@ -312,9 +313,25 @@ def exec_tick(snap):
                      fails=snap.get("fails", 0) or 0)
 
 
+def exec_request_stop():
+    """用户点了「停止」：连续执行时也要能刹住，不然十万条得等它跑完"""
+    with _exec_lock:
+        _exec["stop"] = True
+
+
+def exec_stop_requested() -> bool:
+    with _exec_lock:
+        return bool(_exec.get("stop"))
+
+
+def exec_set_round(i: int, n: int):
+    with _exec_lock:
+        _exec["round"], _exec["rounds"] = i, n
+
+
 def exec_end():
     with _exec_lock:
-        _exec.update(running=False)
+        _exec.update(running=False, stop=False)
 
 
 def exec_snapshot():
@@ -516,9 +533,10 @@ class Handler(BaseHTTPRequestHandler):
         # 停止扫描：同样是纯内存操作，不碰网盘
         if path == "/api/pan_cancel":
             stopping = scan_request_stop()
+            exec_request_stop()          # 连续执行也要能刹住（十万条不能干等）
             return self._json({
                 "ok": True, "stopping": stopping,
-                "msg": "正在停止…" if stopping else "当前没有正在进行的扫描"})
+                "msg": "正在停止…" if stopping else "已请求停止"})
 
         # ---------------- 预览文件（本地存盘，避免反复重扫网盘）----------------
         # 这一组都不需要构造 PanFiles（除了 preview_load 要拿沙盒路径做越界校验），
@@ -791,7 +809,8 @@ class Handler(BaseHTTPRequestHandler):
                 info["skipped_dirs"] = failures[:30]
 
             full = len(ops)
-            ops = ops[:2000]        # 与执行上限一致：再多也执行不了，不必塞进预览文件
+            all_ops = ops                      # 完整清单（十万条也照存）
+            ops = all_ops[:2000]               # 预览只留这么多：再多也执行不了
             # 标题带上目录和扫描范围：下拉框里两份「批量改名·只保留书名」如果只有
             # 条数不同，根本认不出哪份是含子目录的、哪份是只扫本级的
             scope = "含子目录" if payload["recursive"] else "仅本级"
@@ -799,39 +818,101 @@ class Handler(BaseHTTPRequestHandler):
             rec = preview_store.save_preview(
                 PROJ, kind, ops, {"total": full, **info}, payload,
                 sandbox=sandbox, path=p, label=f"{label} · {p}（{scope}）")
-            resp = {"ok": True, "ops": ops, "total": full, "reused": False, **info}
+            resp = {"ok": True, "ops": ops, "total": full, "reused": False,
+                    "plan_saved": False, **info}
             if rec:
+                # 完整计划另存一份：「跑完剩下的」靠它一批批接着搬，不必反复重扫
+                resp["plan_saved"] = preview_store.save_full_plan(
+                    PROJ, rec["id"], all_ops, kind, payload, label)
                 resp.update(preview_id=rec["id"], preview_ts=rec["ts"], preview_age=0)
             return self._json(resp)
 
         # 执行计划
         if path == "/api/pan_apply":
             ops = body.get("ops")
+            loop = bool(body.get("loop"))
+            preview_id = str(body.get("preview_id") or "")
+            # 「跑完剩下的」：照着生成预览时存下的**完整**计划一批批搬。
+            # 十万条要跑几十轮，手动点「重新生成 → 执行」是不现实的；而每轮重新
+            # 扫描一遍网盘也没必要 —— 源路径不会变，清单本身是准的。
+            if loop:
+                plan = preview_store.load_full_plan(PROJ, preview_id)
+                if not plan or not plan.get("ops"):
+                    return self._json({
+                        "ok": False,
+                        "msg": "没找到完整计划（预览可能已被清理）。请重新生成一次预览，"
+                               "再点「跑完剩下的」"})
+                ops = plan["ops"]
             if not isinstance(ops, list) or not ops:
                 return self._json({"ok": False, "msg": "没有要执行的操作"})
             # 重名策略：skip 跳过（默认）/ overwrite 覆盖，其余值一律按 skip
             ondup = str(body.get("ondup") or "skip").lower()
             if ondup not in ("skip", "overwrite"):
                 ondup = "skip"
-            good, errs = pan_tools.validate_plan({"ops": ops}, sandbox)
-            if not good:
-                return self._json({"ok": False, "msg": "计划校验不通过：" + "；".join(errs[:3])})
-            # 安全上限：单次最多 2000 条，避免误操作一次搬空整个网盘
-            if len(good) > 2000:
+            # 安全上限：单批最多 2000 条，避免误操作一次搬空整个网盘。
+            # 「跑完剩下的」只是把大计划拆成多批，每批同样受这道上限约束。
+            CHUNK = 2000
+            if not loop and len(ops) > CHUNK:
                 return self._json({"ok": False,
-                                   "msg": f"一次最多执行 2000 条，当前 {len(good)} 条，请缩小范围"})
+                                   "msg": f"一次最多执行 {CHUNK} 条，当前 {len(ops)} 条"})
+            chunks = ([ops[i:i + CHUNK] for i in range(0, len(ops), CHUNK)]
+                      if loop else [ops])
+            all_good, errs = [], []
+            for ch in chunks:
+                g, e = pan_tools.validate_plan({"ops": ch}, sandbox)
+                all_good.append(g)
+                errs += e
+            if not any(all_good):
+                return self._json({"ok": False, "msg": "计划校验不通过：" + "；".join(errs[:3])})
             # 上传任务是否在跑：不拦着执行，但必须让用户知道风险。
             # 两个进程握的是同一个 access_token，一起猛敲百度会整批整批地回假错误
             _upload_busy = is_running()
             # 执行可能几百条、要好几分钟，进度交给前端轮询 /api/pan_apply_progress
-            exec_begin(len(good))
+            total_ops = sum(len(g) for g in all_good)
+            exec_begin(total_ops, rounds=len(all_good))
+            stat = {"rename": 0, "move": 0, "delete": 0, "backup": 0,
+                    "backup_dir": "", "fails": [], "verified": 0,
+                    "stop_reason": "", "rounds": 0}
             try:
-                stat = pan_tools.apply_plan(pan, good, ondup=ondup,
-                                            on_progress=exec_tick)
+                for idx, g in enumerate(all_good, 1):
+                    if not g:
+                        continue
+                    # 连续执行中途能刹住：每批开始时看一眼停止标志
+                    if exec_stop_requested():
+                        stat["stop_reason"] = (
+                            f"跑到第 {idx - 1}/{len(all_good)} 批时被停止，"
+                            f"剩下的没有再动")
+                        break
+                    stat["rounds"] = idx
+                    exec_set_round(idx, len(all_good))
+                    base = sum(len(x) for x in all_good[:idx - 1])
+
+                    # 批次号走 _exec["round"] 单独给前端，不塞进 phase ——
+                    # phase 里带 '/' 会让前端以为这是「准备目录 3/60」之类的
+                    # 自带计数，从而不显示总进度，反而更看不清
+                    def tick(base=base):
+                        def cb(snap):
+                            exec_tick({"done": base + (snap.get("done") or 0),
+                                       "total": total_ops,
+                                       "phase": snap.get("phase") or "",
+                                       "fails": len(stat["fails"]) + (snap.get("fails") or 0)})
+                        return cb
+
+                    s = pan_tools.apply_plan(pan, g, ondup=ondup,
+                                             on_progress=tick())
+                    for k in ("rename", "move", "delete", "backup", "verified"):
+                        stat[k] = stat.get(k, 0) + (s.get(k) or 0)
+                    if s.get("backup_dir"):
+                        stat["backup_dir"] = s["backup_dir"]
+                    stat["fails"] += s.get("fails") or []
+                    if s.get("stop_reason"):     # 连接断了之类，别再往下白跑
+                        stat["stop_reason"] = s["stop_reason"]
+                        break
             except Exception as e:
                 return self._json({"ok": False, "msg": f"执行失败：{e}"})
             finally:
                 exec_end()
+            good = [o for g in all_good for o in g]
             # 整批都是删空文件夹时，报「删除 12 个空文件夹」比「改名 0 / 移动 0 / 删除 12」
             # 直观得多——那些 0 对用户毫无信息量
             dir_del = sum(1 for o in good if o["op"] == "delete" and o.get("isdir"))
@@ -852,9 +933,12 @@ class Handler(BaseHTTPRequestHandler):
                         f"（已计入上面的数字）")
             if stat["fails"]:
                 msg += f"；另有 {len(stat['fails'])} 条复核后确认未生效"
+            if stat.get("rounds", 0) > 1:
+                msg += f"（共 {stat['rounds']} 批连续执行）"
             if stat.get("stop_reason"):
-                msg += (f"；⚠ 中途停止：{stat['stop_reason']}，剩余操作没有提交，"
-                        f"可以重新生成预览后继续")
+                tail = ("已执行的部分有效，重新勾选「跑完剩下的」即可接着跑"
+                        if loop else "可以重新生成预览后继续")
+                msg += (f"；⚠ 中途停止：{stat['stop_reason']}，剩余操作没有提交，{tail}")
             if _upload_busy:
                 # 两个进程用同一个账号猛敲百度，正是本次大规模假失败的诱因
                 msg += ("；⚠ 执行时上传任务正在运行，两者同时操作网盘容易触发百度假失败，"

@@ -768,6 +768,12 @@
               <button class="btn ghost" id="btnPanPlan" onclick="panPlan()">生成预览</button>
               <button class="btn ghost" id="btnPanFresh" onclick="panPlan(true)"
                       title="忽略已存下来的同参数预览，重新扫一遍网盘">重新生成</button>
+              <div class="dupseg" id="loopBox" style="margin:0 8px 0 0"
+                   title="计划超过单次上限（2000 条）时：勾选后点执行，会自动分批改完剩下的一批批跑完，不用反复点「重新生成 → 执行」">
+                <label class="chkchip" id="loopChip">
+                  <input type="checkbox" id="panLoop">跑完剩下的
+                </label>
+              </div>
               <button class="btn green" id="btnPanApply" onclick="panApply()" disabled>执行</button>
             </div>
           </div>
@@ -806,6 +812,8 @@
             <span class="scantxt" id="execTxt">正在执行…</span>
             <span class="execpct" id="execPct"></span>
             <span class="scantime" id="execTime"></span>
+            <button type="button" class="scanstop" id="btnExecStop" onclick="panStopExec()"
+                    title="叫停这次执行：当前这批跑完就停，已执行的部分有效，剩下的没动">停止</button>
           </div>
           <div class="execline"><i id="execFill"></i></div>
         </div>
@@ -1466,6 +1474,16 @@ async function panStopScan(){
   }
 }
 
+/* 执行中叫停：后端每批开始前看一眼停止标志，所以是「跑完当前这批就停」，
+   已经提交的部分照常生效，剩下的不会动。单批执行时这个按钮是隐藏的 */
+async function panStopExec(){
+  const btn = $('btnExecStop');
+  if(btn){ btn.disabled = true; btn.textContent = '停止中…'; }
+  const d = await api('/api/pan_cancel', {});
+  toast((d && d.msg) || '已请求停止，当前这批跑完就停', null);
+  if(btn){ btn.textContent = '停止'; btn.disabled = false; }
+}
+
 function stopScanPoll(){ if(scanTimer){ clearInterval(scanTimer); scanTimer = null; } }
 
 /* render(state, 已耗时秒) 可覆盖：导出清单时把进度画到 aiCount 上 */
@@ -1548,8 +1566,12 @@ function execPaint(d, sec){
   // 「准备目标目录 3/60 0 / 60」这种重复读起来不知在看哪个数
   const phase = d.phase || '执行中';
   const count = phase.indexOf('/') >= 0 ? '' : (total ? ` ${done} / ${total}` : '');
-  $('execTxt').textContent = phase + count + (d.fails ? ` · 失败 ${d.fails}` : '');
+  // 连续执行时批次是硬信息：十万条要跑几十批，光看百分比不知道进行到哪一批
+  const rd = (d.rounds > 1 && d.round) ? `第 ${d.round}/${d.rounds} 批 · ` : '';
+  $('execTxt').textContent = rd + phase + count + (d.fails ? ` · 失败 ${d.fails}` : '');
   $('execTime').textContent = sec + 's';
+  const bs = $('btnExecStop');
+  if(bs) bs.classList.toggle('hidden', !(d.rounds > 1));   // 单批执行本来就跑一会儿，不必吓人
 }
 
 /* ---------- 预览文件（本地存盘，避免反复重扫网盘） ----------
@@ -1783,13 +1805,28 @@ async function panApply(){
   const n = panOps.length;
   // 纯空文件夹删除要如实措辞：「删除 N 个文件」会把人吓一跳，其实一个文件都不删
   const onlyEmptyDirs = panOps.every(o => o.op === 'delete' && o.isdir);
+  // 「跑完剩下的」：越过单次 2000 条上限，照着生成预览时存下来的完整计划
+  // 一批批连续执行。十万条要跑几十轮，手动点「重新生成 → 执行」不现实。
+  // 必须有 preview_id 才作数——完整计划是挂在预览文件上的。
+  const loop = !!(pvCurrent && $('panLoop') && $('panLoop').checked);
+  const n2 = loop ? (panTotal || n) : n;
   const tip = onlyEmptyDirs
-    ? `即将删除 ${n} 个空文件夹（内部不含任何文件），删除后不可恢复。确定继续吗？`
+    ? `即将删除 ${n2} 个空文件夹（内部不含任何文件），删除后不可恢复。确定继续吗？`
     : isDel
-    ? `⚠ 即将删除 ${n} 个文件，此操作不可撤销。确定继续吗？`
+    ? `⚠ 即将删除 ${n2} 个文件，此操作不可撤销。确定继续吗？`
     : panDup === 'overwrite'
-    ? `⚠ 即将执行 ${n} 条操作（重名覆盖模式）：撞到的旧文件会先挪进「_覆盖备份」目录再执行，可找回。确定继续吗？`
-    : `即将对 ${n} 个文件执行操作（重名跳过），确定继续吗？`;
+    ? `⚠ 即将执行 ${n2} 条操作（重名覆盖模式）：撞到的旧文件会先挪进「_覆盖备份」目录再执行，可找回。确定继续吗？`
+    : `即将对 ${n2} 个文件执行操作（重名跳过），确定继续吗？`;
+  const batches = Math.ceil(n2 / 2000);
+  const loopTip = loop
+    ? (batches > 1
+       ? `\n\n⚠ 已勾选「跑完剩下的」：这 ${n2} 条会分成 ${batches} 批连续执行完。`
+         + `中途可以用进度条右边的「停止」叫停，已执行的部分有效。`
+       : '')
+    : (panTotal > n
+       ? `\n\n提示：这份计划共 ${panTotal} 条，本次只执行前 ${n} 条。剩下的要么反复点`
+         + `「重新生成 → 执行」，要么勾选「跑完剩下的」一次跑完。`
+       : '');
   // 载入的是旧预览时要说清楚：网盘可能已经变了，别让人以为清单是刚刚核实的
   const oldTip = (pvCurrent && pvCurAge > 600)
     ? `\n\n注意：这份预览是 ${pvAge(pvCurAge)}生成的，网盘内容可能已经变了；`
@@ -1799,7 +1836,7 @@ async function panApply(){
     ? `\n\n⚠ 这份预览已经执行过一次了：清单里的大多数路径可能已经不存在，`
       + `再执行一遍多半只会得到一堆失败。确定还要继续吗？`
     : '';
-  if(!confirm(tip + oldTip + doneTip)) return;
+  if(!confirm(tip + loopTip + oldTip + doneTip)) return;
 
   $('btnPanApply').disabled = true;
   $('btnPanPlan').disabled = true;      // 执行期间不许再生成预览：两边同时操作网盘只会互相干扰
@@ -1812,7 +1849,8 @@ async function panApply(){
   try{
     // preview_id 带过去，执行成功后后端会在那份预览文件上盖「已执行」戳：
     // 列表里能看出来，而且它不会再被复用（网盘已经变了）
-    d = await api('/api/pan_apply', {ops: panOps, ondup: panDup, preview_id: pvCurrent});
+    d = await api('/api/pan_apply',
+                  {ops: panOps, ondup: panDup, preview_id: pvCurrent, loop});
   } finally {
     // 收起前补画一次最终进度：最后一批的完成回调常常来不及被 300ms 的轮询画出来，
     // 直接收起会让进度条停在 76% 这种位置，看着像没跑完
@@ -1934,6 +1972,12 @@ async function panParse(){
   const nrc = $('noResumeChk');
   if(nrc){
     nrc.addEventListener('change', () => $('nrChip').classList.toggle('on', nrc.checked));
+  }
+  // 「跑完剩下的」（整理卡片）：同款 .chkchip，默认不勾 —— 一次动十万条太凶，
+  // 得是用户自己明确要「一口气跑完」才生效
+  const lpc = $('panLoop');
+  if(lpc){
+    lpc.addEventListener('change', () => $('loopChip').classList.toggle('on', lpc.checked));
   }
   // 卡片4 目录输入框回车即浏览
   const pp = $('panPath');

@@ -45,6 +45,88 @@ def preview_dir(root) -> Path:
     return Path(root) / DIR_NAME
 
 
+# 完整计划单独放一个目录：预览文件只留前 MAX_OPS_SAVED 条（给人看、给单次执行
+# 用），而 10 万条的大计划要跑几十轮，每轮重新扫一遍网盘既慢又完全没必要 ——
+# 源路径不会变，照着这份清单接着搬就行。放独立目录也是为了不和预览文件的
+# 列表/清理逻辑（按 *.json 扫目录）混在一起。
+PLAN_DIR_NAME = "plans"
+PLAN_MAX_KEEP = 5         # 完整计划一份能有几 MB，只留最近这几份
+
+
+def plan_dir(root) -> Path:
+    return Path(root) / PLAN_DIR_NAME
+
+
+def save_full_plan(root, pid, ops, kind="", payload=None, label="") -> bool:
+    """把**完整**计划另存一份，供「跑完剩下的」连续分批执行。
+
+    存失败不影响预览本身——只是没法一键跑完，照样能一批批手动执行。
+    """
+    if not _ID_OK.match(pid or ""):
+        return False
+    try:
+        d = plan_dir(root)
+        d.mkdir(parents=True, exist_ok=True)
+        target = d / f"{pid}.json"
+        tmp = d / f"{pid}.json.tmp"
+        # 刻意不缩进：十万条缩进后能到几十 MB，读写都慢，反正也没人拿眼睛看
+        tmp.write_text(json.dumps(
+            {"pid": pid, "kind": kind, "payload": payload or {},
+             "label": label, "total": len(ops), "ops": ops},
+            ensure_ascii=False), encoding="utf-8")
+        tmp.replace(target)
+        return True
+    except Exception:
+        return False
+
+
+def load_full_plan(root, pid):
+    """读完整计划；没有/坏了返回 None"""
+    if not _ID_OK.match(pid or ""):
+        return None
+    f = plan_dir(root) / f"{pid}.json"
+    if not f.is_file():
+        return None
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        return d if isinstance(d.get("ops"), list) else None
+    except Exception:
+        return None
+
+
+def delete_full_plan(root, pid):
+    """删预览时连它的完整计划一起清掉，别在磁盘上留一堆几 MB 的孤儿文件"""
+    try:
+        if _ID_OK.match(pid or ""):
+            f = plan_dir(root) / f"{pid}.json"
+            if f.is_file():
+                f.unlink()
+    except Exception:
+        pass
+
+
+def prune_plans(root, keep=MAX_KEEP):
+    """只保留最近 keep 份完整计划"""
+    try:
+        d = plan_dir(root)
+        if not d.is_dir():
+            return 0
+        fs = [f for f in d.glob("*.json") if f.is_file()]
+        if len(fs) <= keep:
+            return 0
+        fs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        n = 0
+        for f in fs[keep:]:
+            try:
+                f.unlink()
+                n += 1
+            except Exception:
+                pass
+        return n
+    except Exception:
+        return 0
+
+
 def fingerprint(kind, payload, sandbox=""):
     """把「影响结果的全部输入」压成一个短指纹
 
@@ -205,6 +287,7 @@ def delete_preview(root, pid):
         return False
     try:
         p.unlink()
+        delete_full_plan(root, pid)     # 完整计划跟着一起走
         return True
     except Exception:
         return False
@@ -233,9 +316,12 @@ def prune(root, keep=MAX_KEEP):
     for f in _files(root)[keep:]:
         try:
             f.unlink()
+            delete_full_plan(root, f.stem)     # 完整计划跟着一起走
             n += 1
         except Exception:
             pass
+    # 完整计划一份能有几 MB（十万条），比预览文件金贵得多，只留最近几份
+    prune_plans(root, PLAN_MAX_KEEP)
     try:
         for t in preview_dir(root).glob("*.json.tmp"):
             try:

@@ -45,6 +45,13 @@ CREATE_URL = "https://pan.baidu.com/rest/2.0/xpan/file?method=create"
 # 百度 filemanager 单次最多提交多少个（留余量，官方上限 1000）
 BATCH_LIMIT = 100
 
+# 整批报错的条目要复核几遍、每遍之间等多久。百度的目录索引有延迟：刚搬完
+# 立刻列目录，源处可能还挂着旧名字，第一遍核对会把「已经搬走了」误判成
+# 「没生效」（实测 1612 条全被误判）。所以隔几秒再核一遍，连续两遍都判
+# 没生效才算真失败。详见 _verify_uncertain。
+VERIFY_ROUNDS = 2
+VERIFY_WAIT = 3.0
+
 
 class PanError(Exception):
     pass
@@ -920,8 +927,9 @@ def _mkdirs(pan: PanFiles, path: str):
         return False
 
 
-def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict):
-    """给「整批报错、结果未知」的条目做一次实地复核。
+def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict,
+                      rounds: int = None, wait: float = None):
+    """给「整批报错、结果未知」的条目做实地复核（默认核两遍）。
 
     背景：百度 filemanager 在高并发（比如同时还有上传任务在跑）、大批量提交时，
     会整批回一个错误码而 info 是空的。实测一次 2000 条的批量移动，18 批分别回了
@@ -932,8 +940,19 @@ def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict):
       源目录里已经没有这个文件名  且  目标处（move 的 dest / rename 的新名）有它
     目录按需去重，每个只 list 一次——2000 条同源目录的操作，两三次请求就能核完。
 
+    **为什么必须核好几遍**：百度的目录索引有延迟，刚搬完立刻 list，源目录里可能
+    还挂着旧名字。实测一次 2000 条的整理归档：界面报「成功 388 / 失败 1612，另有
+    1612 条复核后确认未生效」，事后抽查其中 12 条 —— 源处已无、目标处已有，**全都
+    搬走了**。第一遍核对下的结论是错的，害人以为白干一场还要重跑一遍。所以隔几秒
+    再核一次，**连续几遍都判「没生效」才敢说它真失败**。
+
     返回 (已确认生效的条数 {op: n}, 剩下的真失败列表)。
     """
+    # 用 None 作默认值、进来再取模块常量：测试才能把等待时间调成 0 跑得快，
+    # 而不用去 monkeypatch 已经绑死在函数签名上的默认参数
+    rounds = VERIFY_ROUNDS if rounds is None else rounds
+    wait = VERIFY_WAIT if wait is None else wait
+
     unc = [f for f in fails if f.get("uncertain")]
     rest = [f for f in fails if not f.get("uncertain")]
     if not unc:
@@ -956,31 +975,45 @@ def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict):
         if dst_d:
             need[dst_d] = True
 
-    listed = {}
-    for d in need:
-        try:
-            listed[d] = {e["name"].lower() for e in pan.list_dir(d, recursive=False)
-                         if not e["isdir"]}
-        except Exception:
-            listed[d] = None        # None = 这个目录读不到，无从核对
+    done, pending = {}, list(jobs)
+    for i in range(max(1, rounds)):
+        if i:                       # 第一遍马上核（快路径），只有存疑才等
+            time.sleep(wait)
+        listed = {}
+        for d in need:
+            try:
+                listed[d] = {e["name"].lower()
+                             for e in pan.list_dir(d, recursive=False)
+                             if not e["isdir"]}
+            except Exception:
+                listed[d] = None    # None = 这个目录读不到，无从核对
 
-    done, still = {}, []
-    for f, d, n, dst_d, dst_n, op in jobs:
-        src = listed.get(d)
-        if src is None or n.lower() in src:
-            # 目录读不到，或文件**还在原处** —— 那就是真失败，如实保留
-            f.pop("uncertain", None)
-            still.append(f)
-            continue
-        if dst_d:
-            dt = listed.get(dst_d)
-            if dt is None or (dst_n and dst_n.lower() not in dt):
-                f.pop("uncertain", None)
-                f["msg"] = f"{f.get('msg')}（原处已无，目标处也没有）"
-                still.append(f)
+        nxt = []
+        for f, d, n, dst_d, dst_n, op in pending:
+            src = listed.get(d)
+            if src is None or n.lower() in src:
+                # 目录读不到，或文件**还在原处** —— 可能是索引没同步，留到下一遍
+                nxt.append((f, d, n, dst_d, dst_n, op))
                 continue
-        done[op or "other"] = done.get(op or "other", 0) + 1
-    return done, still
+            if dst_d:
+                dt = listed.get(dst_d)
+                if dt is None or (dst_n and dst_n.lower() not in dt):
+                    nxt.append((f, d, n, dst_d, dst_n, op))
+                    continue
+            done[op or "other"] = done.get(op or "other", 0) + 1
+        if not nxt:
+            pending = []
+            break
+        pending = nxt
+
+    still = []
+    for f, d, n, dst_d, dst_n, op in pending:
+        f.pop("uncertain", None)
+        f["msg"] = f"{f.get('msg')}（复核 {max(1, rounds)} 次均未生效）"
+        still.append(f)
+    # rest 是「响应里就明确报了错、不存在存疑」的那些（比如逐条返回的 -8 撞名），
+    # 它们没进复核也必须回到失败清单里 —— 少了就是把失败静默吞掉
+    return done, rest + still
 
 
 def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
