@@ -80,6 +80,17 @@ def save_full_plan(root, pid, ops, kind="", payload=None, label="") -> bool:
         return False
 
 
+def has_full_plan(root, pid) -> bool:
+    """只看一眼完整计划在不在——不读内容（十万条那份有几 MB，读进来太重）
+
+    给界面用：旧版本生成的预览没有这份文件，勾「跑完剩下的」会被后端挡回来，
+    与其让人点了才报错，不如当场把勾选框置灰说清楚。
+    """
+    if not _ID_OK.match(pid or ""):
+        return False
+    return (plan_dir(root) / f"{pid}.json").is_file()
+
+
 def load_full_plan(root, pid):
     """读完整计划；没有/坏了返回 None"""
     if not _ID_OK.match(pid or ""):

@@ -583,6 +583,9 @@ class Handler(BaseHTTPRequestHandler):
                 "preview_age": int(max(0, time.time() - (rec.get("t0") or 0))),
                 "preview_kind": rec.get("kind", ""),
                 "preview_executed": bool(rec.get("executed")),
+                # 有没有随预览存下来的完整计划（「跑完剩下的」要靠它）。
+                # 旧版本生成的预览没有，界面据此把那个勾选框置灰
+                "plan_ready": preview_store.has_full_plan(PROJ, rec.get("id") or ""),
                 "reused": bool(reused)}
         resp.update(rec.get("info") or {})
         return resp

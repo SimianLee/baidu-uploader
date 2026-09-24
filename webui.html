@@ -1631,6 +1631,20 @@ async function pvRefresh(keepId){
   pvPaintHint();
 }
 
+/* 「跑完剩下的」靠生成预览时另存的那份完整计划（plans/<id>.json）。
+   旧版本生成的预览没有它，勾了也会被后端挡一句「没找到完整计划」——
+   与其让人点了执行才碰壁，不如当场把勾选框置灰、把原因写在上面。 */
+function setLoopReady(ready){
+  const cb = $('panLoop'), chip = $('loopChip');
+  if(!cb || !chip) return;
+  cb.disabled = !ready;
+  if(!ready){ cb.checked = false; chip.classList.remove('on'); }
+  chip.style.opacity = ready ? '' : '.45';
+  chip.title = ready
+    ? '计划超过单次上限（2000 条）时：勾选后点执行，会自动分批改完剩下的一批批跑完，不用反复点「重新生成 → 执行」'
+    : '这份预览没有留下完整计划（旧版本生成的，或当时存盘失败）。重新生成一次预览即可勾选';
+}
+
 /* 点下拉里的一份预览 → 立刻载入（两步就能执行：选、点执行） */
 async function pvLoad(){
   const id = $('pvList').value;
@@ -1647,8 +1661,11 @@ async function pvLoad(){
     + (pvCurDone ? ' · ⚠ 这份已经执行过' : '');
   renderPanPreview(panOps, src);
   $('btnPanApply').disabled = !panOps.length;
+  setLoopReady(!!d.plan_ready);
   setMsg('panMsg', `${d.msg}，确认后点「执行」`
     + (pvCurDone ? '；注意：这份已经执行过一次了' : '')
+    + (d.plan_ready === false && panTotal > panOps.length
+       ? '；这份是旧版本存的，没有留下完整计划，「跑完剩下的」用不了，重新生成一次即可' : '')
     + (d.errors && d.errors.length ? `；注意：${d.errors.slice(0,2).join('；')}` : ''),
     pvCurDone ? false : null);
 }
@@ -1662,7 +1679,7 @@ async function pvDelete(){
   if(d && d.ok && id === pvCurrent){
     // 正载入的这份被删了 → 清掉预览区，免得拿着一份已经不存在的计划去执行
     pvCurrent = ''; pvCurAge = 0; pvCurDone = false; panOps = []; panTotal = 0;
-    renderPanPreview([], ''); $('btnPanApply').disabled = true;
+    renderPanPreview([], ''); $('btnPanApply').disabled = true; setLoopReady(false);
   }
   await pvRefresh('');
 }
@@ -1673,7 +1690,7 @@ async function pvClean(){
   setMsg('panMsg', (d && d.msg) || '清理失败', !!(d && d.ok));
   if(d && d.ok){
     pvCurrent = ''; pvCurAge = 0; pvCurDone = false; panOps = []; panTotal = 0;
-    renderPanPreview([], ''); $('btnPanApply').disabled = true;
+    renderPanPreview([], ''); $('btnPanApply').disabled = true; setLoopReady(false);
   }
   await pvRefresh('');
 }
@@ -1784,6 +1801,7 @@ async function panPlan(refresh){
     : (d.preview_ts ? `已存为预览文件 ${String(d.preview_ts).slice(11)}` : '');
   renderPanPreview(panOps, tail + (srcTxt ? ` · ${srcTxt}` : ''));
   $('btnPanApply').disabled = !panOps.length;
+  setLoopReady(!!(d.plan_saved || d.plan_ready));
   // 一条计划都没有时的收尾文案。有目录打不开就**不能说「很干净」**——
   // 那些目录里到底有没有东西，我们压根不知道
   const noneTxt = isEmptyTab
@@ -1877,7 +1895,7 @@ async function panApply(){
   // 的戳盖到这份无辜的预览文件上
   pvCurrent = ''; pvCurAge = 0; pvCurDone = false;
   renderPanPreview([], '');
-  $('btnPanApply').disabled = true;
+  $('btnPanApply').disabled = true; setLoopReady(false);
   await pvRefresh(execId);   // 那份预览现在带着「已执行」戳了，重新拉一遍列表
   await panBrowse();         // 先刷新目录列表（它自己会写一条提示）
   // 结果提示放最后写，否则会被上面「列出 N 个文件」的提示盖掉，看不到执行战果
@@ -1943,6 +1961,7 @@ async function panParse(){
   pvCurrent = ''; pvCurAge = 0; pvCurDone = false;
   renderPanPreview(panOps, '');
   $('btnPanApply').disabled = !panOps.length;
+  setLoopReady(false);      // AI 计划没有随附的完整计划，只能按单次 2000 条跑
 }
 
 /* ---------- 启动：file:// 打开时给出修正指引 ---------- */
