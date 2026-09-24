@@ -583,8 +583,8 @@ class Handler(BaseHTTPRequestHandler):
                 "preview_age": int(max(0, time.time() - (rec.get("t0") or 0))),
                 "preview_kind": rec.get("kind", ""),
                 "preview_executed": bool(rec.get("executed")),
-                # 有没有随预览存下来的完整计划（「跑完剩下的」要靠它）。
-                # 旧版本生成的预览没有，界面据此把那个勾选框置灰
+                # 有没有随预览存下来的完整计划（执行时靠它一次跑完）。
+                # 旧版本生成的预览没有，界面据此提示「只能跑前 2000 条」
                 "plan_ready": preview_store.has_full_plan(PROJ, rec.get("id") or ""),
                 "reused": bool(reused)}
         resp.update(rec.get("info") or {})
@@ -823,7 +823,8 @@ class Handler(BaseHTTPRequestHandler):
 
             full = len(ops)
             all_ops = ops                      # 完整清单（十万条也照存）
-            ops = all_ops[:2000]               # 预览只留这么多：再多也执行不了
+            ops = all_ops[:2000]               # 预览只回传这么多：全传回去要几十 MB，
+            # 界面上也翻不完。执行时后端直接读完整计划，不受这个数限制
             # 标题带上目录和扫描范围：下拉框里两份「批量改名·只保留书名」如果只有
             # 条数不同，根本认不出哪份是含子目录的、哪份是只扫本级的
             scope = "含子目录" if payload["recursive"] else "仅本级"
@@ -843,33 +844,29 @@ class Handler(BaseHTTPRequestHandler):
         # 执行计划
         if path == "/api/pan_apply":
             ops = body.get("ops")
-            loop = bool(body.get("loop"))
             preview_id = str(body.get("preview_id") or "")
-            # 「跑完剩下的」：照着生成预览时存下的**完整**计划一批批搬。
-            # 十万条要跑几十轮，手动点「重新生成 → 执行」是不现实的；而每轮重新
-            # 扫描一遍网盘也没必要 —— 源路径不会变，清单本身是准的。
-            if loop:
+            # 一次跑完：预览只往前端传了前 2000 条（十万条全传回去没意义，还慢），
+            # 真正要执行的是生成预览时另存的那份**完整**计划（plans/<id>.json）。
+            # 十万条手动点「重新生成 → 执行」是不现实的；而每轮重新扫描一遍网盘
+            # 也没必要 —— 源路径不会变，清单本身是准的。
+            plan_used = False
+            if preview_id:
                 plan = preview_store.load_full_plan(PROJ, preview_id)
-                if not plan or not plan.get("ops"):
-                    return self._json({
-                        "ok": False,
-                        "msg": "没找到完整计划（预览可能已被清理）。请重新生成一次预览，"
-                               "再点「跑完剩下的」"})
-                ops = plan["ops"]
+                if plan and plan.get("ops"):
+                    ops, plan_used = plan["ops"], True
+            # 前端手里的清单是截过的前 2000 条，want_total 是扫描出来的真实总数。
+            # 两者对不上又没完整计划，说明这份是旧版本存的——跑多少得说清楚
+            want_total = int(body.get("total") or 0)
             if not isinstance(ops, list) or not ops:
                 return self._json({"ok": False, "msg": "没有要执行的操作"})
             # 重名策略：skip 跳过（默认）/ overwrite 覆盖，其余值一律按 skip
             ondup = str(body.get("ondup") or "skip").lower()
             if ondup not in ("skip", "overwrite"):
                 ondup = "skip"
-            # 安全上限：单批最多 2000 条，避免误操作一次搬空整个网盘。
-            # 「跑完剩下的」只是把大计划拆成多批，每批同样受这道上限约束。
+            # 分批提交：百度 filemanager 一次吃不下太多，2000 条一批连着跑完，
+            # 中途可以叫停。总条数不再设上限——点执行就是要把扫出来的全做完。
             CHUNK = 2000
-            if not loop and len(ops) > CHUNK:
-                return self._json({"ok": False,
-                                   "msg": f"一次最多执行 {CHUNK} 条，当前 {len(ops)} 条"})
-            chunks = ([ops[i:i + CHUNK] for i in range(0, len(ops), CHUNK)]
-                      if loop else [ops])
+            chunks = [ops[i:i + CHUNK] for i in range(0, len(ops), CHUNK)]
             all_good, errs = [], []
             for ch in chunks:
                 g, e = pan_tools.validate_plan({"ops": ch}, sandbox)
@@ -952,10 +949,13 @@ class Handler(BaseHTTPRequestHandler):
                 msg += f"；仍有 {len(stat['fails'])} 条未生效（明细见下方）"
             if stat.get("rounds", 0) > 1:
                 msg += f"（共 {stat['rounds']} 批连续执行）"
+            if not plan_used and want_total > len(ops):
+                # 旧版本生成的预览没留下完整计划，前端手里只有前 2000 条
+                msg += ("；⚠ 这份预览是旧版本存的、没有留下完整计划，本次只执行了 "
+                        f"{len(ops)} 条（共 {want_total} 条）；重新生成一次预览就能一次跑完")
             if stat.get("stop_reason"):
-                tail = ("已执行的部分有效，重新勾选「跑完剩下的」即可接着跑"
-                        if loop else "可以重新生成预览后继续")
-                msg += (f"；⚠ 中途停止：{stat['stop_reason']}，剩余操作没有提交，{tail}")
+                msg += (f"；⚠ 中途停止：{stat['stop_reason']}，剩余操作没有提交，"
+                        f"重新生成一次预览即可接着跑剩下的")
             if _upload_busy:
                 # 两个进程用同一个账号猛敲百度，正是本次大规模假失败的诱因
                 msg += ("；⚠ 执行时上传任务正在运行，两者同时操作网盘容易触发百度假失败，"
