@@ -783,8 +783,18 @@ class Handler(BaseHTTPRequestHandler):
                 if not dest:
                     return self._json({"ok": False, "msg": "请填写归档目标目录"})
                 by = str(body.get("by") or "category")
-                ops = pan_tools.build_organize_plan(files, by, dest, sandbox)
-                info = {"scanned": len(files)}
+                # 撞名检测要用「各目录现在都有什么」。扫描已经把范围内的文件
+                # 全列出来了，现算一份目录→文件名的表，不再多花一次请求
+                occupied = {}
+                for f in files:
+                    fd, _, fn = f["path"].rpartition("/")
+                    occupied.setdefault(fd, set()).add(fn)
+                ops = pan_tools.build_organize_plan(files, by, dest, sandbox,
+                                                    occupied)
+                # auto 是撞名被自动编号的条数（改名+移动算一条，只数改名那半）
+                info = {"scanned": len(files),
+                        "auto": sum(1 for o in ops
+                                    if o.get("auto") and o["op"] == "rename")}
                 label = "整理归档·" + ORGANIZE_LABELS.get(by, by) + " → " + dest
             elif kind == "delete":
                 flt = body.get("filters") or {}
@@ -872,7 +882,7 @@ class Handler(BaseHTTPRequestHandler):
             exec_begin(total_ops, rounds=len(all_good))
             stat = {"rename": 0, "move": 0, "delete": 0, "backup": 0,
                     "backup_dir": "", "fails": [], "verified": 0,
-                    "stop_reason": "", "rounds": 0}
+                    "retried": 0, "stop_reason": "", "rounds": 0}
             try:
                 for idx, g in enumerate(all_good, 1):
                     if not g:
@@ -900,7 +910,8 @@ class Handler(BaseHTTPRequestHandler):
 
                     s = pan_tools.apply_plan(pan, g, ondup=ondup,
                                              on_progress=tick())
-                    for k in ("rename", "move", "delete", "backup", "verified"):
+                    for k in ("rename", "move", "delete", "backup",
+                              "verified", "retried"):
                         stat[k] = stat.get(k, 0) + (s.get(k) or 0)
                     if s.get("backup_dir"):
                         stat["backup_dir"] = s["backup_dir"]
@@ -931,8 +942,11 @@ class Handler(BaseHTTPRequestHandler):
             if verified:
                 msg += (f"；其中 {verified} 条百度返回了错误码，已按网盘实际内容核对确认生效"
                         f"（已计入上面的数字）")
+            retried = stat.get("retried") or 0
+            if retried:
+                msg += f"；另有 {retried} 条第一次没生效，自动重试后完成"
             if stat["fails"]:
-                msg += f"；另有 {len(stat['fails'])} 条复核后确认未生效"
+                msg += f"；仍有 {len(stat['fails'])} 条未生效（明细见下方）"
             if stat.get("rounds", 0) > 1:
                 msg += f"（共 {stat['rounds']} 批连续执行）"
             if stat.get("stop_reason"):

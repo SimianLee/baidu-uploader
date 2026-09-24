@@ -50,7 +50,17 @@ BATCH_LIMIT = 100
 # 「没生效」（实测 1612 条全被误判）。所以隔几秒再核一遍，连续两遍都判
 # 没生效才算真失败。详见 _verify_uncertain。
 VERIFY_ROUNDS = 2
-VERIFY_WAIT = 3.0
+VERIFY_WAIT = 4.0
+
+# 这些错误码**不能只看响应就判失败**——它们都能用网盘上的事实证伪。
+# 真事：一次 2000 条的整理归档，界面报「移动 388 / 失败 1612」，失败里
+# 1300 条 errno=-9「文件不存在」、200 条 111、100 条 31033、12 条 -8。
+# 事后把 1612 条全查了一遍：1366 条**早就躺在新目录里了**，其中 -9 那 1300 条
+# 里有 1267 条是搬走了的——百度把成功报成了失败。而这些错码是 info 里**逐条**
+# 给的（不是整批空 info），以前只有整批报错才标 uncertain，于是这 1612 条
+# 一条都没进复核，全被当成真失败。所以凡是下面这些码，一律先记「存疑」，
+# 执行完由 _verify_uncertain 到网盘上核对真假。
+_VERIFIABLE_ERRNOS = {-7, -8, -9, 12, 111, 31033, 31034, 31061, 31066}
 
 
 class PanError(Exception):
@@ -271,10 +281,15 @@ class PanFiles:
                 judged = set()
                 for it_ in info:
                     judged.add(it_.get("path"))
-                    if it_.get("errno", 0) != 0:
-                        fails.append({"path": it_.get("path", "?"),
-                                      "errno": it_.get("errno"),
-                                      "msg": errno_text(it_.get("errno"))})
+                    ec = it_.get("errno", 0)
+                    if ec != 0:
+                        rec = {"path": it_.get("path", "?"), "errno": ec,
+                               "msg": errno_text(ec)}
+                        # 逐条给的错误码同样可能是假的（实测 1300 条 -9 里
+                        # 1267 条其实已经搬走）。可证伪的码先标存疑，事后核对
+                        if ec in _VERIFIABLE_ERRNOS:
+                            rec["uncertain"] = True
+                        fails.append(rec)
                 if errno != 0:      # info 没覆盖到的条目，结论只能看外层 errno
                     for it in chunk:
                         if it.get("path") not in judged:
@@ -688,10 +703,43 @@ def category_of(ext: str) -> str:
     return "其它"
 
 
-def build_organize_plan(files, by: str, dest: str, sandbox: str):
+def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None):
     """files: [{path,name,size,mtime}] → 移动计划
-    by: ext（按后缀） / category（按大类） / date（按修改年月 YYYY-MM）"""
+    by: ext（按后缀） / category（按大类） / date（按修改年月 YYYY-MM）
+
+    occupied: {目录: {文件名}}，扫描范围内各目录当前已有的文件名。有它就多做
+    两件很实在的事（没有也不影响正确性，只是撞名兜底少一层）：
+      1. 已经在目标目录里的文件不再生成操作——它压根不用动，硬搬一次只会在
+         自己所在目录里撞自己的名（十万条量级下这是白花花的失败）
+      2. 目标目录里已经有同名文件时，给后来的自动加 (2)(3)… 序号
+
+    第 2 条为什么必须做：把十几万个文件拍平塞进 /txt、/mobi 这种目录，撞名是
+    必然的（实测 2000 条里就撞了 56 条）。撞了以后——
+      · 跳过策略：这些文件永远搬不完，每轮都报一批失败，收不了尾
+      · 覆盖策略：旧文件被挤进备份区，同名越多备份区越膨胀
+    加个序号两边都不得罪。移动不能顺带改名，所以撞名的拆成「改名 + 移动」两条，
+    改名在前（apply_plan 本来就先跑 ren 再跑 mov）。
+    """
     dest = dest.rstrip("/")
+    used = {d: {n.lower() for n in names} for d, names in (occupied or {}).items()}
+
+    def pick(d, src_dir, name):
+        """挑一个目标目录放得下、源目录也不撞的名字"""
+        pool_d = used.setdefault(d, set())
+        if name.lower() not in pool_d:
+            pool_d.add(name.lower())
+            return name
+        pool_s = used.setdefault(src_dir, set())
+        base, ext = split_name(name)
+        k = 2
+        while True:
+            cand = f"{base} ({k})" + (f".{ext}" if ext else "")
+            if cand.lower() not in pool_d and cand.lower() not in pool_s:
+                pool_d.add(cand.lower())
+                pool_s.add(cand.lower())
+                return cand
+            k += 1
+
     ops = []
     for f in files:
         _, ext = split_name(f["name"])
@@ -704,8 +752,19 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str):
             folder = time.strftime("%Y-%m", time.localtime(mt)) if mt else "未知日期"
         else:
             raise PanError(f"未知的整理方式: {by}")
-        ops.append({"op": "move", "path": f["path"], "name": f["name"],
-                    "dest": f"{dest}/{folder}"})
+        d = f"{dest}/{folder}"
+        p = f["path"]
+        src_dir, _, name = p.rpartition("/")
+        if src_dir == d:
+            continue                    # 已经在新家了，别再折腾它
+        new = pick(d, src_dir, name)
+        if new != name:
+            ops.append({"op": "rename", "path": p, "name": name,
+                        "newname": new, "auto": True})
+            ops.append({"op": "move", "path": f"{src_dir}/{new}", "name": new,
+                        "dest": d, "auto": True})
+        else:
+            ops.append({"op": "move", "path": p, "name": name, "dest": d})
     return ops
 
 
@@ -976,6 +1035,7 @@ def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict,
             need[dst_d] = True
 
     done, pending = {}, list(jobs)
+    last = {}                       # 最后一轮各目录的实况，用来写下失败原因
     for i in range(max(1, rounds)):
         if i:                       # 第一遍马上核（快路径），只有存疑才等
             time.sleep(wait)
@@ -987,6 +1047,7 @@ def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict,
                              if not e["isdir"]}
             except Exception:
                 listed[d] = None    # None = 这个目录读不到，无从核对
+        last = listed
 
         nxt = []
         for f, d, n, dst_d, dst_n, op in pending:
@@ -1009,9 +1070,26 @@ def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict,
     still = []
     for f, d, n, dst_d, dst_n, op in pending:
         f.pop("uncertain", None)
-        f["msg"] = f"{f.get('msg')}（复核 {max(1, rounds)} 次均未生效）"
+        # 失败要说到点子上：撞名、还在原处、压根没有，三种情况三种说法，
+        # 用户一看就知道下一步该选「覆盖」还是别折腾了
+        src, dst = last.get(d), (last.get(dst_d) if dst_d else None)
+        if src is None or (dst_d and dst is None):
+            why = "目录读不到，无从核对"
+            # 目录都读不到，八成是连接出了问题；这时候重提一批，就算回了个
+            # 「成功」也不敢信（没法核对）。不如如实报出来，让人手动重跑
+            f["retryable"] = False
+        elif n.lower() not in src:
+            why = "原处和目标处都没有它（文件本就不在网盘上）"
+            f["retryable"] = False      # 文件压根没有，重试也没用
+        elif dst_d and dst_n and dst_n.lower() in dst:
+            why = "原处还在，目标处已有同名文件（撞名未覆盖）"
+            f["retryable"] = False      # 重试还是撞名，除非改用「覆盖」
+        else:
+            why = "原处还在，没生效"
+            f["retryable"] = True       # 限流/被打回这类，再提交一次常常就成了
+        f["msg"] = f"{f.get('msg')} → 核对 {max(1, rounds)} 次：{why}"
         still.append(f)
-    # rest 是「响应里就明确报了错、不存在存疑」的那些（比如逐条返回的 -8 撞名），
+    # rest 是「响应里就明确报了错、又不属于可核对错误码」的那些（比如建目录失败），
     # 它们没进复核也必须回到失败清单里 —— 少了就是把失败静默吞掉
     return done, rest + still
 
@@ -1035,6 +1113,7 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
     stat = {"rename": 0, "move": 0, "delete": 0, "backup": 0,
             "backup_dir": "", "fails": [],
             "verified": 0,          # 复核后确认已生效的条数（响应报错、实际成功）
+            "retried": 0,           # 重试一轮后又被救回来的条数
             "stop_reason": ""}
     ren = [{"path": o["path"], "newname": o["newname"]} for o in ops if o["op"] == "rename"]
     mov = [{"path": o["path"], "dest": o["dest"]} for o in ops if o["op"] == "move"]
@@ -1114,19 +1193,59 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
         ok, fails = pan.delete_batch(dele, on_progress=tick("正在删除"))
         stat["delete"] = ok; stat["fails"] += fails
 
-    # 站到磁盘上复核：整批报错但结果未知的那些，到底动没动。
-    # 这一步是必须的——百度在并发下会整批回错误码，操作其实已经生效，
-    # 不核对就会把成功报成失败（实测 2000 条移动里 1800 条是如此）。
+    # 站到磁盘上复核：报错的那些到底动没动。
+    # 这一步是必须的——百度在大批量提交时会把已经生效的操作也报成失败，
+    # 不核对就会把成功报成失败（实测 2000 条移动里 1612 条报错，其中 1366 条
+    # 其实早就搬走了）。注意不光「整批报错」要核，info 里**逐条**给的错码
+    # 一样会假报，所以 _verify_uncertain 按错误码挑出可核对的全部核一遍。
+    by_op = {o["path"]: o for o in ops}
     if stat["fails"]:
         emit("核对执行结果")
-        by_op = {o["path"]: o for o in ops}
         vdone, rest = _verify_uncertain(pan, stat["fails"], by_op)
         for op, n in vdone.items():
             stat[op] = stat.get(op, 0) + n
             stat["verified"] += n
         stat["fails"] = rest
+
+    # 复核后仍失败的，有一部分只是「这一趟没赶上」——限流、整批被打回之类，
+    # 再提交一次通常就成了。撞名和「文件压根不在」重试也没用，不做无用功。
     stop_reason = getattr(pan, "last_stop_reason", "")
+    if not stop_reason:
+        retry = [f for f in stat["fails"] if f.get("retryable")]
+        if retry:
+            emit(f"重试 {len(retry)} 条未生效的")
+            keep = [f for f in stat["fails"] if not f.get("retryable")]
+            sub = [by_op[f["path"]] for f in retry if f["path"] in by_op]
+            prog["total"] += len(sub)      # 不然进度条会提前顶到 100%
+            r2 = [{"path": o["path"], "newname": o["newname"]}
+                  for o in sub if o["op"] == "rename"]
+            m2 = [{"path": o["path"], "dest": o["dest"]}
+                  for o in sub if o["op"] == "move"]
+            d2 = [o["path"] for o in sub if o["op"] == "delete"]
+            f2 = []
+            if r2:
+                ok, fl = pan.rename_batch(
+                    r2, ondup="skip", on_progress=tick("重试改名"))
+                stat["rename"] += ok; f2 += fl
+            if m2:
+                ok, fl = pan.move_batch(
+                    m2, ondup="skip", on_progress=tick("重试移动"))
+                stat["move"] += ok; f2 += fl
+            if d2:
+                ok, fl = pan.delete_batch(d2, on_progress=tick("重试删除"))
+                stat["delete"] += ok; f2 += fl
+            v2 = {}
+            if f2:
+                v2, rest2 = _verify_uncertain(pan, f2, by_op)
+                for op, n in v2.items():
+                    stat[op] = stat.get(op, 0) + n
+                keep += rest2
+            # 重试里直接回成功的 + 又报错但复核确认生效的，都算「重试救回来的」
+            stat["retried"] = (len(sub) - len(f2)) + sum(v2.values())
+            stat["fails"] = keep
     if stop_reason:
         stat["stop_reason"] = stop_reason
+    for f in stat["fails"]:
+        f.pop("retryable", None)      # 内部标记，不往外传
     emit("已完成")
     return stat
