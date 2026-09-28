@@ -658,7 +658,6 @@
           <button class="tab" id="tabMerge" onclick="panTab('merge')">合并重复</button>
           <button class="tab" id="tabDelete" onclick="panTab('delete')">批量删除</button>
           <button class="tab" id="tabEmpty" onclick="panTab('empty')">空文件夹</button>
-          <button class="tab" id="tabAi" onclick="panTab('ai')">AI 计划</button>
         </div>
 
         <!-- 改名 -->
@@ -764,25 +763,6 @@
             删掉它，嵌套在里面的空目录会一并消失，不必逐层列。
             当前正在浏览的这层目录本身不会被删（免得删掉你正站着的地方）。
             因为要看整棵子树，这个功能<b>总是递归扫描</b>，并会锁定「含子目录」开关。
-          </div>
-        </div>
-
-        <!-- AI 计划 -->
-        <div class="panel" id="paneAi">
-          <div class="btnbar" style="margin-bottom:8px">
-            <button class="btn ghost" onclick="panExport()">导出当前目录文件清单</button>
-            <button class="btn ghost" onclick="copyPanText()">复制到剪贴板</button>
-            <div class="spacer"></div>
-            <span class="hint" id="aiCount"></span>
-          </div>
-          <textarea id="aiText" class="term" rows="7" spellcheck="false"
-            placeholder="① 点「导出」拿到文件清单 → ② 复制到 WorkBuddy 对话里，让 AI 按要求生成操作计划 JSON → ③ 把 JSON 粘贴回这里 → ④ 点「解析并预览」"></textarea>
-          <div class="btnbar" style="margin-top:8px">
-            <button class="btn green" onclick="panParse()">解析并预览</button>
-          </div>
-          <div class="hint">
-            约束会写在导出的文本里：AI 只能用清单里出现过的路径、只能操作沙盒目录、只输出 JSON。
-            解析时会逐条校验，越界或格式错的操作会被拦截并显示。
           </div>
         </div>
 
@@ -1321,7 +1301,7 @@ async function pollNow(){
 }
 
 /* =======================================================================
-   网盘整理 / 批量改名 / 批量删除 / AI 计划
+   网盘整理 / 批量改名 / 整理归档 / 合并重复 / 批量删除 / 空文件夹
    全部只操作百度应用沙盒目录，越界在后端 validate_plan 里拦截
    ======================================================================= */
 let panTab_ = 'rename';       // 当前功能页
@@ -1350,8 +1330,7 @@ function panTab(k){
   panTab_ = k;
   [['rename','tabRename','paneRename'], ['organize','tabOrganize','paneOrganize'],
    ['merge','tabMerge','paneMerge'],
-   ['delete','tabDelete','paneDelete'], ['empty','tabEmpty','paneEmpty'],
-   ['ai','tabAi','paneAi']].forEach(([key, tab, pane]) => {
+   ['delete','tabDelete','paneDelete'], ['empty','tabEmpty','paneEmpty']].forEach(([key, tab, pane]) => {
     $(tab).classList.toggle('on', key === k);
     $(pane).classList.toggle('on', key === k);
   });
@@ -1542,14 +1521,14 @@ function setScanBtnEnabled(on){
 }
 
 /* 点「停止」：请求后端让扫描线程在下一个检查点退出。
-   这个请求很快就会返回；真正的收尾由正在等待的 pan_plan / pan_export 那边完成 */
+   这个请求很快就会返回；真正的收尾由正在等待的 pan_plan 那边完成 */
 async function panStopScan(){
   if(scanStopping) return;
   setScanStopping(true);
   $('scanTxt').textContent = '正在停止…（等当前这一层目录读完就中断）';
   const d = await api('/api/pan_cancel', {});
   if(!d || !d.ok || !d.stopping){
-    // 扫描已经自己结束了，把按钮放回去，交给 panPlan / panExport 的 finally 收尾
+    // 扫描已经自己结束了，把按钮放回去，交给 panPlan 的 finally 收尾
     setScanStopping(false);
     toast('扫描已经结束了', null);
   }
@@ -1567,8 +1546,7 @@ async function panStopExec(){
 
 function stopScanPoll(){ if(scanTimer){ clearInterval(scanTimer); scanTimer = null; } }
 
-/* render(state, 已耗时秒) 可覆盖：导出清单时把进度画到 aiCount 上 */
-function startScanPoll(render){
+function startScanPoll(){
   stopScanPoll();
   const t0 = Date.now();
   let sawRunning = false;      // 先确认这次扫描真的跑起来了，否则会画到上一轮的残留快照
@@ -1577,7 +1555,7 @@ function startScanPoll(render){
     if(!d || !d.ok) return;
     if(d.running) sawRunning = true;
     else if(!sawRunning) return;
-    (render || scanPaint)(d, ((Date.now() - t0) / 1000).toFixed(0));
+    scanPaint(d, ((Date.now() - t0) / 1000).toFixed(0));
   };
   tick();
   scanTimer = setInterval(tick, 300);
@@ -1820,7 +1798,8 @@ async function panPlan(refresh){
     // recursive 恒为 true：后端也会强制递归，这里显式写出来免得两头不一致
     body = {...body, kind: 'empty_dir', recursive: true, skip: $('edSkip').value};
   }else{
-    setMsg('panMsg', 'AI 计划请直接在下方粘贴 JSON 后点「解析并预览」', null); return;
+    // 五个功能页签都处理完了还走到这里，说明前端状态乱了：别往下跑，老实报出来
+    setMsg('panMsg', '请先选择功能页签', false); return;
   }
 
   body.refresh = !!refresh;            // 后端据此跳过「同参数预览」的复用
@@ -1990,8 +1969,8 @@ async function panApply(){
   const st = d.stat || {};
   const execId = pvCurrent;      // 记住刚执行的是哪份，刷完列表选回去好让人看见「已执行」
   panOps = []; panTotal = 0;
-  // 清掉「当前载入的是哪份预览」：不然接着粘贴一份 AI 计划去执行时，会把「已执行」
-  // 的戳盖到这份无辜的预览文件上
+  // 清掉「当前载入的是哪份预览」：网盘已经被这份计划改过了，再拿它当「当前状态」
+  // 就是错的了——换页签/重新生成之前不能再执行
   pvCurrent = ''; pvCurAge = 0; pvCurDone = false;
   // 执行战果做成统计卡：改名/移动/删除是主数字，复核/重试救回的是被百度
   // 假报失败后追认回来的，未生效的红色压轴——一眼看清这趟到底干成了多少
@@ -2016,69 +1995,6 @@ async function panApply(){
   await panBrowse();         // 先刷新目录列表（它自己会写一条提示）
   // 结果提示放最后写，否则会被上面「列出 N 个文件」的提示盖掉，看不到执行战果
   setMsg('panMsg', (d.msg || '执行完成'), st.fails && st.fails.length ? null : true);
-}
-
-/* 导出清单给 AI */
-async function panExport(){
-  $('aiCount').textContent = '正在扫描…';
-  showScan(true);
-  startScanPoll((d, sec) => {           // 进度同时画到扫描条和 aiCount
-    scanPaint(d, sec);
-    $('aiCount').textContent = `扫描中：${d.dirs} 目录 · ${d.files} 文件 · ${sec}s`;
-  });
-  let d;
-  try{
-    d = await api('/api/pan_export',
-      {path: $('panPath').value.trim(), recursive: true, limit: 300});
-  }finally{
-    stopScanPoll(); showScan(false);
-  }
-  if(!d.ok){
-    setMsg('panMsg', d.msg, d.cancelled ? null : false);
-    $('aiCount').textContent = d.cancelled ? '已停止扫描' : '';
-    return;
-  }
-  $('aiText').value = d.text;
-  // 有目录没扫进去 ⇒ 清单是残缺的，说清楚，别让 AI 按「完整清单」去规划
-  const sk = d.skipped_total || 0;
-  $('aiCount').textContent = `已导出 ${d.count} 个文件` + (sk ? `（${sk} 个目录打不开已跳过）` : '');
-  setMsg('panMsg', '清单已生成，点「复制到剪贴板」后粘到 WorkBuddy 对话里'
-    + (sk ? `；注意有 ${sk} 个目录打不开，清单里不含它们下面的文件（已在清单开头注明）` : ''),
-    true);
-}
-
-async function copyPanText(){
-  const t = $('aiText').value;
-  if(!t.trim()){ setMsg('panMsg', '请先点「导出当前目录文件清单」', false); return; }
-  try{
-    await navigator.clipboard.writeText(t);
-    setMsg('panMsg', '已复制到剪贴板', true);
-  }catch(e){
-    $('aiText').select();
-    setMsg('panMsg', '自动复制被浏览器拦截，已全选，请按 Ctrl+C', null);
-  }
-}
-
-/* 解析 AI 返回的 JSON 计划 */
-async function panParse(){
-  const txt = $('aiText').value.trim();
-  if(!txt){ setMsg('panMsg', '请先粘贴 AI 生成的 JSON', false); return; }
-  const d = await api('/api/pan_validate', {text: txt});
-  if(!d.ok){ setMsg('panMsg', d.msg || '计划里没有合法操作', false); }
-  else if(d.errors && d.errors.length){
-    setMsg('panMsg', `${d.msg}：${d.errors.slice(0,3).join('；')}`, null);
-  }else{
-    setMsg('panMsg', d.msg, true);
-  }
-  panOps = d.ops || [];
-  panTotal = d.total || 0;
-  // AI 计划不是从预览文件来的：把「当前预览」清干净，免得执行时把「已执行」的戳
-  // 盖到上一次载入的那份预览上
-  pvCurrent = ''; pvCurAge = 0; pvCurDone = false;
-  renderPanPreview(panOps, '');
-  pvPaintStats([{n: panTotal, label: '条操作', cls: panTotal ? 'ok' : ''}]);
-  $('btnPanApply').disabled = !panOps.length;
-  setPlanReady(false);      // AI 计划不挂在预览文件上：就按列表里这些条跑
 }
 
 /* ---------- 启动：file:// 打开时给出修正指引 ---------- */

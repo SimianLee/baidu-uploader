@@ -1160,11 +1160,11 @@ def build_empty_dir_plan(entries, root: str, skip: str = "", unreadable=None):
 
 
 # ===========================================================================
-# 计划校验（粘贴 AI 生成的 JSON 时用）
+# 计划校验（载入预览 / 执行前统一过一遍：拦越界与非法操作）
 # ===========================================================================
 
 def validate_plan(plan: dict, sandbox: str):
-    """校验外部（AI 生成）计划，返回 (ops, errors)"""
+    """校验计划，返回 (ops, errors)"""
     ops = plan.get("ops") if isinstance(plan, dict) else plan
     if not isinstance(ops, list):
         return [], ["计划格式不对：需要 {\"ops\": [...]} 或直接的数组"]

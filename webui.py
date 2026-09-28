@@ -236,7 +236,7 @@ def verify_token():
 
 
 # ---------------- 网盘扫描进度（生成预览时前端轮询） ----------------
-# 扫描跑在 /api/pan_plan（或 /api/pan_export）的请求线程里，进度由另一个请求
+# 扫描跑在 /api/pan_plan 的请求线程里，进度由另一个请求
 # 线程读取，所以用锁保护。ThreadingHTTPServer 保证两边互不阻塞。
 _scan_lock = threading.Lock()
 _scan = {"running": False, "phase": "", "dirs": 0, "files": 0, "path": "",
@@ -521,11 +521,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": ok, "msg": msg})
 
         # ---------------- 网盘整理 / 批量改名 / 批量删除（沙盒内） ----------------
-        if path in ("/api/pan_browse", "/api/pan_plan", "/api/pan_apply",
-                    "/api/pan_export", "/api/pan_validate"):
+        if path in ("/api/pan_browse", "/api/pan_plan", "/api/pan_apply"):
             return self._handle_pan(path, body)
 
-        # 扫描进度：前端在「生成预览 / 导出清单」期间轮询。
+        # 扫描进度：前端在「生成预览」期间轮询。
         # 不放上面那组里——这里不需要构造 PanFiles，也就不该因未授权而失败。
         if path == "/api/pan_plan_progress":
             return self._json({"ok": True, **scan_snapshot()})
@@ -978,64 +977,6 @@ class Handler(BaseHTTPRequestHandler):
                 preview_store.mark_executed(PROJ, preview_id, stat, msg)
             return self._json({"ok": True, "stat": stat, "errors": errs, "msg": msg,
                                "preview_id": preview_id})
-
-        # 导出文件清单（给 AI 用）
-        if path == "/api/pan_export":
-            p = str(body.get("path") or sandbox).strip() or sandbox
-            recursive = bool(body.get("recursive", True))
-            limit = int(body.get("limit", 300) or 300)
-            scan_begin()
-            cancelled = False
-            failures = []       # 同上：清单不完整得让 AI 和用户都知道
-            try:
-                files = pan.list_files(p, recursive=recursive, on_progress=scan_tick,
-                                       should_stop=scan_should_stop, failures=failures)
-            except pan_tools.ScanCancelled as e:
-                cancelled = True
-                return self._json({"ok": False, "cancelled": True, "msg":
-                                   f"已停止扫描（已遍历 {e.dirs} 个目录 / "
-                                   f"找到 {e.files} 个文件），清单未生成"})
-            except Exception as e:
-                m = str(e) if isinstance(e, pan_tools.PanError) else f"扫描失败：{e}"
-                return self._json({"ok": False, "msg": m})
-            finally:
-                scan_end(cancelled=cancelled)
-            files = files[:limit]
-            lines = [f'{i+1}\t{f["path"]}\t{f["size"]}' for i, f in enumerate(files)]
-            # 清单不完整时把这件事写进注释：AI 拿到的是残缺清单，得让它知道
-            # 有些目录根本没扫进去，别把「清单里没有」当成「网盘里没有」
-            skip_note = ""
-            if failures:
-                sample = "；".join(f["path"].rsplit("/", 1)[-1] for f in failures[:3])
-                skip_note = (f"# 注意：有 {len(failures)} 个目录列不开（百度侧脏条目），"
-                             f"它们下面的文件不在清单里，例如：{sample}\n")
-            hint = (
-                f"# 以下是百度网盘沙盒目录 {p} 下的 {len(files)} 个文件（路径\t大小字节）。\n"
-                + skip_note
-                + f"# 请按要求生成操作计划，输出严格的 JSON，格式：\n"
-                f'# {{"ops":[{{"op":"rename","path":"...","newname":"..."}},'
-                f'{{"op":"move","path":"...","dest":"..."}},'
-                f'{{"op":"delete","path":"..."}}]}}\n'
-                f"# 约束：1) path 必须是上面列出的完整路径，不要自造；"
-                f"2) 只允许操作 {sandbox} 内的文件；3) 不要输出解释文字，只输出 JSON。\n")
-            return self._json({"ok": True, "text": hint + "\n".join(lines),
-                               "count": len(files), "total": len(files),
-                               "skipped_total": len(failures)})
-
-        # 校验粘贴进来的 AI 计划
-        if path == "/api/pan_validate":
-            txt = str(body.get("text") or "").strip()
-            if not txt:
-                return self._json({"ok": False, "msg": "请粘贴计划 JSON"})
-            try:
-                plan = json.loads(txt)
-            except Exception as e:
-                return self._json({"ok": False, "msg": f"JSON 解析失败：{e}"})
-            good, errs = pan_tools.validate_plan(plan, sandbox)
-            return self._json({"ok": bool(good), "ops": good[:2000],
-                               "total": len(good), "errors": errs,
-                               "msg": (f"解析出 {len(good)} 条合法操作"
-                                       + (f"，{len(errs)} 条被拦截" if errs else ""))})
 
         return self._json({"ok": False, "msg": f"接口不存在：{path}"}, 404)
 
