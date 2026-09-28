@@ -56,6 +56,15 @@ PID_FILE = "upload.pid"       # 上传进程锁：网页重启后也能认出"�
 MAP_FILE = "upload_map.json"  # 非 mirror 布局的远程名分配记录（断点续传防错位）
 PROGRESS_FILE = "progress.json"  # 上传进度（网页面板轮询它来画进度条）
 
+# 运行状态文件（断点/进度/锁）统一收在 data/ 目录，项目根只留代码和配置
+DATA_DIR = "data"
+
+
+def data_dir_of(cfg_path: Path) -> Path:
+    d = cfg_path.parent / DATA_DIR
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
 # 进度落盘的两个保命参数。Windows 上只要有**任何**进程此刻开着 progress.json 的句柄
 # （面板在轮询、杀软在实时扫描、资源管理器在做预览），os.replace 就会报
 # WinError 5「拒绝访问」。实测：持有句柄 20ms 时约一半的替换失败；8 个进程同时轮询
@@ -571,7 +580,7 @@ def explain_empty(stats, cfg, root: Path, skipped_done: int, too_big_n: int):
         elif skipped_done >= stats["scanned"]:
             print("\n  扫描到的文件此前全都上传成功过了 —— 属于正常情况，真的传完了。")
             print("  想强制重传：命令行加 --no-resume，或在网页面板上点「重新扫描上传」")
-            print(f"  （断点记录：{cfg.get('_cfg_dir', '.')}/uploaded_log.txt）")
+            print(f"  （断点记录：{cfg.get('_cfg_dir', '.')}/data/uploaded_log.txt）")
         else:
             print("\n  文件被排除规则/空文件/超大文件过滤掉了，可到配置里放宽条件。")
     if unread:
@@ -850,7 +859,7 @@ def main():
         print(f"[错误] 本地目录不存在: {root}")
         sys.exit(1)
 
-    done_log_path = cfg_path.parent / DONE_LOG
+    done_log_path = data_dir_of(cfg_path) / DONE_LOG
     done_log = set(load_json(done_log_path, []))
     # 兼容新版追加式文本日志（一行一个已上传文件路径）
     done_log_txt = done_log_path.with_suffix(".txt")
@@ -908,7 +917,7 @@ def main():
         layout = "mirror"
     # 远程名分配基于**全量扫描结果**（而非 pending）：已传过的文件虽然本次
     # 不传，但它们占用的远程名不能让给别的同名文件，否则断点续传会错位覆盖
-    map_file = cfg_path.parent / MAP_FILE
+    map_file = data_dir_of(cfg_path) / MAP_FILE
     old_map = load_json(map_file, {}) if layout != "mirror" else {}
     remote_map, new_names = build_remote_map(to_upload, root, remote_base, layout, old_map)
     renamed = sum(1 for p, _ in pending
@@ -960,7 +969,7 @@ def main():
         save_json(map_file, merged)
 
     # 进程锁：防止网页重启后重复起第二个上传进程（会导致同一批文件被传两遍）
-    got, owner = acquire_pidfile(cfg_path.parent / PID_FILE)
+    got, owner = acquire_pidfile(data_dir_of(cfg_path) / PID_FILE)
     if not got:
         print(f"[提示] 已有一个上传进程在跑（PID {owner}），本次不再重复启动。")
         print("      要换参数重传，先关掉它：网页点「停止」，或任务管理器结束该 PID。")
@@ -986,7 +995,7 @@ def main():
     done_log_fh = open(done_log_path.with_suffix(".txt"), "a", encoding="utf-8")
 
     # 进度状态文件（供网页控制面板轮询）：原子写 + 重试，写不进去也绝不中断上传
-    progress_path = cfg_path.parent / PROGRESS_FILE
+    progress_path = data_dir_of(cfg_path) / PROGRESS_FILE
     prog_lock = threading.Lock()
     prog_last = [0.0]      # 上次真正落盘的时刻（节流用）
     prog_skips = [0]       # 写失败次数（只提示一次，不刷屏）

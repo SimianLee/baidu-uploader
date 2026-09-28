@@ -31,6 +31,9 @@ import re
 import time
 from pathlib import Path
 
+# 预览/计划都是运行数据，统一收在 data/ 下（和进度、断点、日志一个家），
+# 项目根目录只留代码和配置
+DATA_DIR_NAME = "data"
 DIR_NAME = "previews"
 MAX_KEEP = 50                  # 最多保留多少份预览文件（超了丢最旧的）
 REUSE_MAX_AGE = 24 * 3600      # 同参数预览超过一天就不再自动复用
@@ -42,7 +45,7 @@ _ID_OK = re.compile(r"^[0-9A-Za-z_\-]{6,80}$")
 
 
 def preview_dir(root) -> Path:
-    return Path(root) / DIR_NAME
+    return Path(root) / DATA_DIR_NAME / DIR_NAME
 
 
 # 完整计划单独放一个目录：预览文件只留前 MAX_OPS_SAVED 条（给人看、给单次执行
@@ -54,7 +57,7 @@ PLAN_MAX_KEEP = 5         # 完整计划一份能有几 MB，只留最近这几�
 
 
 def plan_dir(root) -> Path:
-    return Path(root) / PLAN_DIR_NAME
+    return Path(root) / DATA_DIR_NAME / PLAN_DIR_NAME
 
 
 def save_full_plan(root, pid, ops, kind="", payload=None, label="") -> bool:

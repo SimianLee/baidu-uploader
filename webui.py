@@ -26,11 +26,15 @@ PROJ = Path(__file__).resolve().parent
 PY = sys.executable                      # 用当前解释器跑上传子进程
 CONFIG = PROJ / "config.json"
 TOKEN = PROJ / "token.json"
-LOGFILE = PROJ / "upload.log"
-PROGRESS = PROJ / "progress.json"
 HTMLFILE = PROJ / "webui.html"
-PIDFILE = PROJ / "upload.pid"            # 上传进程锁：面板重启也能认出还在跑的上传
-LOCAL_RENAME_LOG = PROJ / "local_rename_log.jsonl"   # 本地改名记录（可整批回退）
+# 运行数据统一收在 data/：进度、进程锁、日志、预览、完整计划都住这儿，
+# 项目根目录只留代码和配置（与 upload_baidu.py 的 data_dir_of 同一约定）
+DATA = PROJ / "data"
+DATA.mkdir(parents=True, exist_ok=True)
+LOGFILE = DATA / "upload.log"
+PROGRESS = DATA / "progress.json"
+PIDFILE = DATA / "upload.pid"            # 上传进程锁：面板重启也能认出还在跑的上传
+LOCAL_RENAME_LOG = DATA / "local_rename_log.jsonl"   # 本地改名记录（可整批回退）
 PORT = 8765
 LOG_MAX_BYTES = 20 * 1024 * 1024         # 日志超过 20MB 就归档，避免长期任务撑爆磁盘
 
@@ -39,7 +43,7 @@ LOG_MAX_BYTES = 20 * 1024 * 1024         # 日志超过 20MB 就归档，避免�
 _last_progress = {}
 
 # 预览文件标题用的人话。前端也有一份同名的，但存进文件里的标题得由后端写，
-# 否则列表在别的地方（比如直接翻 previews/ 目录）看就是一堆代号
+# 否则列表在别的地方（比如直接翻 data/previews/ 目录）看就是一堆代号
 RENAME_MODE_LABELS = {"replace": "查找替换", "affix": "加前后缀", "serial": "序号重命名",
                       "regex": "正则替换", "clean": "去广告清理", "title": "只保留书名"}
 ORGANIZE_LABELS = {"category": "按大类", "ext": "按后缀", "date": "按修改月份"}
@@ -73,7 +77,7 @@ def rotate_log():
     """upload.log 超过阈值就归档成 upload.log.1，只留一份旧档"""
     try:
         if LOGFILE.exists() and LOGFILE.stat().st_size > LOG_MAX_BYTES:
-            old = PROJ / "upload.log.1"
+            old = DATA / "upload.log.1"
             if old.exists():
                 old.unlink()
             LOGFILE.rename(old)

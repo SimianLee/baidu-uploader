@@ -1658,7 +1658,7 @@ function execPaint(d, sec){
 }
 
 /* ---------- 预览文件（本地存盘，避免反复重扫网盘） ----------
-   每点一次「生成预览」都会把计划写进 previews/ 下的一个文件；带了「指纹」，
+   每点一次「生成预览」都会把计划写进 data/previews/ 下的一个文件；带了「指纹」，
    同参数再点一次直接复用，一个网盘请求都不发。下面是这份文件列表的全部交互：
    载入（挑一份旧的直接执行）、删除、清理已执行。 */
 let pvItems   = [];    // 服务端给的预览文件摘要列表
@@ -1687,11 +1687,11 @@ function pvPaintHint(){
   const h = $('pvHint'); if(!h) return;
   if(!pvItems.length){
     h.innerHTML = '还没有存下来的预览。点「生成预览」会自动存一份到 '
-      + '<code>previews/</code> 目录；同参数再点一次直接复用，不再扫描网盘。';
+      + '<code>data/previews/</code> 目录；同参数再点一次直接复用，不再扫描网盘。';
     return;
   }
   const n = pvItems.filter(x => x.executed).length;
-  h.innerHTML = `本地存了 <b>${pvItems.length}</b> 份预览（<code>previews/</code> 目录，最多留 ${pvMaxKeep} 份）。`
+  h.innerHTML = `本地存了 <b>${pvItems.length}</b> 份预览（<code>data/previews/</code> 目录，最多留 ${pvMaxKeep} 份）。`
     + `同参数再点「生成预览」会直接复用，不再扫描网盘；要强制重扫点「重新生成」。`
     + (n ? `其中 <b>${n}</b> 份已执行过，不会再被复用（网盘已经不是当时的样子了）。` : '')
     + ` 选一份载入即可直接「执行」。`;

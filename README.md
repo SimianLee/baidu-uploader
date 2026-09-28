@@ -8,12 +8,12 @@ Win10 命令行 + 网页可视化面板：把本地目录的文件**分批**上�
 baidu_uploader/
 ├── README.md              # 本说明
 ├── requirements.txt       # 依赖（requests / send2trash）
-├── .gitignore             # 已排除密钥、Token、依赖、日志
+├── .gitignore             # 已排除密钥、Token、依赖、运行数据、测试
 ├── config.example.json    # 配置模板（复制成 config.json 后填写）
 ├── upload_baidu.py        # 上传主程序（命令行入口）
 ├── winpath.py             # Windows 长路径（MAX_PATH）安全访问：超 260 字符的路径靠 \\?\ 前缀读写
 ├── verify_remote.py       # 上传完成后核对网盘 vs 本地记录（只读）
-├── pan_tools.py           # 网盘整理引擎：批量改名/归档/删除/空目录/计划校验（纯标准库）
+├── pan_tools.py           # 网盘整理引擎：批量改名/归档/删除/空目录/合并重复/计划校验（纯标准库）
 ├── organize_all.py        # 整理归档·命令行循环版：按 2000 条一批跑到搬完（面板之外的一条路）
 ├── local_rename.py        # 上传前本地改名：扫描/改名/记录/整批回退（复用 pan_tools 的命名规则）
 ├── preview_store.py       # 预览文件：把「生成预览」的结果落盘，同参数直接复用（不再重扫网盘）
@@ -21,12 +21,32 @@ baidu_uploader/
 ├── webui.html             # 网页控制面板页面
 ├── open_panel.bat         # 双击打开控制面板
 ├── start_upload.bat       # 双击直接命令行全量上传
-├── libs/                  # 依赖安装目录（gitignore 排除，不入库）
-├── previews/              # 预览文件存盘目录（gitignore 排除，本机运行产物）
+├── push-all.bat           # 双击提交并推送到远端（带密钥泄漏自检）
 ├── config.json            # 你的配置（gitignore 排除，含密钥）
-└── token.json             # 授权 Token（gitignore 排除，切勿外传）
+├── token.json             # 授权 Token（gitignore 排除，切勿外传）
+├── libs/                  # 依赖安装目录（gitignore 排除，不入库）
+├── tests/                 # 回归测试 _t_*.py + UI 截图（gitignore 排除）
+├── data/                  # 运行数据统一目录（gitignore 排除，全是本机产物）
+│   ├── progress.json      #   上传进度（面板轮询它画进度条）
+│   ├── upload.pid         #   上传进程锁
+│   ├── upload.log(.1)     #   上传日志（超 20MB 自动归档）
+│   ├── uploaded_log.txt   #   断点记录：已成功上传清单（删了会重复上传！）
+│   ├── upload_map.json    #   远程名分配表（非 mirror 布局的断点续传防错位）
+│   ├── local_rename_log.jsonl  # 本地改名记录（可整批回退）
+│   ├── previews/          #   预览文件存盘（最多留 50 份）
+│   └── plans/             #   完整计划存盘（十万条大计划，最多留 5 份）
+└── push-logs/             # push-all.bat 的推送日志（gitignore 排除）
 ```
 
+> 📁 **运行数据都在 `data/` 里**：进度、断点、日志、预览、完整计划——根目录只有代码和
+> 配置，看目录一眼就知道什么能动什么不能动。尤其 `data/uploaded_log.txt` 和
+> `data/upload_map.json` 是断点记录，删了会导致已上传的文件重传。
+>
+> 🧪 **跑测试**：在项目根目录执行
+> `PYTHONPATH=libs python tests/_t_plan_all.py`（每个测试都能单独跑；
+> `_t_preview_ui.py` / `_t_rescan_ui.py` 需要真浏览器，`_t_preview_real.py` /
+> `_t_real_skip.py` 会连真实网盘但全程只读）。
+>
 > ⚠️ **安全提醒**：`config.json` 里有你的 SecretKey，`token.json` 里有百度账号授权凭证。这两个文件已在 `.gitignore` 中排除，**请勿手动 add 或提交到公开仓库**。
 
 ## 一、前置准备（一次性，约 10 分钟）
@@ -172,12 +192,12 @@ API 却返回 `ERROR_FILE_NOT_FOUND (2)`，于是日志里刷一片：
 
 ## 六、可靠性设计
 
-- **断点续传**：每成功一个文件立刻写入 `uploaded_log.json`，中途中断（Ctrl+C / 断网 / 蓝屏 😉）后重跑自动跳过已成功的；
+- **断点续传**：每成功一个文件立刻写入 `data/uploaded_log.json`，中途中断（Ctrl+C / 断网 / 蓝屏 😉）后重跑自动跳过已成功的；
 - **秒传**：网盘已有相同内容（MD5 分片一致）时直接秒完成，不耗流量；
 - **分片重试**：4MB 分片上传失败自动重试 3 次（指数退避）；
 - **失败重跑**：失败的文件下次运行自动重试；
 - **Token 自动刷新**：过期自动用 refresh_token 续期；
-- **进度文件写不进去也绝不中断上传**：`progress.json` 只是给面板看的，但 Windows 上
+- **进度文件写不进去也绝不中断上传**：`data/progress.json` 只是给面板看的，但 Windows 上
   它有个阴险的坑——只要**任何**进程此刻开着它的句柄（面板在轮询、杀软在实时扫描、
   资源管理器在做预览），`os.replace` 就会报 `WinError 5 拒绝访问`。实测：持有句柄
   20ms 时约一半的替换失败；8 个进程同时轮询也会稳定撞上；**让读方改用 `FILE_SHARE_DELETE`
@@ -189,9 +209,9 @@ API 却返回 `ERROR_FILE_NOT_FOUND (2)`，于是日志里刷一片：
 - **进度落盘节流**：`PROGRESS_MIN_INTERVAL = 0.2s`，几千个文件不会每个都写盘
   （实测 60 个文件只落盘 8 次），顺带把撞上「句柄被占用」的概率降两个数量级。
   批次收尾、开始、结束这三处强制落盘，面板不会因此变迟钝；
-- **面板不会把进度闪成 0**：读 `progress.json` 解析失败时重读一次，还不行就沿用
+- **面板不会把进度闪成 0**：读 `data/progress.json` 解析失败时重读一次，还不行就沿用
   上一次的好值（否则界面会闪一下归零，看着像任务被重置）；
-- **开新任务先清旧进度**：点「开始上传」立刻把 `progress.json` 重置成空。上传进程要先
+- **开新任务先清旧进度**：点「开始上传」立刻把 `data/progress.json` 重置成空。上传进程要先
   扫完本地目录才写第一版进度，这中间（1.7 万个文件要扫一阵）若留着上一轮的
   `4782/4782`，界面会显示成「新任务已经跑完」；
 - **本地扫描不再静默漏掉长路径文件**：路径超过 260 字符（Windows 的 `MAX_PATH`）时，
@@ -209,13 +229,13 @@ API 却返回 `ERROR_FILE_NOT_FOUND (2)`，于是日志里刷一片：
   旧实现只看 `OpenProcess`，于是上传**跑完或被强杀之后**，面板因为自己还攥着
   Popen 句柄，会一直认为上传在跑、拒绝启动新上传——只能重启面板才解得开。
   现在判活统一走 `proclock.py`（`OpenProcess` + `GetExitCodeProcess` 双检），
-  面板、上传主程序、`organize_all.py` 三处共用同一份实现。`upload.pid` 是靠
+  面板、上传主程序、`organize_all.py` 三处共用同一份实现。`data/upload.pid` 是靠
   `atexit` 删除的，被强杀（蓝屏 / 关机 / 任务管理器结束进程）时会残留——
   残留本身无害，只要判活可靠，「残留」和「真在跑」就分得清。
 
 ## 六·五、本地还有没有没传的文件？（重新扫描上传）
 
-断点记录（`uploaded_log.txt`）说「都传完了」，不等于本地一个不剩。想看准数字，
+断点记录（`data/uploaded_log.txt`）说「都传完了」，不等于本地一个不剩。想看准数字，
 就用**忽略断点记录**的方式再扫一遍。
 
 **网页面板**（推荐）：上传卡片里勾上「忽略断点记录」，然后
@@ -267,7 +287,7 @@ python verify_remote.py --remote /apps/baidu_uploader/子目录名
 python verify_remote.py --sample 50              :: 差异样本多显示点
 ```
 
-它做三件事：**递归列出网盘真实文件** → **读本地 `uploaded_log.txt`** → **按相对路径双向比对**，最后给出：
+它做三件事：**递归列出网盘真实文件** → **读本地 `data/uploaded_log.txt`** → **按相对路径双向比对**，最后给出：
 
 ```
 网盘实际文件数   :           101
@@ -278,7 +298,7 @@ python verify_remote.py --sample 50              :: 差异样本多显示点
 ✔ 大小抽查：101 个本地仍存在的文件大小全部一致。
 ```
 
-- **网盘缺失**：本地记录说传成功了、网盘里却没有 → 真正需要补传的。想补传就把对应行从 `uploaded_log.txt` 删掉再跑上传
+- **网盘缺失**：本地记录说传成功了、网盘里却没有 → 真正需要补传的。想补传就把对应行从 `data/uploaded_log.txt` 删掉再跑上传
 - **网盘多出**：网盘有、本地没记录 → 多半是往轮次遗留，或源文件已被你删掉
 - **大小不一致**：传了一半损坏的会被揪出来（只比对本地仍在的文件）
 
@@ -294,7 +314,7 @@ python verify_remote.py --sample 50              :: 差异样本多显示点
 
 - **`return_type` 语义**：precreate 返回 `return_type=2` 才是秒传；`return_type=1` 表示需要按顶层 `block_list` 指定的分片序号真实上传（实测确认，2026-09-20）
 - **目录创建缓存**：同一远程目录只请求一次 mkdir，9.9 万文件不会重复建目录
-- **断点记录**：`uploaded_log.txt` 追加写（一行一个路径），海量文件下不会越写越慢
+- **断点记录**：`data/uploaded_log.txt` 追加写（一行一个路径），海量文件下不会越写越慢
 - **频控退避**：遇 errno=31034 自动退避 30s/60s 重试
 - **推荐参数**（海量小文件）：`batch_size: 500, workers: 8, batch_pause_sec: 5, file_interval_sec: 0`
 - **单线程 vs 并发**：串行约 8 天（9.9 万文件），8 并发实测降到 5~7 小时
@@ -464,7 +484,7 @@ python -X utf8 organize_all.py --path "/apps/baidu_uploader/某某小说合集" 
 ### 十万条计划怎么一次跑完
 
 整理整个沙盒能扫出 **105370 条**。直接点「执行」就是全部跑完：生成预览时会把
-**完整**计划另存一份到 `plans/<预览id>.json`（界面列表里只回传前 2000 条，十万条
+**完整**计划另存一份到 `data/plans/<预览id>.json`（界面列表里只回传前 2000 条，十万条
 全传回去要几十 MB，也翻不完），执行时后端照着这份清单按 **2000 条一批**连续提交，
 不必每轮重新扫描网盘 —— 源路径不会变，清单本身是准的。
 
@@ -563,7 +583,7 @@ git push -u origin main
 git status
 ```
 
-正常情况下 `git status` 里只会出现这些文件，`config.json`、`token.json`、`libs/`、`uploaded_log.txt`、`upload.log`、`progress.json` 一个都不该有：
+正常情况下 `git status` 里只会出现这些文件，`config.json`、`token.json`、`libs/`、`data/uploaded_log.txt`、`upload.log`、`data/progress.json` 一个都不该有：
 
 ```
 .gitignore  README.md  requirements.txt  config.example.json
@@ -603,7 +623,7 @@ open_panel.bat            :: 用面板填写密钥和目录最省事
 
 ### 它做了什么
 
-1. **推送前安全自检**：若 `config.json` / `token.json` / `libs/` / `uploaded_log.txt` 已被 git 跟踪，立即中止并给出 `git rm --cached` 的解法——防止密钥泄漏到公开仓库
+1. **推送前安全自检**：若 `config.json` / `token.json` / `libs/` / `data/uploaded_log.txt` 已被 git 跟踪，立即中止并给出 `git rm --cached` 的解法——防止密钥泄漏到公开仓库
 2. **幂等配置远程**：三个远程不存在就添加、地址不对就纠正，重复运行无副作用
 3. **失败自动回退 SSH**：某库 HTTPS 推送失败后，自动换 SSH 地址再试一次（github 的 443 常被代理挡成 502，gitcode 只能走 SSH，靠这一步实现双击一次全通）
 4. **依次推送并汇总**：每个库的原始输出实时显示，结束给出成功/失败统计

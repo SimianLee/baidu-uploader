@@ -79,7 +79,7 @@ def upload_running(pidfile=None):
     任务报成「正在运行」，把脚本自己挡在门外 —— 实测就撞上一次：
     文件里写着 PID 24456，进程列表里根本没这个进程。
     """
-    f = Path(pidfile) if pidfile else (HERE / "upload.pid")
+    f = Path(pidfile) if pidfile else (HERE / "data" / "upload.pid")
     return proclock.read_pidfile(f)
 
 
