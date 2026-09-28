@@ -728,8 +728,8 @@ class Handler(BaseHTTPRequestHandler):
             for k in ("mode", "params", "by", "dest", "filters", "skip"):
                 if k in body:
                     payload[k] = body[k]
-            if kind == "empty_dir":
-                payload["recursive"] = True         # 后端强制递归，指纹按实际口径算
+            if kind == "empty_dir" or kind == "merge_dirs":
+                payload["recursive"] = True        # 后端强制递归，指纹按实际口径算
 
             # ① 同参数的老预览还在 → 直接复用，一个网盘请求都不发。这就是这个功能的
             #    主要目的：反复调参反复看预览时，不该每次都把几千个目录重走一遍
@@ -748,7 +748,7 @@ class Handler(BaseHTTPRequestHandler):
             # 结果不完整这件事必须传到前端，否则用户会以为「就这些文件」
             failures = []
             try:
-                if kind == "empty_dir":
+                if kind in ("empty_dir", "merge_dirs"):
                     # 要判定「目录里有没有文件」就得看到目录本身，list_files 把它们
                     # 滤掉了；而且必须递归——只看一层根本不知道子目录里是不是还有文件。
                     # 所以这里无视前端的 recursive 参数，一律按递归扫。
@@ -794,16 +794,23 @@ class Handler(BaseHTTPRequestHandler):
                     occupied.setdefault(fd, set()).add(fn)
                 ops = pan_tools.build_organize_plan(files, by, dest, sandbox,
                                                     occupied)
-                # auto 是撞名被自动编号的条数（改名+移动算一条，只数改名那半）
+                # auto 是撞名被自动编号的条数（move 带 newname 一步到位，
+                # 不再拆「改名+移动」两条——两条慢一倍还容易连锁失败）
                 info = {"scanned": len(files),
                         "auto": sum(1 for o in ops
-                                    if o.get("auto") and o["op"] == "rename")}
+                                    if o.get("auto") and o["op"] == "move")}
                 label = "整理归档·" + ORGANIZE_LABELS.get(by, by) + " → " + dest
             elif kind == "delete":
                 flt = body.get("filters") or {}
                 ops = pan_tools.build_delete_plan(files, flt)
                 info = {"scanned": len(files)}
                 label = "批量删除·" + filter_label(flt)
+            elif kind == "merge_dirs":
+                # 合并 X(1)/X(2) 副本目录：归档几轮下来攒出的大量 (1) 目录
+                # 是「预览总比真实文件多」的根因——同名对在扫描里就是两条计划
+                ops, minfo = pan_tools.build_merge_dirs_plan(entries)
+                info = {"scanned": len(files), **minfo}
+                label = "合并重复目录"
             elif kind == "empty_dir":
                 # skip 由前端给，默认保护本工具自己的备份区；
                 # unreadable 是这次扫不进去的目录——「不知道里面有什么」绝不能

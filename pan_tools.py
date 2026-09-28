@@ -45,6 +45,11 @@ CREATE_URL = "https://pan.baidu.com/rest/2.0/xpan/file?method=create"
 # 百度 filemanager 单次最多提交多少个（留余量，官方上限 1000）
 BATCH_LIMIT = 100
 
+# 递归扫描列目录的并发线程数。列目录是纯只读，2T 网盘几千个目录串行列要好
+# 几分钟，正是「生成预览慢」的主因。4 路对百度频控友好（_get 里本来就有
+# 31034 的 20s 退避重试兜底）。
+LIST_WORKERS = 4
+
 # 整批报错的条目要复核几遍、每遍之间等多久。百度的目录索引有延迟：刚搬完
 # 立刻列目录，源处可能还挂着旧名字，第一遍核对会把「已经搬走了」误判成
 # 「没生效」（实测 1612 条全被误判）。所以隔几秒再核一遍，连续两遍都判
@@ -136,7 +141,8 @@ class PanFiles:
 
     # ---------- 列目录 ----------
     def list_dir(self, path: str, recursive: bool = False, limit: int = 1000,
-                 on_progress=None, should_stop=None, failures=None):
+                 on_progress=None, should_stop=None, failures=None,
+                 workers=None):
         """列出目录内容；recursive=True 时递归全部子目录。
         返回 [{path, name, size, isdir, mtime}]
 
@@ -157,60 +163,183 @@ class PanFiles:
                   调用方拿到的是同一个 list 对象（可变），不需要接返回值。
                   注意：**起点目录**列不开时无论是否容错都照样抛错——那说明路径或
                   沙盒配置本身有问题，必须让用户当场看见，而不是给个空结果。
+
+        workers: 递归扫描的并发线程数（默认 LIST_WORKERS=4）。列目录是纯只读，
+                  2T 网盘几千个目录串行列要好几分钟，是「生成预览慢」的主因；
+                  4 路并发对百度频控也友好（_get 里本来就有 31034 的退避重试）。
+                  workers<=1 时走原来的串行路径，行为分毫不变。
         """
         root = self.check_path(path)
+        w = LIST_WORKERS if workers is None else workers
+        if not recursive or w <= 1:
+            return self._list_seq(root, recursive, limit, on_progress,
+                                  should_stop, failures)
+        return self._list_conc(root, w, limit, on_progress,
+                               should_stop, failures)
+
+    def _list_one(self, d, limit, should_stop):
+        """列单个目录（含翻页）。返回 (rows, 子目录列表, errno)。
+        errno != 0 时 rows/subs 为空；should_stop 命中时抛 ScanCancelled。"""
+        rows, subs = [], []
+        start = 0
+        while True:
+            if should_stop and should_stop():
+                raise ScanCancelled(0, 0)
+            r = self._get(LIST_URL, {"dir": d, "start": start,
+                                     "limit": limit, "order": "name"})
+            e = r.get("errno", 0)
+            if e != 0:
+                return [], [], e
+            items = r.get("list", [])
+            for it in items:
+                rec = {
+                    "path": it.get("path", ""),
+                    "name": it.get("server_filename", ""),
+                    "size": it.get("size", 0) or 0,
+                    "isdir": bool(it.get("isdir")),
+                    "mtime": it.get("server_mtime") or it.get("local_mtime") or 0,
+                }
+                rows.append(rec)
+                if rec["isdir"]:
+                    subs.append(rec["path"])
+            if len(items) < limit:
+                return rows, subs, 0
+            start += limit
+
+    def _list_seq(self, root, recursive, limit, on_progress,
+                  should_stop, failures):
+        """串行递归扫描（workers<=1 / 非递归时用），行为与老版本一致"""
         out, stack, dirs_done, files_seen = [], [root], 0, 0
         while stack:
             d = stack.pop()
-            start = 0
-            broken = False
-            while True:
-                if should_stop and should_stop():
-                    raise ScanCancelled(dirs_done, files_seen)
-                r = self._get(LIST_URL, {"dir": d, "start": start,
-                                         "limit": limit, "order": "name"})
-                e = r.get("errno", 0)
-                if e != 0:
-                    # 这几种是全局性的（授权坏了 / 被限流），跳过没有任何意义：
-                    # 后面每个目录都会同样失败，此时静默跳过只会给出一个假结果
-                    if (failures is not None and d != root
-                            and e not in _FATAL_LIST_ERRNOS):
-                        if len(failures) < 500:     # 兜个上限，别让响应体爆炸
-                            failures.append({"path": d, "errno": e,
-                                             "msg": errno_text(e)})
-                        broken = True
-                        break
-                    raise PanError(list_dir_error(d, e))
-                items = r.get("list", [])
-                for it in items:
-                    rec = {
-                        "path": it.get("path", ""),
-                        "name": it.get("server_filename", ""),
-                        "size": it.get("size", 0) or 0,
-                        "isdir": bool(it.get("isdir")),
-                        "mtime": it.get("server_mtime") or it.get("local_mtime") or 0,
-                    }
-                    out.append(rec)
-                    if rec["isdir"]:
-                        if recursive:
-                            stack.append(rec["path"])
-                    else:
-                        files_seen += 1
-                if len(items) < limit:
-                    break
-                start += limit
+            rows, subs, e = self._list_one(d, limit, should_stop)
+            if e != 0:
+                # 这几种是全局性的（授权坏了 / 被限流），跳过没有任何意义：
+                # 后面每个目录都会同样失败，此时静默跳过只会给出一个假结果
+                if (failures is not None and d != root
+                        and e not in _FATAL_LIST_ERRNOS):
+                    if len(failures) < 500:     # 兜个上限，别让响应体爆炸
+                        failures.append({"path": d, "errno": e,
+                                         "msg": errno_text(e)})
+                    dirs_done += 1
+                    if on_progress:
+                        try:
+                            on_progress(dirs_done, files_seen, d)
+                        except Exception:
+                            pass
+                    continue
+                raise PanError(list_dir_error(d, e))
+            out.extend(rows)
+            stack.extend(subs)
+            files_seen += sum(1 for r in rows if not r["isdir"])
             dirs_done += 1
             if on_progress:
                 try:
                     on_progress(dirs_done, files_seen, d)
                 except Exception:
                     pass        # 进度回调只是锦上添花，出错绝不能中断扫描
-            if broken:
-                continue        # 这个目录列不开，已记进 failures；接着扫栈里剩下的
             if not recursive:
                 break
         if should_stop and should_stop():       # 收尾前最后一道检查
             raise ScanCancelled(dirs_done, files_seen)
+        return out
+
+    def _list_conc(self, root, workers, limit, on_progress,
+                   should_stop, failures):
+        """并发递归扫描：N 个线程从共享待办栈里抢目录列。
+
+        线程安全要点：out/failures 的 append、计数器累加在 GIL 下是原子的；
+        待办栈和结束判定必须拿条件变量——「队列空了且没有在途的目录」才算扫完。
+        任何线程遇到致命错误（起点列不开 / 授权坏 / 被停止）就把错误记下并
+        清空待办，其他线程在下一个检查点退出，主线程统一重抛。
+        """
+        import threading
+
+        out = []
+        cv = threading.Condition()
+        todo = [root]
+        inflight = [0]          # 正在列的目录数
+        dirs_done = [0]
+        files_seen = [0]
+        first_err = [None]      # 第一个致命错误（PanError / ScanCancelled）
+
+        def worker():
+            while True:
+                with cv:
+                    while (not todo and inflight[0] > 0
+                           and first_err[0] is None
+                           and not (should_stop and should_stop())):
+                        cv.wait(0.25)
+                    if first_err[0] is not None:
+                        return
+                    if should_stop and should_stop():
+                        if first_err[0] is None:
+                            first_err[0] = ScanCancelled(dirs_done[0],
+                                                         files_seen[0])
+                        return
+                    if not todo:
+                        return              # 没活干也没人在干 → 扫完了
+                    d = todo.pop()
+                    inflight[0] += 1
+                    cv.notify_all()
+                try:
+                    try:
+                        rows, subs, e = self._list_one(d, limit, should_stop)
+                    except ScanCancelled:
+                        with cv:
+                            if first_err[0] is None:
+                                first_err[0] = ScanCancelled(dirs_done[0],
+                                                             files_seen[0])
+                            cv.notify_all()
+                        return
+                    if e != 0:
+                        if (failures is not None and d != root
+                                and e not in _FATAL_LIST_ERRNOS):
+                            if len(failures) < 500:
+                                failures.append({"path": d, "errno": e,
+                                                 "msg": errno_text(e)})
+                            with cv:
+                                dirs_done[0] += 1
+                                cv.notify_all()
+                            if on_progress:
+                                try:
+                                    on_progress(dirs_done[0], files_seen[0], d)
+                                except Exception:
+                                    pass
+                        else:
+                            with cv:
+                                if first_err[0] is None:
+                                    first_err[0] = PanError(list_dir_error(d, e))
+                                cv.notify_all()
+                            return
+                    else:
+                        out.extend(rows)
+                        with cv:
+                            todo.extend(subs)
+                            dirs_done[0] += 1
+                            files_seen[0] += sum(1 for r in rows
+                                                 if not r["isdir"])
+                            cv.notify_all()
+                        if on_progress:
+                            try:
+                                on_progress(dirs_done[0], files_seen[0], d)
+                            except Exception:
+                                pass
+                finally:
+                    with cv:
+                        inflight[0] -= 1
+                        cv.notify_all()
+
+        threads = [threading.Thread(target=worker, daemon=True)
+                   for _ in range(max(1, workers))]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        if first_err[0] is not None:
+            raise first_err[0]
+        if should_stop and should_stop():
+            raise ScanCancelled(dirs_done[0], files_seen[0])
         return out
 
     def list_files(self, path: str, recursive: bool = True, on_progress=None,
@@ -334,11 +463,18 @@ class PanFiles:
                                  on_progress=on_progress)
 
     def move_batch(self, ops, ondup="skip", on_progress=None):
-        """ops: [{path, dest}]  dest 为目标**目录**"""
+        """ops: [{path, dest, newname?}]  dest 为目标**目录**；newname 可选——
+        搬过去的同时改名，一步到位（实测百度 filemanager move 支持 newname，
+        见 2026-09-28 试验场实验）。撞名自动编号靠它把「改名+移动」合成一条，
+        十万条量级下操作数直接砍半。"""
         clean = []
         for o in ops:
             p = self.check_path(o["path"])
-            clean.append({"path": p, "dest": self.check_path(o["dest"])})
+            it = {"path": p, "dest": self.check_path(o["dest"])}
+            nn = o.get("newname")
+            if nn and nn != p.rsplit("/", 1)[-1]:
+                it["newname"] = nn
+            clean.append(it)
         return self._filemanager("move", clean, ondup=ondup,
                                  on_progress=on_progress)
 
@@ -703,6 +839,22 @@ def category_of(ext: str) -> str:
     return "其它"
 
 
+def _safe_folder(name: str) -> str:
+    """从后缀派生的目录名要过一遍清洗。
+
+    实测踩过的坑（2026-09-28 归档目录实况）：古怪文件名拆出来的「后缀」直接当
+    目录名，攒出了 `com)]`（1088 个文件）、`pdf（滚雪球英文原版——巴菲特的传记）`、
+    `李华东&amp` 这种目录——百度不许目录名带 \\ / : * ? " < > |，而且这些目录
+    纯属垃圾，用户看见只会困惑。规则：首字符不是 ASCII 字母数字（比如后缀以
+    中文开头，实为「李华东&amp」这种）直接归 noext；是的话只留 ASCII 字母数字。
+    只用于 by=ext 分支；category 是固定中文分类名、date 是 YYYY-MM，都不许动。"""
+    name = (name or "").strip()
+    if not name or not (name[0].isascii() and name[0].isalnum()):
+        return "noext"
+    keep = "".join(ch for ch in name if ch.isascii() and ch.isalnum())
+    return keep or "noext"
+
+
 def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None):
     """files: [{path,name,size,mtime}] → 移动计划
     by: ext（按后缀） / category（按大类） / date（按修改年月 YYYY-MM）
@@ -744,12 +896,13 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None):
     for f in files:
         _, ext = split_name(f["name"])
         if by == "ext":
-            folder = (ext.lower() or "noext")
+            folder = _safe_folder(ext.lower() or "noext")
         elif by == "category":
-            folder = category_of(ext)
+            folder = category_of(ext)   # 固定的几个中文分类名，不用清洗
         elif by == "date":
             mt = f.get("mtime") or 0
-            folder = time.strftime("%Y-%m", time.localtime(mt)) if mt else "未知日期"
+            folder = (time.strftime("%Y-%m", time.localtime(mt))
+                      if mt else "未知日期")
         else:
             raise PanError(f"未知的整理方式: {by}")
         d = f"{dest}/{folder}"
@@ -758,13 +911,14 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None):
         if src_dir == d:
             continue                    # 已经在新家了，别再折腾它
         new = pick(d, src_dir, name)
+        op = {"op": "move", "path": p, "name": name, "dest": d}
         if new != name:
-            ops.append({"op": "rename", "path": p, "name": name,
-                        "newname": new, "auto": True})
-            ops.append({"op": "move", "path": f"{src_dir}/{new}", "name": new,
-                        "dest": d, "auto": True})
-        else:
-            ops.append({"op": "move", "path": p, "name": name, "dest": d})
+            # 撞名的直接在移动里改名（move 支持 newname），不再拆「改名+移动」
+            # 两条——两条不但慢一倍，改名那步失败还会让后面移动撞出 -8，
+            # 十万条量级下这种连锁失败是灾难（实测 27168 条改名里 25901 条失败）
+            op["newname"] = new
+            op["auto"] = True
+        ops.append(op)
     return ops
 
 
@@ -812,6 +966,101 @@ def build_delete_plan(files, f: dict):
 # ===========================================================================
 # 空目录：找出「整棵子树里连一个文件都没有」的目录
 # ===========================================================================
+
+def build_merge_dirs_plan(entries):
+    """把 `归档/txt(1)` 这类副本目录合回主目录 → 返回 (ops, info)
+
+    背景（2026-09-28 归档目录实况）：按后缀整理几轮下来，归档下 ~40% 是
+    `(1)` 副本目录——mobi(1) 40957 个文件、pdf(1) 15861 个、epub(1) 8214 个，
+    txt 与 txt(1) 之间有 7710 对同名文件。这些副本让「整理归档」永远收不了尾：
+    每轮扫出来的计划都比真实文件多（一对同名文件在扫描里就是两条计划）。
+
+    规则：同一位父目录下同时有 `X` 和 `X(1)`（`X(2)`…`X(9)` 也归到 X）⇒
+    副本里的**文件**移进主目录，撞名的自动编号 (2)(3)。两条安全红线：
+      · 副本里的**子目录**不动（move 目录进主目录，主目录有同名目录时会出
+        各种意外，保守起见留给人工/后续处理）
+      · 移空的副本目录**不在这份计划里删**——百度 delete 对目录是连根拔的，
+        万一有文件没搬成，删目录就是把真数据销毁。空目录交给「空文件夹」
+        页签，那边按扫描实况判空，安全。
+
+    entries: PanFiles.list_dir(root, recursive=True) 的原始结果（目录+文件都要）。
+    info = {pairs 合并对数, scanned 扫描文件数, moved 待移动文件数,
+            auto 撞名自动编号数, with_subdirs 含子目录的副本数}
+    """
+    # 按父目录分组：{父: {目录名: 路径}}
+    by_parent = {}
+    for e in entries:
+        if not e.get("isdir"):
+            continue
+        p = (e.get("path") or "").rstrip("/")
+        parent, _, name = p.rpartition("/")
+        if parent and name:
+            by_parent.setdefault(parent, {})[name] = p
+
+    # 只认 X(1)~X(9)：括号里是大数字的多半是正经名字（如「报告(2024)」），
+    # 不能因为恰好存在「报告」就把它合进去
+    def dup_of(name):
+        m = re.match(r"^(.+)\(([1-9])\)$", name)
+        return m.group(1) if m else None
+
+    pairs = []                       # (主目录路径, 副本路径)
+    for parent, names in by_parent.items():
+        for name, path in names.items():
+            base = dup_of(name)
+            if base and base in names:
+                pairs.append((names[base], path))
+
+    # 各目录现有文件名（撞名编号要以主目录的实况为底）
+    files_by_dir = {}
+    files_scanned = 0
+    for e in entries:
+        if e.get("isdir"):
+            continue
+        d, _, n = (e.get("path") or "").rpartition("/")
+        if d and n:
+            files_by_dir.setdefault(d, []).append(n)
+        files_scanned += 1
+
+    # 子目录按父目录记一份：副本里有子目录的要点出来
+    subdirs_by_dir = {}
+    for e in entries:
+        if e.get("isdir"):
+            d = (e.get("path") or "").rstrip("/").rpartition("/")[0]
+            if d:
+                subdirs_by_dir.setdefault(d, set()).add(e["path"])
+
+    ops, moved, auto, with_sub = [], 0, 0, 0
+    used = {d: {n.lower() for n in names}
+            for d, names in files_by_dir.items()}
+    for main_path, dup_path in pairs:
+        pool = used.setdefault(main_path, set())
+        if subdirs_by_dir.get(dup_path):
+            with_sub += 1
+        for name in files_by_dir.get(dup_path) or []:
+            new = name
+            if name.lower() in pool:
+                b, ext = split_name(name)
+                k = 2
+                while True:
+                    cand = f"{b} ({k})" + (f".{ext}" if ext else "")
+                    if cand.lower() not in pool:
+                        new = cand
+                        break
+                    k += 1
+            pool.add(new.lower())
+            op = {"op": "move", "path": f"{dup_path}/{name}", "name": name,
+                  "dest": main_path}
+            if new != name:
+                op["newname"] = new
+                op["auto"] = True
+                auto += 1
+            ops.append(op)
+            moved += 1
+
+    info = {"pairs": len(pairs), "scanned": files_scanned,
+            "moved": moved, "auto": auto, "with_subdirs": with_sub}
+    return ops, info
+
 
 def build_empty_dir_plan(entries, root: str, skip: str = "", unreadable=None):
     """找出能删掉的空目录 → 返回 (ops, info)
@@ -940,7 +1189,14 @@ def validate_plan(plan: dict, sandbox: str):
                 dest = "/" + dest
             if dest != sb and not dest.startswith(sb + "/"):
                 errs.append(f"第 {i} 条目标越界：{dest}"); continue
-            good.append({"op": "move", "path": path, "dest": dest.rstrip("/")})
+            it = {"op": "move", "path": path, "dest": dest.rstrip("/")}
+            # newname（搬过去的同时改名）必须保住——完整计划执行前都要过这道
+            # 校验，丢了它撞名编号就没了，真网盘上会整批撞 -8。
+            # 只做最起码的把关：不能带路径分隔符、不能是 . ..
+            nn = str(o.get("newname") or "").strip()
+            if nn and "/" not in nn and nn not in (".", ".."):
+                it["newname"] = nn
+            good.append(it)
         elif op == "delete":
             # isdir 要带下去：删空文件夹与删文件在提示文案上必须分开说，
             # 丢掉这个标记就只能把「删除 12 个空文件夹」写成「删除 12 个文件」
@@ -962,7 +1218,9 @@ def _find_conflicts(pan: PanFiles, ren, mov):
         d, _, n = o["path"].rpartition("/")
         targets.setdefault(d, set()).add(o["newname"].lower())
     for o in mov:
-        targets.setdefault(o["dest"], set()).add(o["path"].rsplit("/", 1)[-1].lower())
+        # 带新名的 move 按**新名**查冲突（搬过去之后叫什么才是会不会撞的关键）
+        n = o.get("newname") or o["path"].rsplit("/", 1)[-1]
+        targets.setdefault(o["dest"], set()).add(n.lower())
 
     conflicts = []
     for d, names in targets.items():
@@ -1026,7 +1284,9 @@ def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict,
         op = o.get("op") or ""
         dst_d = dst_n = ""
         if op == "move":
-            dst_d, dst_n = o.get("dest", ""), n
+            # 搬过去之后的名字：带 newname 的用新名（核对的是「目标处有没有它」）
+            dst_d = o.get("dest", "")
+            dst_n = o.get("newname") or n
         elif op == "rename":
             dst_d, dst_n = d, o.get("newname", "")
         jobs.append((f, d, n, dst_d, dst_n, op))
@@ -1116,7 +1376,11 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
             "retried": 0,           # 重试一轮后又被救回来的条数
             "stop_reason": ""}
     ren = [{"path": o["path"], "newname": o["newname"]} for o in ops if o["op"] == "rename"]
-    mov = [{"path": o["path"], "dest": o["dest"]} for o in ops if o["op"] == "move"]
+    # move 可能带 newname（撞名一步到位），只挑后端认识的键，别把 auto 等杂项
+    # 也塞进 filelist 发给百度
+    mov = [{"path": o["path"], "dest": o["dest"],
+            **({"newname": o["newname"]} if o.get("newname") else {})}
+           for o in ops if o["op"] == "move"]
     dele = [o["path"] for o in ops if o["op"] == "delete"]
 
     # 进度快照。用可变 dict 而非局部变量：闭包里改它不需要 nonlocal

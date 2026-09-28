@@ -232,10 +232,38 @@
     flex:0 0 auto;color:#7fa0ff;font-weight:600;font-variant-numeric:tabular-nums;
   }
 
-  .oplist{max-height:260px;overflow:auto;font-size:12px;line-height:1.75}
-  .oplist div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .oplist{max-height:300px;overflow:auto;font-size:12px;line-height:1.7}
+  .oplist .op{display:flex;gap:8px;align-items:center;padding:1px 9px;border-radius:6px}
+  .oplist .op:hover{background:#161c2b}
   .oplist .arrow{color:var(--accent);margin:0 6px}
   .oplist .del{color:var(--red)}
+  .opbadge{
+    flex:0 0 auto;font-size:10.5px;font-weight:600;padding:1px 8px;border-radius:5px;
+    letter-spacing:.5px;
+  }
+  .opbadge.mv{background:#12233f;color:#7fa0ff}
+  .opbadge.rn{background:#2a2213;color:var(--yellow)}
+  .opbadge.dl{background:#241317;color:#ff8b95}
+  .oplist .oppath{
+    flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:#c3cbdd;
+  }
+  .oplist .opfail .oppath{color:#ff8b95}
+
+  /* 预览统计条：把「扫描多少 → 多少条操作 / 撞名 / 漏扫」从一长串提示文字里
+     拎出来做成一排数字卡，扫一眼就有数——不用再从句子里找数字 */
+  .pvstats{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  .pvstats:empty{display:none}
+  .pvstat{
+    display:flex;align-items:baseline;gap:7px;padding:7px 14px;border-radius:9px;
+    background:#10151f;border:1px solid var(--line);
+  }
+  .pvstat b{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+  .pvstat span{font-size:11px;color:var(--muted2);white-space:nowrap}
+  .pvstat.ok b{color:var(--green)}
+  .pvstat.warn b{color:var(--yellow)}
+  .pvstat.bad b{color:var(--red)}
+  .pvstat.acc b{color:#7fa0ff}
 
   /* ---------- 提示条 ---------- */
   .msg{
@@ -627,6 +655,7 @@
         <div class="tabs">
           <button class="tab on" id="tabRename" onclick="panTab('rename')">批量改名</button>
           <button class="tab" id="tabOrganize" onclick="panTab('organize')">整理归档</button>
+          <button class="tab" id="tabMerge" onclick="panTab('merge')">合并重复</button>
           <button class="tab" id="tabDelete" onclick="panTab('delete')">批量删除</button>
           <button class="tab" id="tabEmpty" onclick="panTab('empty')">空文件夹</button>
           <button class="tab" id="tabAi" onclick="panTab('ai')">AI 计划</button>
@@ -695,6 +724,16 @@
           </div>
           <div class="hint">
             文件会移动到「归档目录/分类名/」下；撞到网盘已有的同名文件时，按右侧「重名跳过 / 重名覆盖」按钮的选择处理。
+          </div>
+        </div>
+
+        <!-- 合并重复目录 -->
+        <div class="panel" id="paneMerge">
+          <div class="hint">
+            把 <b>txt(1)</b>、<b>mobi(1)</b> 这类副本目录里的文件合回 <b>txt</b>、<b>mobi</b> 主目录
+            （同一位父目录下同时有 <code>X</code> 和 <code>X(1)</code> 才算一对）。撞名的自动编号 (2)(3)。<br>
+            副本里的子目录不动；搬空的副本目录也不在这里删——用「空文件夹」页签清理更安全。
+            因为要配对整棵子树的目录名，这个功能<b>总是递归扫描</b>。
           </div>
         </div>
 
@@ -812,6 +851,8 @@
           <div class="execline"><i id="execFill"></i></div>
         </div>
         <div class="msg" id="panMsg"></div>
+        <!-- 预览统计：扫描/操作/撞名/漏扫 做成数字卡，别让人从一长句里找数字 -->
+        <div class="pvstats" id="pvStats"></div>
         <div class="oplist term headroom empty" id="panPreview" data-empty="预览区：先选模式再点「生成预览」，确认无误后点「执行」"></div>
       </div>
     </div>
@@ -1308,6 +1349,7 @@ let panRecSaved = true, panRecLocked = false;
 function panTab(k){
   panTab_ = k;
   [['rename','tabRename','paneRename'], ['organize','tabOrganize','paneOrganize'],
+   ['merge','tabMerge','paneMerge'],
    ['delete','tabDelete','paneDelete'], ['empty','tabEmpty','paneEmpty'],
    ['ai','tabAi','paneAi']].forEach(([key, tab, pane]) => {
     $(tab).classList.toggle('on', key === k);
@@ -1318,16 +1360,16 @@ function panTab(k){
   if(typeof setDup === 'function') setDup('skip', true);
   $('dupBox').classList.toggle('hidden', !(k === 'rename' || k === 'organize'));
 
-  // 空文件夹页：判定要看整棵子树。不递归只会得出「这一层里没东西＝空」的错误结论，
-  // 所以锁死开关并写明理由，而不是让用户关掉它拿到一个错的答案。
+  // 空文件夹/合并重复页：判定都要看整棵子树。不递归只会得出「这一层里没东西＝空」
+  // 的错误结论，所以锁死开关并写明理由，而不是让用户关掉它拿到一个错的答案。
   const rc = $('panRecursive');
   const recBox = $('recBox');
-  if(k === 'empty'){
+  if(k === 'empty' || k === 'merge'){
     if(!panRecLocked){ panRecSaved = rc.checked; panRecLocked = true; }
     rc.checked = true;
     rc.disabled = true;
     recBox.classList.add('locked');
-    recBox.title = '空文件夹必须递归扫描：只看一层无法判断子目录里是否还有文件';
+    recBox.title = '这个功能必须递归扫描：只看一层无法判断子目录里的情况';
   }else if(panRecLocked){
     panRecLocked = false;
     rc.checked = panRecSaved;
@@ -1339,7 +1381,7 @@ function panTab(k){
 
   panOps = []; panTotal = 0;
   pvCurrent = ''; pvCurAge = 0; pvCurDone = false;   // 换了页签就别再认着上一份预览了
-  renderPanPreview([], '');
+  renderPanPreview([], ''); pvPaintStats([]);
   $('btnPanApply').disabled = true;
   setMsg('panMsg', '', null);
   if(typeof pvRefresh === 'function') pvRefresh('');
@@ -1381,13 +1423,15 @@ function renderPanPreview(ops, tail){
   const rows = ops.slice(0, 300).map(o => {
     const nm = esc(o.name || o.path.split('/').pop());
     if(o.op === 'rename')
-      return `<div><span class="del">改名</span> ${nm} <span class="arrow">→</span> ${esc(o.newname)}`
-        + (o.auto ? ` <span style="color:#d9a24a">（撞名，已编号）</span>` : '') + `</div>`;
+      return `<div class="op"><span class="opbadge rn">改名</span><span class="oppath">${nm} <span class="arrow">→</span> ${esc(o.newname)}`
+        + (o.auto ? ` <span style="color:#d9a24a">（撞名，已编号）</span>` : '') + `</span></div>`;
     if(o.op === 'move')
-      return `<div><span class="arrow">移动</span> ${nm} <span class="arrow">→</span> ${esc(o.dest)}</div>`;
+      return `<div class="op"><span class="opbadge mv">移动</span><span class="oppath">${nm} <span class="arrow">→</span> ${esc(o.dest)}`
+        + (o.newname ? ` <span style="color:#d9a24a">/ ${esc(o.newname)}（撞名编号）</span>` : '')
+        + `</span></div>`;
     if(o.isdir)   // 删的是空文件夹而非文件，画成 📁 名字/，别让人误以为在删文件
-      return `<div><span class="del">删除</span> 📁 ${esc((o.name || '') + '/')}</div>`;
-    return `<div><span class="del">删除</span> ${nm}</div>`;
+      return `<div class="op"><span class="opbadge dl">删目录</span><span class="oppath">📁 ${esc((o.name || '') + '/')}</span></div>`;
+    return `<div class="op"><span class="opbadge dl">删除</span><span class="oppath">${nm}</span></div>`;
   }).join('');
   el.innerHTML = rows;
   el.classList.toggle('empty', !rows);
@@ -1396,6 +1440,49 @@ function renderPanPreview(ops, tail){
     el.innerHTML = rows + more + (tail ? `<div style="color:#4d566c">${esc(tail)}</div>` : '');
     el.classList.remove('empty');
   }
+}
+
+/* 执行失败的明细：后端说「明细见下方」，那就真得有下方——
+   之前只把前 2 条塞进提示文字里，几百条失败根本没法看 */
+function renderPanFails(fails){
+  const el = $('panPreview');
+  const rows = fails.slice(0, 100).map(f =>
+    `<div class="op opfail"><span class="opbadge dl">未生效</span><span class="oppath">`
+    + esc((f.path || '').split('/').pop())
+    + ` <span style="color:#8a6a70">— ${esc(f.msg || '失败')}</span></span></div>`).join('');
+  const more = fails.length > 100
+    ? `<div style="color:#4d566c">… 共 ${fails.length} 条未生效，仅列前 100</div>` : '';
+  el.innerHTML = rows + more;
+  el.classList.toggle('empty', !rows);
+}
+
+/* 预览统计条：一排数字卡。items = [{n, label, cls}] */
+function pvPaintStats(items){
+  $('pvStats').innerHTML = (items || []).map(x =>
+    `<div class="pvstat ${x.cls || ''}"><b>${x.n}</b><span>${esc(x.label)}</span></div>`).join('');
+}
+
+/* 从计划响应/预览信息里提取统计（panPlan 生成和 pvLoad 载入共用一套口径） */
+function pvStatsFrom(d, total){
+  const it = [];
+  if(d.dirs_scanned || d.files_scanned){
+    it.push({n: d.dirs_scanned || 0, label: '扫描目录', cls: 'acc'});
+    it.push({n: d.files_scanned || 0, label: '扫描文件', cls: 'acc'});
+  }else if(d.scanned){
+    it.push({n: d.scanned, label: '扫描文件', cls: 'acc'});
+  }
+  if(d.pairs != null){
+    it.push({n: d.pairs, label: '重复目录对', cls: 'warn'});
+    it.push({n: total, label: '待搬文件', cls: 'ok'});
+  }else{
+    it.push({n: total, label: '条操作', cls: total ? 'ok' : ''});
+  }
+  if(d.auto) it.push({n: d.auto, label: '撞名编号', cls: 'warn'});
+  if(d.unchanged) it.push({n: d.unchanged, label: '无变化'});
+  if(d.nested) it.push({n: d.nested, label: '嵌套空目录'});
+  if(d.with_subdirs) it.push({n: d.with_subdirs, label: '副本含子目录', cls: 'warn'});
+  if(d.skipped_total) it.push({n: d.skipped_total, label: '目录没扫到', cls: 'bad'});
+  return it;
 }
 
 /* 浏览目录 */
@@ -1656,6 +1743,7 @@ async function pvLoad(){
   const src = `来自预览文件 ${d.preview_ts}（${pvAge(pvCurAge)}生成） · ${panTotal} 条`
     + (pvCurDone ? ' · ⚠ 这份已经执行过' : '');
   renderPanPreview(panOps, src);
+  pvPaintStats(pvStatsFrom(d, panTotal));
   $('btnPanApply').disabled = !panOps.length;
   setPlanReady(!!d.plan_ready);
   setMsg('panMsg', `${d.msg}，确认后点「执行」`
@@ -1675,7 +1763,7 @@ async function pvDelete(){
   if(d && d.ok && id === pvCurrent){
     // 正载入的这份被删了 → 清掉预览区，免得拿着一份已经不存在的计划去执行
     pvCurrent = ''; pvCurAge = 0; pvCurDone = false; panOps = []; panTotal = 0;
-    renderPanPreview([], ''); $('btnPanApply').disabled = true; setPlanReady(false);
+    renderPanPreview([], ''); pvPaintStats([]); $('btnPanApply').disabled = true; setPlanReady(false);
   }
   await pvRefresh('');
 }
@@ -1686,7 +1774,7 @@ async function pvClean(){
   setMsg('panMsg', (d && d.msg) || '清理失败', !!(d && d.ok));
   if(d && d.ok){
     pvCurrent = ''; pvCurAge = 0; pvCurDone = false; panOps = []; panTotal = 0;
-    renderPanPreview([], ''); $('btnPanApply').disabled = true; setPlanReady(false);
+    renderPanPreview([], ''); pvPaintStats([]); $('btnPanApply').disabled = true; setPlanReady(false);
   }
   await pvRefresh('');
 }
@@ -1721,6 +1809,9 @@ async function panPlan(refresh){
     const dest = $('ogDest').value.trim();
     if(!dest){ setMsg('panMsg', '请填写归档目标目录', false); return; }
     body = {...body, kind: 'organize', by: $('ogBy').value, dest};
+  }else if(panTab_ === 'merge'){
+    // recursive 恒为 true：配对 (1) 目录要看整棵子树，后端也会强制递归
+    body = {...body, kind: 'merge_dirs', recursive: true};
   }else if(panTab_ === 'delete'){
     body = {...body, kind: 'delete', filters: {
       exts: $('dlExts').value, keywords: $('dlKw').value,
@@ -1754,6 +1845,7 @@ async function panPlan(refresh){
   pvCurAge = d.reused ? (d.preview_age || 0) : 0;
   pvCurDone = false;                   // 能被复用的预览必然没执行过，见预览文件规则
   const isEmptyTab = panTab_ === 'empty';
+  const isMergeTab = panTab_ === 'merge';
   const dupTxt = panDup === 'overwrite' ? '⚠ 重名将覆盖' : '重名将跳过';
   // 有目录没扫进去 ⇒ 这次结果不完整。悄悄少扫一个目录比直接报错更危险：
   // 用户会以为「就这些文件」，然后照着这份「完整」清单去改名/删除。
@@ -1779,6 +1871,18 @@ async function panPlan(refresh){
       + ((d.files_scanned || 0) === 0 && panTotal > 0
           ? ' · ⚠ 这棵树里一个文件都没有（纯目录骨架），删掉后分类结构会一起消失'
           : '')
+    : isMergeTab
+    ? `发现 ${d.pairs || 0} 对重复目录（X 与 X(1)） → ${panTotal} 条移动`
+      + (d.auto ? ` · ${d.auto} 个撞名已自动编号 (2)(3)` : '')
+      + (d.with_subdirs ? ` · ⚠ ${d.with_subdirs} 个副本里还有子目录（保守起见没动，见明细）` : '')
+      + (d.pairs ? ' · 搬空后用「空文件夹」页签清掉空副本' : '')
+      + (panTotal > panOps.length
+          ? ((d.plan_saved || d.plan_ready)
+             ? ` · 列表显示前 ${panOps.length} 条，点「执行」会按完整计划分 `
+               + `${Math.ceil(panTotal / 2000)} 批全部跑完`
+             : ` · ⚠ 完整计划没存下来，本次只能执行前 ${panOps.length} 条，`
+               + `重新生成一次即可全跑完`)
+          : '')
     : `扫描 ${d.scanned} 个文件 → ${panTotal} 条操作`
       + (d.unchanged ? `（${d.unchanged} 个无变化）` : '')
       // 只保留书名会把「《A》作者：甲」「A - 乙」压成同一个 A，撞车的自动加了 (2)(3)，
@@ -1799,6 +1903,7 @@ async function panPlan(refresh){
     ? `♻ 复用了 ${pvAge(d.preview_age)}生成的同参数预览，没有重新扫描网盘`
     : (d.preview_ts ? `已存为预览文件 ${String(d.preview_ts).slice(11)}` : '');
   renderPanPreview(panOps, tail + (srcTxt ? ` · ${srcTxt}` : ''));
+  pvPaintStats(pvStatsFrom(d, panTotal));
   $('btnPanApply').disabled = !panOps.length;
   setPlanReady(!!(d.plan_saved || d.plan_ready));
   // 一条计划都没有时的收尾文案。有目录打不开就**不能说「很干净」**——
@@ -1883,21 +1988,34 @@ async function panApply(){
     return;
   }
   const st = d.stat || {};
-  const failTxt = st.fails && st.fails.length
-    ? '；' + st.fails.slice(0, 2)
-        .map(f => `${(f.path || '').split('/').pop()} ${f.msg || '失败'}`).join('；')
-    : '';
   const execId = pvCurrent;      // 记住刚执行的是哪份，刷完列表选回去好让人看见「已执行」
   panOps = []; panTotal = 0;
   // 清掉「当前载入的是哪份预览」：不然接着粘贴一份 AI 计划去执行时，会把「已执行」
   // 的戳盖到这份无辜的预览文件上
   pvCurrent = ''; pvCurAge = 0; pvCurDone = false;
-  renderPanPreview([], '');
+  // 执行战果做成统计卡：改名/移动/删除是主数字，复核/重试救回的是被百度
+  // 假报失败后追认回来的，未生效的红色压轴——一眼看清这趟到底干成了多少
+  const res = [];
+  if(st.rename) res.push({n: st.rename, label: '改名', cls: 'ok'});
+  if(st.move) res.push({n: st.move, label: '移动', cls: 'ok'});
+  if(st.delete) res.push({n: st.delete, label: '删除', cls: 'ok'});
+  if(st.backup) res.push({n: st.backup, label: '覆盖已备份', cls: 'warn'});
+  if(st.verified) res.push({n: st.verified, label: '复核确认生效', cls: 'acc'});
+  if(st.retried) res.push({n: st.retried, label: '重试救回', cls: 'acc'});
+  if(st.fails && st.fails.length) res.push({n: st.fails.length, label: '未生效', cls: 'bad'});
+  pvPaintStats(res);
+  // 失败明细画到预览区（后端文案说「明细见下方」，这里就是那个下方——
+  // 之前只把前 2 条塞进提示文字里，几百条失败根本没法看）
+  if(st.fails && st.fails.length){
+    renderPanFails(st.fails);
+  }else{
+    renderPanPreview([], '');
+  }
   $('btnPanApply').disabled = true; setPlanReady(false);
   await pvRefresh(execId);   // 那份预览现在带着「已执行」戳了，重新拉一遍列表
   await panBrowse();         // 先刷新目录列表（它自己会写一条提示）
   // 结果提示放最后写，否则会被上面「列出 N 个文件」的提示盖掉，看不到执行战果
-  setMsg('panMsg', (d.msg || '执行完成') + failTxt, true);
+  setMsg('panMsg', (d.msg || '执行完成'), st.fails && st.fails.length ? null : true);
 }
 
 /* 导出清单给 AI */
@@ -1958,6 +2076,7 @@ async function panParse(){
   // 盖到上一次载入的那份预览上
   pvCurrent = ''; pvCurAge = 0; pvCurDone = false;
   renderPanPreview(panOps, '');
+  pvPaintStats([{n: panTotal, label: '条操作', cls: panTotal ? 'ok' : ''}]);
   $('btnPanApply').disabled = !panOps.length;
   setPlanReady(false);      // AI 计划不挂在预览文件上：就按列表里这些条跑
 }
