@@ -338,7 +338,9 @@
   }
   .term.headroom{max-height:290px}
   .term.empty::before{content:attr(data-empty);color:#4d566c;font-style:italic}
-  .hidden{display:none}
+  /* !important 是必需的：.mask 这类自带 display 的样式写在后面、特异性又相同，
+     会把普通的 display:none 盖掉，于是「隐藏」的弹层照样铺满屏幕挡住所有点击 */
+  .hidden{display:none !important}
   /* ---------- file:// 打开时的警告横幅 ---------- */
   .filewarn{
     border:1px solid #6b4a1a;background:linear-gradient(180deg,#33230d,#241a0c);
@@ -381,6 +383,45 @@
   .toast.warn{border-left-color:var(--yellow)}
   @keyframes slidein{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:translateX(0)}}
   .fadeout{opacity:0;transform:translateX(24px);transition:.3s}
+
+  /* ---------- 预览明细：表格弹层 ----------
+     预览文件里可能压着十万条操作，页面上一次全画出来会卡死，所以表格按页取、
+     带搜索。弹层用 fixed 铺满 + 居中卡片，Esc 关闭。 */
+  .mask{
+    position:fixed;inset:0;background:rgba(6,9,15,.78);backdrop-filter:blur(3px);
+    z-index:120;display:flex;align-items:center;justify-content:center;padding:24px;
+  }
+  .maskbox{
+    background:linear-gradient(160deg,#161b28,#12161f);border:1px solid var(--line-hi);
+    border-radius:16px;width:min(1080px,100%);max-height:88vh;display:flex;flex-direction:column;
+    box-shadow:0 30px 70px -20px rgba(0,0,0,.9);overflow:hidden;
+  }
+  .maskhead{
+    display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:1px solid var(--line);
+    flex-wrap:wrap;
+  }
+  .maskhead .mt{font-size:14px;font-weight:600}
+  .maskhead .ms{font-size:11.5px;color:var(--muted)}
+  .maskbody{padding:12px 16px;overflow:auto;flex:1}
+  .maskfoot{
+    padding:10px 16px;border-top:1px solid var(--line);display:flex;align-items:center;
+    gap:8px;flex-wrap:wrap;
+  }
+  table.optbl{width:100%;border-collapse:collapse;font-size:12px}
+  table.optbl th,table.optbl td{
+    border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top;
+    word-break:break-all;
+  }
+  table.optbl th{
+    color:var(--muted);font-weight:600;font-size:11px;letter-spacing:.5px;
+    position:sticky;top:0;background:#151a26;z-index:1;
+  }
+  table.optbl td.n{color:var(--muted2);white-space:nowrap;font-variant-numeric:tabular-nums}
+  table.optbl tr:hover td{background:#1a2130}
+  /* 徽章沿用上面 .opbadge 的 rn/mv/dl 三色，这里只补「自动编号」一种 */
+  .opbadge.auto{background:#2a2410;color:#ffc85c;border-color:#5c4a1a}
+  /* 表格窄列里徽章别折行，「撞名编号」折成两行很难看 */
+  table.optbl .opbadge{white-space:nowrap}
 </style>
 </head>
 <body>
@@ -701,6 +742,11 @@
             <div class="field sm hidden" id="rnRepl2Box">
               <label>替换为</label><input id="rnRepl2" placeholder="可用 \1 \2 引用捕获组">
             </div>
+            <div class="field sm" id="rnExtBox" style="flex:0 0 170px">
+              <label>只处理后缀</label>
+              <input id="rnExts" placeholder="留空=全部，如 txt,mobi"
+                     title="只对这些后缀的文件改名，其余的一律不动。逗号分隔，大小写和点号都不挑">
+            </div>
           </div>
           <div class="hint" id="rnHint">把文件名里的某串替换成另一串（大小写不敏感）。</div>
         </div>
@@ -802,6 +848,10 @@
             <label>&nbsp;</label>
             <div class="btnbar">
               <button class="btn ghost sm" onclick="pvRefresh()">刷新</button>
+              <button class="btn ghost sm" id="btnPvTable" onclick="pvTableOpen()" disabled
+                      title="以表格列出这份预览的全部操作（不只是列表里的前 2000 条），可按路径搜索">查看全部</button>
+              <button class="btn ghost sm" id="btnPvCsv" onclick="pvExportCsv()" disabled
+                      title="把这份预览的全部操作导出成 CSV（Excel 直接打开）">导出表格</button>
               <button class="btn ghost sm" id="btnPvDel" onclick="pvDelete()" disabled>删除这份</button>
               <button class="btn ghost sm" onclick="pvClean()">清理已执行</button>
             </div>
@@ -845,6 +895,42 @@
 </div>
 
 <div id="toasts"></div>
+
+<!-- 预览明细表格：预览文件里可能压着十万条操作，页面上按页看 + 按路径搜索 + 导出 CSV -->
+<div id="pvMask" class="mask hidden" onclick="if(event.target===this) pvTableClose()">
+  <div class="maskbox">
+    <div class="maskhead">
+      <span class="mt">预览明细</span>
+      <span class="ms" id="pvTblMeta"></span>
+      <div class="spacer"></div>
+      <input id="pvTblQ" placeholder="搜路径/新名，回车查找" style="width:230px"
+             onkeydown="if(event.key==='Enter') pvTablePage(0)">
+      <button class="btn ghost sm" onclick="pvTablePage(0)">查找</button>
+      <button class="btn ghost sm" onclick="pvExportCsv()">导出 CSV</button>
+      <button class="btn ghost sm" onclick="pvTableClose()">关闭</button>
+    </div>
+    <div class="maskbody">
+      <table class="optbl">
+        <thead><tr>
+          <th style="width:58px">#</th><th style="width:64px">操作</th>
+          <th>原路径</th><th style="width:34%">新文件名 / 目标</th>
+        </tr></thead>
+        <tbody id="pvTblBody"></tbody>
+      </table>
+      <div class="hint" id="pvTblEmpty" style="padding:14px 2px"></div>
+    </div>
+    <div class="maskfoot">
+      <button class="btn ghost sm" onclick="pvTablePage(-1)">上一页</button>
+      <span class="ms" id="pvTblPage"></span>
+      <button class="btn ghost sm" onclick="pvTablePage(1)">下一页</button>
+      <input id="pvTblJump" type="number" min="1" style="width:78px" placeholder="跳页"
+             onkeydown="if(event.key==='Enter') pvTableJump()">
+      <button class="btn ghost sm" onclick="pvTableJump()">跳转</button>
+      <div class="spacer"></div>
+      <span class="hint" id="pvTblSrc"></span>
+    </div>
+  </div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -1638,7 +1724,7 @@ function execPaint(d, sec){
 /* ---------- 预览文件（本地存盘，避免反复重扫网盘） ----------
    每点一次「生成预览」都会把计划写进 data/previews/ 下的一个文件；带了「指纹」，
    同参数再点一次直接复用，一个网盘请求都不发。下面是这份文件列表的全部交互：
-   载入（挑一份旧的直接执行）、删除、清理已执行。 */
+   载入（挑一份旧的直接执行）、查看全部（表格）、导出 CSV、删除、清理已执行。 */
 let pvItems   = [];    // 服务端给的预览文件摘要列表
 let pvCurrent = '';    // 当前载入的预览 id（执行完要在它上面盖「已执行」戳）
 let pvCurAge  = 0;     // 当前这份的年龄（秒），执行前用来提示可能已过期
@@ -1689,8 +1775,14 @@ async function pvRefresh(keepId){
   if(want && pvItems.some(it => it.id === want)) sel.value = want;
   const cur = pvItems.find(it => it.id === sel.value);
   pvCurAge = cur ? cur.age : 0;
-  $('btnPvDel').disabled = !cur;
+  pvBtns(!!cur);
   pvPaintHint();
+}
+
+/* 「查看全部 / 导出表格 / 删除这份」三个按钮跟着「有没有选中一份预览」走。
+   刚生成完的预览还没进列表刷新也可能用得上，所以外部也会调它 */
+function pvBtns(on){
+  ['btnPvDel', 'btnPvTable', 'btnPvCsv'].forEach(id => { const b = $(id); if(b) b.disabled = !on; });
 }
 
 /* 执行时后端读的是生成预览时另存的那份**完整**计划（plans/<id>.json），
@@ -1757,6 +1849,99 @@ async function pvClean(){
   await pvRefresh('');
 }
 
+/* ---------- 预览明细：表格查看 + 导出 CSV ----------
+   预览区只画前 2000 条（十万条全画出来页面就死了），但「到底扫出了些什么」总得
+   有个地方能看全：这里按页向后端要，一次 200 条，可搜路径，可导出成 CSV。 */
+let pvTbl = {id:'', q:'', offset:0, limit:200, total:0};
+
+function pvCurrentId(){
+  // 弹层操作的永远是「下拉里选中的那份」；刚生成完还没刷进列表时退回 pvCurrent
+  const sel = $('pvList');
+  return (sel && sel.value) || pvCurrent || '';
+}
+
+const PV_OP_TEXT = {rename:['rn','改名'], move:['mv','移动'], delete:['dl','删除']};
+
+async function pvTableOpen(){
+  const id = pvCurrentId();
+  if(!id){ setMsg('panMsg', '先在上面选一份预览文件', false); return; }
+  pvTbl = {id, q:'', offset:0, limit:200, total:0};
+  $('pvTblQ').value = '';
+  $('pvMask').classList.remove('hidden');
+  await pvTableFetch();
+}
+
+function pvTableClose(){ $('pvMask').classList.add('hidden'); }
+
+async function pvTableFetch(){
+  const d = await api('/api/preview_ops',
+    {id: pvTbl.id, q: pvTbl.q, offset: pvTbl.offset, limit: pvTbl.limit});
+  const body = $('pvTblBody'), empty = $('pvTblEmpty');
+  if(!d || !d.ok){
+    body.innerHTML = '';
+    empty.textContent = (d && d.msg) || '读取失败';
+    return;
+  }
+  pvTbl.total = d.total || 0;
+  const rows = d.rows || [];
+  empty.textContent = rows.length ? '' : (pvTbl.q ? '没有匹配的操作' : '这份预览里没有操作');
+  body.innerHTML = rows.map(r => {
+    const [cls, txt] = PV_OP_TEXT[r.op] || ['dl', r.op || ''];
+    // 改名看新名，移动看目标目录（带 newname 的说明搬过去还要改名），删除没有下游
+    let to = '';
+    if(r.op === 'rename') to = esc(r.newname || '');
+    else if(r.op === 'move') to = esc(r.dest || '') + (r.newname ? `　→ ${esc(r.newname)}` : '');
+    const auto = r.auto ? ' <span class="opbadge auto">撞名编号</span>' : '';
+    return `<tr><td class="n">${r.n}</td>`
+         + `<td><span class="opbadge ${cls}">${txt}</span>${auto}</td>`
+         + `<td>${esc(r.path)}</td><td>${to || '<span class="hint">—</span>'}</td></tr>`;
+  }).join('');
+  const pages = Math.max(1, Math.ceil(pvTbl.total / pvTbl.limit));
+  const cur = Math.floor(pvTbl.offset / pvTbl.limit) + 1;
+  $('pvTblPage').textContent = `第 ${cur} / ${pages} 页 · 共 ${pvTbl.total} 条`
+    + (pvTbl.q ? `（搜「${pvTbl.q}」）` : '');
+  $('pvTblJump').max = pages;
+  $('pvTblMeta').textContent = `${d.label || ''} ${String(d.ts || '').slice(11, 16)} · ${d.path || ''}`;
+  // 数据来源要说清：只有完整计划才含全部操作，旧预览只有存下来的那 2000 条
+  $('pvTblSrc').textContent = (d.source === 'full')
+    ? '数据来自随这份预览存下来的完整计划（全部操作）'
+    : '⚠ 这份没有完整计划，能看到/导出的只有存下来的那部分操作';
+}
+
+/* delta: -1 上一页 / 1 下一页 / 0 回到第一页（改搜索条件时用） */
+async function pvTablePage(delta){
+  if(!$('pvTblQ')) return;
+  if(delta === 0) pvTbl.q = $('pvTblQ').value.trim();
+  pvTbl.offset = Math.max(0, pvTbl.offset + delta * pvTbl.limit);
+  await pvTableFetch();
+}
+
+async function pvTableJump(){
+  const n = parseInt($('pvTblJump').value, 10);
+  if(!n || n < 1) return;
+  const pages = Math.max(1, Math.ceil(pvTbl.total / pvTbl.limit));
+  pvTbl.offset = (Math.min(n, pages) - 1) * pvTbl.limit;
+  await pvTableFetch();
+}
+
+/* 导出 CSV：后端给文本，这里加 BOM 再触发下载——不加 BOM 的话 Excel 打开是乱码 */
+async function pvExportCsv(){
+  const id = pvCurrentId();
+  if(!id){ setMsg('panMsg', '先在上面选一份预览文件', false); return; }
+  setMsg('panMsg', '正在生成表格…', null);
+  const d = await api('/api/preview_export', {id});
+  if(!d || !d.ok){ setMsg('panMsg', (d && d.msg) || '导出失败', false); return; }
+  const blob = new Blob(['\ufeff' + (d.text || '')], {type: 'text/csv;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = d.filename || `预览_${id}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  setMsg('panMsg', `已导出 ${d.count} 条 → ${a.download}`
+    + (d.source === 'full' ? '' : '；⚠ 这份没有完整计划，导出的只是存下来的那部分操作'),
+    true);
+}
+
 /* 生成预览（改名 / 整理 / 删除）。refresh=true 表示「重新生成」：忽略已存下来的
    同参数预览，强制重扫网盘 */
 async function panPlan(refresh){
@@ -1768,6 +1953,7 @@ async function panPlan(refresh){
     const m = $('rnMode').value;
     body.kind = 'rename';
     body.mode = m;
+    body.exts = $('rnExts').value;      // 留空=全部；填了就只改这些后缀的文件
     body.params = ({
       replace: {find: $('rnFind').value, replace: $('rnRepl').value},
       affix:   {prefix: $('rnPrefix').value, suffix: $('rnSuffix').value},
@@ -1863,6 +2049,7 @@ async function panPlan(refresh){
                + `重新生成一次即可全跑完`)
           : '')
     : `扫描 ${d.scanned} 个文件 → ${panTotal} 条操作`
+      + (d.exts ? ` · 只处理 ${d.exts} 后缀（其余不改名，也不算进上面这个数）` : '')
       + (d.unchanged ? `（${d.unchanged} 个无变化）` : '')
       // 只保留书名会把「《A》作者：甲」「A - 乙」压成同一个 A，撞车的自动加了 (2)(3)，
       // 这事必须说出来——悄悄改名字比让人看见更糟
@@ -2009,6 +2196,10 @@ async function panApply(){
     const el = $(f); if(!el) return;
     el.addEventListener('input', scheduleAutoSave);
     el.addEventListener('change', scheduleAutoSave);
+  });
+  // Esc 关掉预览明细弹层（点遮罩空白处也能关，两条路都留着）
+  document.addEventListener('keydown', e => {
+    if(e.key === 'Escape' && !$('pvMask').classList.contains('hidden')) pvTableClose();
   });
   panModeChange();          // 改名面板：按当前模式显示对应输入框
   // 「含子目录」开关（.dupseg 内的单个 .segbtn 式 label）：点亮状态跟着 checkbox 走

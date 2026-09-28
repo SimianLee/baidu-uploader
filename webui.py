@@ -47,6 +47,8 @@ _last_progress = {}
 RENAME_MODE_LABELS = {"replace": "查找替换", "affix": "加前后缀", "serial": "序号重命名",
                       "regex": "正则替换", "clean": "去广告清理", "title": "只保留书名"}
 ORGANIZE_LABELS = {"category": "按大类", "ext": "按后缀", "date": "按修改月份"}
+# 导出 CSV 时「操作」列写人话，别让人对着 rename/move/delete 猜
+OP_TEXT = {"rename": "改名", "move": "移动", "delete": "删除"}
 
 
 def filter_label(f):
@@ -559,6 +561,11 @@ class Handler(BaseHTTPRequestHandler):
             n = preview_store.clean_executed(PROJ)
             return self._json({"ok": True, "cleaned": n,
                                "msg": f"已清理 {n} 份执行过的预览文件"})
+        # 预览明细：表格查看（分页+搜索）与导出 CSV。只读本地文件，不需要网盘授权
+        if path == "/api/preview_ops":
+            return self._preview_ops(body)
+        if path == "/api/preview_export":
+            return self._preview_export(body)
 
         # ---------------- 本地改名（上传前预处理，动的是磁盘上的真文件）----------------
         if path == "/api/local_rename_preview":
@@ -622,6 +629,77 @@ class Handler(BaseHTTPRequestHandler):
         resp["msg"] = (f"已载入 {rec.get('ts', '')} 生成的预览（{resp['total']} 条）"
                        + (f"，其中 {len(errs)} 条会在执行时被拦下" if errs else ""))
         return self._json(resp)
+
+    # ---------------------------------------------------------------
+    # 预览明细：把一份预览里的操作翻成表格 / CSV
+    # ---------------------------------------------------------------
+    @staticmethod
+    def _preview_all_ops(pid):
+        """取一份预览的**全部**操作 → (ops, source)
+
+        完整计划（plans/<id>.json）里才是全部——预览文件自己只存了头 2000 条
+        （MAX_OPS_SAVED），够看够用，但不是全貌。source 用来如实告诉用户
+        看到的是「全部」还是「只有存下来的那部分」：拿 2000 条当全貌去核对，
+        会得出「少了一半」这种错误结论。
+        """
+        plan = preview_store.load_full_plan(PROJ, pid)
+        if plan and isinstance(plan.get("ops"), list):
+            return plan["ops"], "full"
+        rec = preview_store.load_preview(PROJ, pid)
+        if not rec:
+            return None, ""
+        return list(rec.get("ops") or []), "preview"
+
+    def _preview_ops(self, body):
+        """分页给表格：一次只回一页，十万条也不会把页面撑死"""
+        pid = str(body.get("id") or "")
+        ops, src = self._preview_all_ops(pid)
+        if ops is None:
+            return self._json({"ok": False, "msg": "找不到这份预览文件（可能已被清理）"})
+        rec = preview_store.load_preview(PROJ, pid) or {}
+        q = str(body.get("q") or "").strip().lower()
+        if q:
+            ops = [o for o in ops
+                   if q in str(o.get("path") or "").lower()
+                   or q in str(o.get("newname") or "").lower()
+                   or q in str(o.get("dest") or "").lower()]
+        offset = max(0, int(body.get("offset") or 0))
+        limit = min(max(1, int(body.get("limit") or 200)), 1000)
+        page = ops[offset:offset + limit]
+        rows = []
+        for i, o in enumerate(page, offset + 1):
+            p = str(o.get("path") or "")
+            rows.append({"n": i, "op": o.get("op") or "",
+                         "path": p, "name": o.get("name") or p.rsplit("/", 1)[-1],
+                         "newname": o.get("newname") or "",
+                         "dest": o.get("dest") or "",
+                         "auto": bool(o.get("auto")), "isdir": bool(o.get("isdir"))})
+        return self._json({"ok": True, "rows": rows, "total": len(ops),
+                           "offset": offset, "limit": limit, "source": src,
+                           "id": pid, "label": rec.get("label") or rec.get("kind", ""),
+                           "ts": rec.get("ts", ""), "path": rec.get("path", "")})
+
+    def _preview_export(self, body):
+        """导出成 CSV（Excel 直接打开，前端负责加 BOM）"""
+        import csv
+        import io
+        pid = str(body.get("id") or "")
+        ops, src = self._preview_all_ops(pid)
+        if ops is None:
+            return self._json({"ok": False, "msg": "找不到这份预览文件（可能已被清理）"})
+        buf = io.StringIO(newline="")
+        w = csv.writer(buf)
+        w.writerow(["序号", "操作", "原路径", "文件名", "新文件名", "目标目录",
+                    "撞名自动编号", "大小(字节)"])
+        for i, o in enumerate(ops, 1):
+            p = str(o.get("path") or "")
+            w.writerow([i, OP_TEXT.get(o.get("op") or "", o.get("op") or ""), p,
+                        o.get("name") or p.rsplit("/", 1)[-1],
+                        o.get("newname") or "", o.get("dest") or "",
+                        "是" if o.get("auto") else "", o.get("size") or ""])
+        return self._json({"ok": True, "text": buf.getvalue(), "count": len(ops),
+                           "source": src, "id": pid,
+                           "filename": f"预览_{pid}.csv"})
 
     # ---------------------------------------------------------------
     # 本地改名：预览 → 执行 → （改错了）回退
@@ -728,7 +806,10 @@ class Handler(BaseHTTPRequestHandler):
             # 把「影响结果的全部输入」归一化：它既是判断「同参数」的指纹依据（决定能
             # 不能复用旧预览），也随预览文件一起存下来，事后能看清这份计划是拿什么算的
             payload = {"path": p, "recursive": recursive}
-            for k in ("mode", "params", "by", "dest", "filters", "skip"):
+            # exts = 改名页签的「只处理这些后缀」。进指纹是必须的：不然把「只改 txt」
+            # 换成「只改 mobi」时会被当成同参数，直接复用上一份预览——那等于悄悄
+            # 拿错的结果给人看
+            for k in ("mode", "params", "by", "dest", "filters", "skip", "exts"):
                 if k in body:
                     payload[k] = body[k]
             if kind == "empty_dir" or kind == "merge_dirs":
@@ -780,10 +861,20 @@ class Handler(BaseHTTPRequestHandler):
             # 并存进预览文件，所以键名必须和前端读的一致（scanned/unchanged/auto…）
             if kind == "rename":
                 mode = str(body.get("mode") or "replace")
+                # 「只处理这些后缀」：先按后缀筛掉一批，再用剩下的去改名。
+                # 被筛掉的数量要如实报出来——悄悄少处理几百个文件比报错更危险
+                files, want_exts = pan_tools.filter_by_exts(
+                    files, str(body.get("exts") or ""))
                 ops, unchanged, auto = pan_tools.build_rename_plan(
                     files, mode, body.get("params") or {})
                 info = {"unchanged": len(unchanged), "auto": auto, "scanned": len(files)}
+                if want_exts:
+                    info["exts"] = ",".join(sorted(want_exts))
                 label = "批量改名·" + RENAME_MODE_LABELS.get(mode, mode)
+                if want_exts:
+                    # 标题带上后缀：下拉里两份「批量改名·只保留书名」如果只差
+                    # 后缀，条数又相近，根本认不出哪份是 txt 哪份是 mobi
+                    label += f"（{','.join(sorted(want_exts))}）"
             elif kind == "organize":
                 dest = str(body.get("dest") or "").strip()
                 if not dest:

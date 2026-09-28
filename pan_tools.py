@@ -787,6 +787,28 @@ def dedupe_newnames(rows, occupied=None):
     return auto
 
 
+def filter_by_exts(files, exts):
+    """只留下指定后缀的文件 → (留下的, 后缀集合)
+
+    exts 是「txt, mobi」这种逗号分隔的字符串，点号、空格、大小写都不挑：
+    ".TXT"、 " txt "、"txt" 算同一个。留空/全空 = 不过滤（全部都要）。
+
+    为什么单独做一个函数而不是塞进 build_rename_plan：改名、归档迟早都要
+    这个口径，而「过滤了几个」必须能报出来——悄悄少处理一部分文件比报错更危险。
+    返回后缀集合是给预览标题用的：「改名·只保留书名（txt,mobi）」一眼能认出来。
+    """
+    want = {e.strip().lower().lstrip(".") for e in str(exts or "").split(",")
+            if e.strip()}
+    if not want:
+        return list(files), set()
+    keep = []
+    for f in files:
+        _, ext = split_name(f["name"])
+        if ext.lower() in want:
+            keep.append(f)
+    return keep, want
+
+
 def build_rename_plan(files, mode: str, params: dict, occupied=None):
     """files: [{path, name, size}] → 返回 (ops, unchanged, auto)
 
@@ -1212,11 +1234,18 @@ def _find_conflicts(pan: PanFiles, ren, mov):
 
     rename 撞名点 = 源文件所在目录 + newname；move 撞名点 = dest + 源文件名。
     每个涉及目录只 list 一次（缓存），文件名按小写比较（网盘大小写不敏感）。
+
+    一个坑：**只改大小写的文件会被自己撞到**。A.txt → a.txt 时，目标名 a.txt
+    按小写比就是它自己（网盘大小写不敏感）。若不排除，覆盖模式会先把这个「被撞
+    的旧文件」搬进备份区——搬的正是要改名的那个文件，于是改名必然失败，文件还
+    被挪走了。所以命中的条目若就是某条 rename 的源路径本身，一律不算撞名。
     """
     targets = {}                       # 目录 -> {小写目标名}
+    self_src = {}                      # 目录 -> {小写目标名: {源文件完整路径}}
     for o in ren:
         d, _, n = o["path"].rpartition("/")
         targets.setdefault(d, set()).add(o["newname"].lower())
+        self_src.setdefault(d, {}).setdefault(o["newname"].lower(), set()).add(o["path"])
     for o in mov:
         # 带新名的 move 按**新名**查冲突（搬过去之后叫什么才是会不会撞的关键）
         n = o.get("newname") or o["path"].rsplit("/", 1)[-1]
@@ -1231,8 +1260,14 @@ def _find_conflicts(pan: PanFiles, ren, mov):
         for e in entries:
             if e.get("isdir"):
                 continue
-            if e.get("name", "").lower() in names:
-                conflicts.append(f"{d}/{e['name']}")
+            low = e.get("name", "").lower()
+            if low not in names:
+                continue
+            full = f"{d}/{e['name']}"
+            # 这条就是某条改名的源文件本身（只改大小写）→ 不是撞名，跳过
+            if full in self_src.get(d, {}).get(low, set()):
+                continue
+            conflicts.append(full)
     return conflicts
 
 
