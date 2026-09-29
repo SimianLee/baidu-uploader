@@ -48,9 +48,10 @@ EXEC_LIMIT = 2000          # 与面板一致：单轮最多提交多少条
 def dup_skipped(fails) -> int:
     """统计因「归档处已有同名」而没搬走的条数（百度 errno=-8）。
 
-    重名策略是 skip（默认）时，撞名的文件会被跳过并**留在源目录**。下一轮
-    重新扫描又扫到它、又撞名、又被跳过 —— 它永远搬不走。不明确报出来，
-    用户会看着「移动 7000 个」以为搬完了，其实源目录里还窝着一批。
+    正常情况不该出现：skip 策略下 build_organize_plan 会给撞名的自动编号
+    `A (2).txt`，两边数据都保住。真还报 -8，说明撞的那个名字**没被计划看见**
+    ——典型是归档目录不在扫描范围内、而我们也没去列它。所以这里的文案要指
+    向「换 overwrite」而不是干等下一轮。
     """
     return sum(1 for f in (fails or []) if f.get("errno") == -8)
 
@@ -150,7 +151,19 @@ def main():
             print("  源目录下已经没有文件了，整理完成")
             break
 
-        ops = pan_tools.build_organize_plan(files, args.by, dest, sandbox)
+        # 撞名检测的底子是「扫描范围内的实况」，而归档目录常常不在扫描范围里
+        # （--path 多半就是个子目录）。不补这一层的话，归档处已有的同名文件
+        # 完全看不见 → 不编号 → 每轮都撞 -8，永远搬不完。这里照面板的做法：
+        # 先用扫描结果兜底，再把这份计划真正要用到的目标目录单独列一遍。
+        occupied = {}
+        for f in files:
+            fd, _, fn = f["path"].rpartition("/")
+            occupied.setdefault(fd, set()).add(fn)
+        ops = pan_tools.build_organize_plan(files, args.by, dest, sandbox,
+                                            occupied, ondup=args.ondup)
+        if pan_tools.occupy_dests(pan, ops, occupied):
+            ops = pan_tools.build_organize_plan(files, args.by, dest, sandbox,
+                                                occupied, ondup=args.ondup)
         buckets = {}
         for o in ops:
             buckets[o["dest"]] = buckets.get(o["dest"], 0) + 1
@@ -187,8 +200,9 @@ def main():
             break
         dup = dup_skipped(stat["fails"])
         if dup:
-            print(f"  ⚠ {dup} 个文件因「归档处已有同名」被跳过，仍留在源目录")
-            print(f"     默认策略下它们每轮都会被重新扫到、再被跳过，永远搬不走。")
+            print(f"  ⚠ {dup} 个文件因「归档处已有同名」没搬成，仍留在源目录")
+            print(f"     跳过策略下撞名的本该自动编成 A (2).txt 照搬过去，")
+            print(f"     还撞 -8 说明那个同名没被计划看见（归档目录在扫描范围外等）。")
             print(f"     要连这些一起搬，加参数：--ondup overwrite")
             print(f"     （覆盖前旧文件会先挪进 {sandbox}/_覆盖备份/时间戳/，可找回）")
         if not stat["move"] and stat["fails"]:

@@ -1987,6 +1987,9 @@ async function panPlan(refresh){
     const m = $('rnMode').value;
     body.kind = 'rename';
     body.mode = m;
+    // 重名策略对改名同样有效，而且**影响计划本身**（跳过给撞车的编号、覆盖直接顶），
+    // 所以必须发过去：既让后端照它算，也让它进指纹（换策略不会拿旧预览顶上）
+    body.ondup = panDup;
     body.exts = $('rnExts').value;      // 留空=全部；填了就只改这些后缀的文件
     body.params = ({
       replace: {find: $('rnFind').value, replace: $('rnRepl').value},

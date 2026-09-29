@@ -878,12 +878,18 @@ class Handler(BaseHTTPRequestHandler):
                 # 被筛掉的数量要如实报出来——悄悄少处理几百个文件比报错更危险
                 files, want_exts = pan_tools.filter_by_exts(
                     files, str(body.get("exts") or ""))
+                # 重名策略对改名同样生效：跳过=把撞车的编成 A (2) 保住两边，
+                # 覆盖=直接顶掉（旧文件执行时先进备份区）。build_rename_plan 用
+                # 扫描结果自己兜底 occupied，所以能发现「撞到目录里不用改名的那些」
+                dup_policy = _dup_policy(body)
                 ops, unchanged, auto = pan_tools.build_rename_plan(
-                    files, mode, body.get("params") or {})
-                info = {"unchanged": len(unchanged), "auto": auto, "scanned": len(files)}
+                    files, mode, body.get("params") or {}, ondup=dup_policy)
+                info = {"unchanged": len(unchanged), "auto": auto, "scanned": len(files),
+                        "overwrite": sum(1 for o in ops if o.get("overwrite"))}
                 if want_exts:
                     info["exts"] = ",".join(sorted(want_exts))
-                label = "批量改名·" + RENAME_MODE_LABELS.get(mode, mode)
+                label = "批量改名·" + RENAME_MODE_LABELS.get(mode, mode) \
+                    + _dup_label(dup_policy)
                 if want_exts:
                     # 标题带上后缀：下拉里两份「批量改名·只保留书名」如果只差
                     # 后缀，条数又相近，根本认不出哪份是 txt 哪份是 mobi
@@ -904,6 +910,15 @@ class Handler(BaseHTTPRequestHandler):
                     occupied.setdefault(fd, set()).add(fn)
                 ops = pan_tools.build_organize_plan(files, by, dest, sandbox,
                                                     occupied, ondup=dup_policy)
+                # 撞名检测的底子是「扫描范围内的实况」，而归档目录**常常不在扫描
+                # 范围里**（典型：扫描起点的子目录 /apps/x/小说，归档到 /apps/x/归档）。
+                # 那样 occupied 里就没有归档目录，网盘上已有的同名文件完全看不见
+                # —— 撞名不编号，执行时撞 -8 失败，下轮再扫再失败，永远收不了尾。
+                # 所以按这份计划真正要用到的目标目录补一次实况：分类目录通常也就
+                # 十几个，代价远小于事后一轮轮的假失败。
+                if pan_tools.occupy_dests(pan, ops, occupied):
+                    ops = pan_tools.build_organize_plan(
+                        files, by, dest, sandbox, occupied, ondup=dup_policy)
                 # auto 是撞名被自动编号的条数（move 带 newname 一步到位，
                 # 不再拆「改名+移动」两条——两条慢一倍还容易连锁失败）
                 info = {"scanned": len(files),

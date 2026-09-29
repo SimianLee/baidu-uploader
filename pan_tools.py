@@ -751,13 +751,22 @@ def rename_one(name: str, mode: str, p: dict, index: int = 0) -> str:
     return new
 
 
-def dedupe_newnames(rows, occupied=None):
+def dedupe_newnames(rows, occupied=None, ondup="skip"):
     """新名字撞车时自动加 (2)(3)…
 
     rows: [{"dir": 所在目录, "name": 原名, "newname": 目标名}]，**原地改写** newname
     occupied: {目录: {已占用的小写名字}}。本地改名时用磁盘实况填（同目录里不会
-              改名的那些文件）；网盘侧事先不知道目录内容，只能做「本批内部」去重，
-              撞到网盘上已有的同名文件由 ondup 策略（跳过/覆盖）兜底。
+              改名的那些文件）；网盘侧现在由 build_rename_plan 用**扫描结果**自
+              动兜底——scan 出来的文件就是那个目录的实况，不必再花请求去问。
+    ondup:   撞到 occupied（网盘/磁盘上**现在就有**的同名）怎么办：
+             skip      （默认）保留那一个，把这次要改的编成 `A (2).txt`
+             overwrite 不编号，直接顶掉。执行时由 apply_plan 先把旧的挪进
+                       `_覆盖备份/<时间戳>/`，所以是「能找回的替换」
+
+    撞名分两种，口径不同（与 build_organize_plan 一致）：
+      · **本批内部**互相撞（两条都要改成 A.txt）→ 一律编号。那是这一趟刚排进去的
+        真数据，绝不能自己顶掉自己
+      · 撞到 occupied 里**本来就有**的 → 按 ondup 处理
 
     为什么必须去重：只保留书名会把「《A》作者：甲.txt」「A - 乙.txt」压成同一个
     「A.txt」。执行时两条争一个名字，必然一条成功一条报错，还会留下说不清的半截
@@ -765,25 +774,34 @@ def dedupe_newnames(rows, occupied=None):
 
     返回被自动编号的条数（要如实告诉用户，不能悄悄改名）。
     """
-    used = {}
+    used = {}          # 本批已排进去的（撞了必须编号）
+    ext = {}           # 目录里本来就有的（撞了按 ondup 决定）
     if occupied:
         for d, names in occupied.items():
-            used[d] = {n.lower() for n in names}
+            ext[d] = {n.lower() for n in names}
     auto = 0
     for r in rows:
         pool = used.setdefault(r["dir"], set())
+        outside = ext.get(r["dir"], set())
         want = r["newname"]
-        if want.lower() in pool:
-            base, ext = split_name(want)
-            k = 2
-            while True:
-                cand = f"{base} ({k})" + (f".{ext}" if ext else "")
-                if cand.lower() not in pool:
-                    break
-                k += 1
-            r["newname"] = cand
+        low = want.lower()
+        if low in pool:                       # 本批内部撞名：没得商量，编号
+            r["newname"] = cand = _numbered_name(want, pool | outside)
+            pool.add(cand.lower())
             auto += 1
-        pool.add(r["newname"].lower())
+        elif low in outside:                  # 撞到目录里已有的那个
+            if ondup == "overwrite":
+                # 旧文件将被顶掉（执行时先备份），它占的名字让出来了——
+                # 后面再有同名改过来时不能再顶第二次，那可能是刚改好的数据
+                outside.discard(low)
+                pool.add(low)
+                r["overwrite"] = True
+            else:
+                r["newname"] = cand = _numbered_name(want, pool | outside)
+                pool.add(cand.lower())
+                auto += 1
+        else:
+            pool.add(low)
     return auto
 
 
@@ -809,27 +827,55 @@ def filter_by_exts(files, exts):
     return keep, want
 
 
-def build_rename_plan(files, mode: str, params: dict, occupied=None):
+def build_rename_plan(files, mode: str, params: dict, occupied=None,
+                      ondup: str = "skip"):
     """files: [{path, name, size}] → 返回 (ops, unchanged, auto)
 
     ops 只含真正改名的；auto 是撞名被自动编号的条数。
+
+    occupied: {目录: {文件名}}。不传时**用扫描结果自己兜底**——files 就是那个目录
+    的实况，不必再花请求去问网盘。这一层很关键：只保留书名会把「《A》作者：甲.txt」
+    压成「A.txt」，而目录里往往**已经有一个 A.txt**（它自己不用改名，不在 ops 里）。
+    以前网盘侧不传 occupied，dedupe 只看待改名的那几条，压根发现不了它，于是改名
+    必然撞 -8 失败——「重名跳过」承诺的「保留旧的、把新的编成 A (2)」根本没兑现。
+    （本地改名那边本来就用磁盘实况填，locals_rename._dedupe_against_disk）
+
+    注意要**排除本批待改名的源文件名**：它们马上就让位了。不排除的话，只改大小写
+    （A.txt → a.txt）会被自己撞到（网盘大小写不敏感），误编成「a (2).txt」。
+    本地改名那边同理排除，见 _dedupe_against_disk 的 renaming。
     """
     ops, unchanged = [], []
     for i, f in enumerate(files):
         new = rename_one(f["name"], mode, params, i)
         if new and new != f["name"]:
             ops.append({"op": "rename", "path": f["path"], "name": f["name"],
-                        "newname": new})
+                        "newname": new, "size": f.get("size", 0)})
         else:
             unchanged.append(f["path"])
     rows = [{"dir": o["path"].rpartition("/")[0], "name": o["name"],
              "newname": o["newname"]} for o in ops]
+
+    if occupied is None:
+        occupied = {}
+        for f in files:
+            d, _, n = f["path"].rpartition("/")
+            occupied.setdefault(d, set()).add(n)
+    else:
+        occupied = {d: set(names) for d, names in occupied.items()}
+    # 本批要改名的源文件自己马上让位，不算被占用
+    for r in rows:
+        pool = occupied.get(r["dir"])
+        if pool:
+            pool.discard(r["name"])
+
     before = [r["newname"] for r in rows]
-    auto = dedupe_newnames(rows, occupied) if rows else 0
+    auto = dedupe_newnames(rows, occupied, ondup=ondup) if rows else 0
     for o, r, b in zip(ops, rows, before):
         o["newname"] = r["newname"]
         if r["newname"] != b:
             o["auto"] = True        # 撞名被自动编号，预览里要标出来
+        if r.get("overwrite"):
+            o["overwrite"] = True   # 会顶掉目录里已有的那个（执行时先备份）
     return ops, unchanged, auto
 
 
@@ -960,7 +1006,8 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None,
         else:
             new = name
             taken.add(low)
-        op = {"op": "move", "path": p, "name": name, "dest": d}
+        op = {"op": "move", "path": p, "name": name, "dest": d,
+              "size": f.get("size", 0)}
         if new != name:
             # 撞名的直接在移动里改名（move 支持 newname），不再拆「改名+移动」
             # 两条——两条不但慢一倍，改名那步失败还会让后面移动撞出 -8，
@@ -971,6 +1018,32 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None,
             op["overwrite"] = True      # 让前端能报出「N 个会替换掉网盘已有的」
         ops.append(op)
     return ops
+
+
+def occupy_dests(pan: PanFiles, ops, occupied: dict) -> int:
+    """把「这份计划要用到的目标目录」的实况补进 occupied → 返回补了几个目录
+
+    撞名检测的底子是 occupied，而它通常只由**扫描结果**构成——归档目录却常常不在
+    扫描范围里（典型：扫描 /apps/x/小说，归档到 /apps/x/归档）。那种情况下归档处
+    已有的同名文件完全看不见：撞名不编号 → 执行时撞 -8 失败 → 下一轮再扫再撞，
+    永远收不了尾（这正是最早「2000 条只成功一小部分」的老病根）。
+
+    所以按 ops 里真正出现的 dest 逐个补一次实况。分类目录通常也就十几个，
+    代价远小于事后一轮轮的假失败。目录还不存在或读不了=里面没有东西可撞，跳过。
+    """
+    missing = sorted({o["dest"] for o in ops
+                      if o.get("op") == "move" and o.get("dest")}
+                     - set(occupied))
+    n = 0
+    for d in missing:
+        try:
+            names = {e["name"] for e in pan.list_dir(d) if not e.get("isdir")}
+        except Exception:
+            continue
+        if names:
+            occupied[d] = names
+            n += 1
+    return n
 
 
 # ===========================================================================
@@ -1069,7 +1142,8 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
             if base and base in names:
                 pairs.append((names[base], path))
 
-    # 各目录现有文件名（撞名编号要以主目录的实况为底）
+    # 各目录现有文件名（撞名编号要以主目录的实况为底）。连大小一起记：
+    # 导出的 CSV 里有「大小」这一列，计划里不带它就只能给一列空格子
     files_by_dir = {}
     files_scanned = 0
     for e in entries:
@@ -1077,7 +1151,7 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
             continue
         d, _, n = (e.get("path") or "").rpartition("/")
         if d and n:
-            files_by_dir.setdefault(d, []).append(n)
+            files_by_dir.setdefault(d, []).append((n, e.get("size") or 0))
         files_scanned += 1
 
     # 子目录按父目录记一份：副本里有子目录的要点出来
@@ -1089,7 +1163,7 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
                 subdirs_by_dir.setdefault(d, set()).add(e["path"])
 
     ops, moved, auto, overwrote, with_sub = [], 0, 0, 0, 0
-    pre = {d: {n.lower() for n in names}
+    pre = {d: {n.lower() for n, _ in names}
            for d, names in files_by_dir.items()}
     claimed = {}
     overwrite = (ondup == "overwrite")
@@ -1098,7 +1172,7 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
         taken = claimed.setdefault(main_path, set())
         if subdirs_by_dir.get(dup_path):
             with_sub += 1
-        for name in files_by_dir.get(dup_path) or []:
+        for name, fsize in files_by_dir.get(dup_path) or []:
             low = name.lower()
             hit_pre = low in pool
             if hit_pre and overwrite:
@@ -1112,7 +1186,7 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
                 new = name
                 taken.add(low)
             op = {"op": "move", "path": f"{dup_path}/{name}", "name": name,
-                  "dest": main_path}
+                  "dest": main_path, "size": fsize}
             if new != name:
                 op["newname"] = new
                 op["auto"] = True
