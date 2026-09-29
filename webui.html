@@ -696,9 +696,7 @@
         <div class="tabs">
           <button class="tab on" id="tabRename" onclick="panTab('rename')">批量改名</button>
           <button class="tab" id="tabOrganize" onclick="panTab('organize')">整理归档</button>
-          <button class="tab" id="tabMerge" onclick="panTab('merge')">合并重复</button>
           <button class="tab" id="tabDelete" onclick="panTab('delete')">批量删除</button>
-          <button class="tab" id="tabEmpty" onclick="panTab('empty')">空文件夹</button>
         </div>
 
         <!-- 改名 -->
@@ -751,10 +749,19 @@
           <div class="hint" id="rnHint">把文件名里的某串替换成另一串（大小写不敏感）。</div>
         </div>
 
-        <!-- 整理 -->
+        <!-- 整理：归类移动 / 合并重复目录 / 清理空文件夹 三种方式共用一个页签，
+             它们本来就是同一件事的后半程：先归类 → 再合并残留副本 → 最后清掉空壳 -->
         <div class="panel" id="paneOrganize">
           <div class="row">
-            <div class="field sm" style="flex:0 0 150px">
+            <div class="field sm" style="flex:0 0 210px">
+              <label>整理方式</label>
+              <select id="ogMode" onchange="ogModeChange()">
+                <option value="organize">归类移动（搬进归档目录）</option>
+                <option value="merge">合并重复目录 txt(1) → txt</option>
+                <option value="empty">清理空文件夹</option>
+              </select>
+            </div>
+            <div class="field sm og-org" style="flex:0 0 150px">
               <label>归档方式</label>
               <select id="ogBy">
                 <option value="category">按大类（视频/文档/图片…）</option>
@@ -762,24 +769,16 @@
                 <option value="date">按修改月份（2026-09）</option>
               </select>
             </div>
-            <div class="field">
+            <div class="field og-org">
               <label>归档到</label>
               <input id="ogDest" placeholder="/apps/baidu_uploader/归档">
             </div>
+            <div class="field og-empty hidden">
+              <label>跳过名字含（逗号分隔）</label>
+              <input id="edSkip" value="_覆盖备份" placeholder="命中的目录及其子目录都不动">
+            </div>
           </div>
-          <div class="hint">
-            文件会移动到「归档目录/分类名/」下；撞到网盘已有的同名文件时，按右侧「重名跳过 / 重名覆盖」按钮的选择处理。
-          </div>
-        </div>
-
-        <!-- 合并重复目录 -->
-        <div class="panel" id="paneMerge">
-          <div class="hint">
-            把 <b>txt(1)</b>、<b>mobi(1)</b> 这类副本目录里的文件合回 <b>txt</b>、<b>mobi</b> 主目录
-            （同一位父目录下同时有 <code>X</code> 和 <code>X(1)</code> 才算一对）。撞名的自动编号 (2)(3)。<br>
-            副本里的子目录不动；搬空的副本目录也不在这里删——用「空文件夹」页签清理更安全。
-            因为要配对整棵子树的目录名，这个功能<b>总是递归扫描</b>。
-          </div>
+          <div class="hint" id="ogHint"></div>
         </div>
 
         <!-- 删除 -->
@@ -796,21 +795,8 @@
           </div>
         </div>
 
-        <!-- 空文件夹 -->
-        <div class="panel" id="paneEmpty">
-          <div class="row">
-            <div class="field">
-              <label>跳过名字含（逗号分隔）</label>
-              <input id="edSkip" value="_覆盖备份" placeholder="命中的目录及其子目录都不动">
-            </div>
-          </div>
-          <div class="hint">
-            判定：一个目录<b>连同它的所有子目录</b>里一个文件都没有，才算空。预览只列<b>最外层</b>的空目录——
-            删掉它，嵌套在里面的空目录会一并消失，不必逐层列。
-            当前正在浏览的这层目录本身不会被删（免得删掉你正站着的地方）。
-            因为要看整棵子树，这个功能<b>总是递归扫描</b>，并会锁定「含子目录」开关。
-          </div>
-        </div>
+        
+        <!-- 空文件夹 → 已并入「整理归档」页签的「清理空文件夹」方式 -->
 
         <!-- 预览与执行 -->
         <div class="row" style="margin-top:10px">
@@ -1396,14 +1382,20 @@ let panTotal = 0;             // 服务端算出的总条数（预览可能被�
 
 /* 重名策略：skip=跳过（默认，安全） / overwrite=覆盖（不可恢复） */
 let panDup = 'skip';
+/* 「重名跳过 / 重名覆盖」会**改变生成的计划本身**（跳过给后来的自动编号，
+   覆盖不编号直接搬），所以换策略后必须把手里这份预览作废——否则拿跳过模式下
+   算好的编号去执行覆盖，或者反过来，结果都对不上 */
 function setDup(v, silent){
   panDup = v;
   $('dupSkip').classList.toggle('on', v === 'skip');
   $('dupOver').classList.toggle('on', v === 'overwrite');
+  if(typeof panResetPlan === 'function') panResetPlan();
   if(!silent){
     setMsg('panMsg', v === 'overwrite'
-      ? '⚠ 已选「重名覆盖」：撞到的旧文件会先挪进「_覆盖备份/时间戳/」目录（可找回），再执行改名/移动'
-      : '已切回「重名跳过」：同名文件保留网盘上已有的，不覆盖',
+      ? '⚠ 已选「重名覆盖」：撞到的网盘旧文件会先挪进「_覆盖备份/时间戳/」目录（可找回），'
+        + '再把这次的文件搬/改过去。点「生成预览」重新算一份计划'
+      : '已切回「重名跳过」：保留网盘上已有的那个文件，这次搬过去的自动编成 A (2)。'
+        + '点「生成预览」重新算一份计划',
       v === 'overwrite' ? false : true);
   }
 }
@@ -1412,29 +1404,62 @@ function setDup(v, silent){
    这里记住用户原本的选择，离开该页签时原样还原 */
 let panRecSaved = true, panRecLocked = false;
 
+function ogMode(){
+  /* 整理页签当前选的方式。不在整理页签时返回空串（那时 ogMode 的输入框没意义） */
+  return panTab_ === 'organize' ? $('ogMode').value : '';
+}
+
 function panTab(k){
   panTab_ = k;
   [['rename','tabRename','paneRename'], ['organize','tabOrganize','paneOrganize'],
-   ['merge','tabMerge','paneMerge'],
-   ['delete','tabDelete','paneDelete'], ['empty','tabEmpty','paneEmpty']].forEach(([key, tab, pane]) => {
+   ['delete','tabDelete','paneDelete']].forEach(([key, tab, pane]) => {
     $(tab).classList.toggle('on', key === k);
     $(pane).classList.toggle('on', key === k);
   });
-  // 重名策略选择只在改名/整理页签出现；切页签一律重置回「跳过」，
-  // 避免在改名页选了覆盖、切到别的页签执行时把策略带过去
-  if(typeof setDup === 'function') setDup('skip', true);
-  $('dupBox').classList.toggle('hidden', !(k === 'rename' || k === 'organize'));
+  // 切页签一律把重名策略拨回「跳过」，避免在整理页选了覆盖、切到改名页
+  // 执行时把策略悄悄带过去（setDup 内部会顺手作废手里的预览）
+  if(typeof setDup === 'function') setDup('skip', true);   // silent：切页签不该弹提示
+  if(typeof ogModeChange === 'function') ogModeChange();
+  panResetPlan();
+}
 
-  // 空文件夹/合并重复页：判定都要看整棵子树。不递归只会得出「这一层里没东西＝空」
-  // 的错误结论，所以锁死开关并写明理由，而不是让用户关掉它拿到一个错的答案。
+/* 整理方式切换：只显示当前方式需要的输入框，并更新说明文案。
+   递归锁和「重名跳过/覆盖」的显隐也跟着走——「清理空文件夹」是删，
+   无所谓重名；而它和「合并重复」都必须看到整棵子树 */
+function ogModeChange(){
+  const m = ogMode();
+  document.querySelectorAll('.og-org').forEach(e => e.classList.toggle('hidden', m !== 'organize'));
+  document.querySelectorAll('.og-empty').forEach(e => e.classList.toggle('hidden', m !== 'empty'));
+  $('ogHint').innerHTML = ({
+    organize: '文件会移动到「归档目录/分类名/」下。撞到网盘已有的同名文件时：'
+      + '<b>重名跳过</b>＝保留那一个，这次搬过去的自动编成 <code>A (2).txt</code>（两边都在）；'
+      + '<b>重名覆盖</b>＝不编号直接替换，旧的那个先挪进「_覆盖备份/时间戳/」可找回。',
+    merge: '把 <b>txt(1)</b>、<b>mobi(1)</b> 这类副本目录里的文件合回 <b>txt</b>、<b>mobi</b> 主目录'
+      + '（同一位父目录下同时有 <code>X</code> 和 <code>X(1)</code> 才算一对）。<br>'
+      + '副本里的<b>子目录</b>不动；搬空的副本目录也不在这里删——'
+      + '合完切到上面的「清理空文件夹」收拾更安全。'
+      + '因为要配对整棵子树的目录名，这个方式<b>总是递归扫描</b>。',
+    empty: '判定：一个目录<b>连同它的所有子目录</b>里一个文件都没有，才算空。'
+      + '预览只列<b>最外层</b>的空目录——删掉它，嵌套在里面的空目录会一并消失。'
+      + '当前正在浏览的这层目录本身不会被删（免得删掉你正站着的地方）。'
+      + '因为要看整棵子树，这个方式<b>总是递归扫描</b>，并会锁定「含子目录」开关。',
+  })[m] || '';
+  ogLockRecursive();
+  syncDupBox();
+}
+
+/* 合并重复 / 清理空文件夹都得看到整棵子树。不递归只会得出「这一层里没东西＝空」
+   的错误结论，所以锁死开关并写明理由，而不是让用户关掉它拿到一个错的答案 */
+function ogLockRecursive(){
+  const need = (ogMode() === 'merge' || ogMode() === 'empty');
   const rc = $('panRecursive');
   const recBox = $('recBox');
-  if(k === 'empty' || k === 'merge'){
+  if(need){
     if(!panRecLocked){ panRecSaved = rc.checked; panRecLocked = true; }
     rc.checked = true;
     rc.disabled = true;
     recBox.classList.add('locked');
-    recBox.title = '这个功能必须递归扫描：只看一层无法判断子目录里的情况';
+    recBox.title = '这个整理方式必须递归扫描：只看一层无法判断子目录里的情况';
   }else if(panRecLocked){
     panRecLocked = false;
     rc.checked = panRecSaved;
@@ -1443,7 +1468,16 @@ function panTab(k){
     recBox.title = '开启：连同所有子目录一起扫描（文件多时更慢）；关闭：只处理当前这一层';
   }
   $('recChip').classList.toggle('on', rc.checked);   // 点亮状态跟着 checkbox 走
+}
 
+/* 重名策略只对「会往网盘里写名字」的操作有意义：改名、归类移动、合并重复。
+   清理空文件夹是删，跟重名无关，摆着反而让人以为它会影响删除结果 */
+function syncDupBox(){
+  $('dupBox').classList.toggle('hidden',
+    !(panTab_ === 'rename' || (panTab_ === 'organize' && ogMode() !== 'empty')));
+}
+
+function panResetPlan(){
   panOps = []; panTotal = 0;
   pvCurrent = ''; pvCurAge = 0; pvCurDone = false;   // 换了页签就别再认着上一份预览了
   renderPanPreview([], ''); pvPaintStats([]);
@@ -1970,23 +2004,28 @@ async function panPlan(refresh){
       setMsg('panMsg', '请先填写正则表达式', false); return;
     }
   }else if(panTab_ === 'organize'){
-    const dest = $('ogDest').value.trim();
-    if(!dest){ setMsg('panMsg', '请填写归档目标目录', false); return; }
-    body = {...body, kind: 'organize', by: $('ogBy').value, dest};
-  }else if(panTab_ === 'merge'){
-    // recursive 恒为 true：配对 (1) 目录要看整棵子树，后端也会强制递归
-    body = {...body, kind: 'merge_dirs', recursive: true};
+    // 一个页签三种整理方式，挑出来的 kind 记下来：下面的结果文案要按它措辞
+    const m = $('ogMode').value;
+    if(m === 'organize'){
+      const dest = $('ogDest').value.trim();
+      if(!dest){ setMsg('panMsg', '请填写归档目标目录', false); return; }
+      body = {...body, kind: 'organize', by: $('ogBy').value, dest, ondup: panDup};
+    }else if(m === 'merge'){
+      // recursive 恒为 true：配对 (1) 目录要看整棵子树，后端也会强制递归
+      body = {...body, kind: 'merge_dirs', recursive: true, ondup: panDup};
+    }else{
+      // recursive 恒为 true：后端也会强制递归，这里显式写出来免得两头不一致
+      body = {...body, kind: 'empty_dir', recursive: true, skip: $('edSkip').value};
+    }
   }else if(panTab_ === 'delete'){
     body = {...body, kind: 'delete', filters: {
       exts: $('dlExts').value, keywords: $('dlKw').value,
       regex: $('dlRegex').value, min_mb: +$('dlMin').value || 0, max_mb: +$('dlMax').value || 0}};
-  }else if(panTab_ === 'empty'){
-    // recursive 恒为 true：后端也会强制递归，这里显式写出来免得两头不一致
-    body = {...body, kind: 'empty_dir', recursive: true, skip: $('edSkip').value};
   }else{
-    // 五个功能页签都处理完了还走到这里，说明前端状态乱了：别往下跑，老实报出来
+    // 三个功能页签都处理完了还走到这里，说明前端状态乱了：别往下跑，老实报出来
     setMsg('panMsg', '请先选择功能页签', false); return;
   }
+  const planKind = body.kind;          // 结果文案按「真发出去的那种计划」措辞
 
   body.refresh = !!refresh;            // 后端据此跳过「同参数预览」的复用
   $('btnPanPlan').disabled = true;
@@ -2009,9 +2048,14 @@ async function panPlan(refresh){
   pvCurrent = d.preview_id || '';      // 之后点「执行」时回写「已执行」戳用得上
   pvCurAge = d.reused ? (d.preview_age || 0) : 0;
   pvCurDone = false;                   // 能被复用的预览必然没执行过，见预览文件规则
-  const isEmptyTab = panTab_ === 'empty';
-  const isMergeTab = panTab_ === 'merge';
-  const dupTxt = panDup === 'overwrite' ? '⚠ 重名将覆盖' : '重名将跳过';
+  // 按真发出去的那种计划措辞：用户中途把下拉改了也不该改变这份结果的解说
+  const isEmptyTab = planKind === 'empty_dir';
+  const isMergeTab = planKind === 'merge_dirs';
+  // 重名策略说人话：「跳过」不是不搬，是给后来的编个号谁都不丢；
+  // 「覆盖」才是换掉网盘上那个（旧的先进备份区）
+  const dupTxt = panDup === 'overwrite'
+    ? `⚠ 重名覆盖：${d.overwrite || 0} 个会替换掉网盘已有的（旧的先进 _覆盖备份）`
+    : `重名跳过` + (d.auto ? `：${d.auto} 个编成 A (2)` : '（没撞上）');
   // 有目录没扫进去 ⇒ 这次结果不完整。悄悄少扫一个目录比直接报错更危险：
   // 用户会以为「就这些文件」，然后照着这份「完整」清单去改名/删除。
   // 空文件夹那一栏还要额外说清楚：打不开的目录不会被当成空的删掉
@@ -2038,9 +2082,9 @@ async function panPlan(refresh){
           : '')
     : isMergeTab
     ? `发现 ${d.pairs || 0} 对重复目录（X 与 X(1)） → ${panTotal} 条移动`
-      + (d.auto ? ` · ${d.auto} 个撞名已自动编号 (2)(3)` : '')
+      // 撞名数不在这里重复说：末尾的 dupTxt 会连同「跳过/覆盖」一起讲清楚
       + (d.with_subdirs ? ` · ⚠ ${d.with_subdirs} 个副本里还有子目录（保守起见没动，见明细）` : '')
-      + (d.pairs ? ' · 搬空后用「空文件夹」页签清掉空副本' : '')
+      + (d.pairs ? ' · 搬空后切到「清理空文件夹」清掉空壳' : '')
       + (panTotal > panOps.length
           ? ((d.plan_saved || d.plan_ready)
              ? ` · 列表显示前 ${panOps.length} 条，点「执行」会按完整计划分 `
@@ -2052,8 +2096,9 @@ async function panPlan(refresh){
       + (d.exts ? ` · 只处理 ${d.exts} 后缀（其余不改名，也不算进上面这个数）` : '')
       + (d.unchanged ? `（${d.unchanged} 个无变化）` : '')
       // 只保留书名会把「《A》作者：甲」「A - 乙」压成同一个 A，撞车的自动加了 (2)(3)，
-      // 这事必须说出来——悄悄改名字比让人看见更糟
-      + (d.auto ? ` · ${d.auto} 个撞名已自动编号 (2)(3)` : '')
+      // 这事必须说出来——悄悄改名字比让人看见更糟。改名自己能兜住，整理归档那边
+      // 的撞名数由末尾的 dupTxt 讲（要连「跳过/覆盖」一起说），这里不重复
+      + (planKind === 'rename' && d.auto ? ` · ${d.auto} 个撞名已自动编号 (2)(3)` : '')
       // 列表只回传前 2000 条，但点「执行」是按完整计划一批批全跑完的 ——
       // 这话必须写上，否则看到列表只有 2000 行会以为剩下的没扫出来
       + (panTotal > panOps.length

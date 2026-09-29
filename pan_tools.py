@@ -877,7 +877,22 @@ def _safe_folder(name: str) -> str:
     return keep or "noext"
 
 
-def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None):
+def _numbered_name(name: str, taken: set) -> str:
+    """挑一个 taken 里没有的 `原名 (2).ext` / `原名 (3).ext`…
+
+    编号插在后缀前面，保持扩展名不变（`《A》甲.txt` → `《A》甲 (2).txt`）。
+    """
+    base, ext = split_name(name)
+    k = 2
+    while True:
+        cand = f"{base} ({k})" + (f".{ext}" if ext else "")
+        if cand.lower() not in taken:
+            return cand
+        k += 1
+
+
+def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None,
+                        ondup: str = "skip"):
     """files: [{path,name,size,mtime}] → 移动计划
     by: ext（按后缀） / category（按大类） / date（按修改年月 YYYY-MM）
 
@@ -885,34 +900,30 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None):
     两件很实在的事（没有也不影响正确性，只是撞名兜底少一层）：
       1. 已经在目标目录里的文件不再生成操作——它压根不用动，硬搬一次只会在
          自己所在目录里撞自己的名（十万条量级下这是白花花的失败）
-      2. 目标目录里已经有同名文件时，给后来的自动加 (2)(3)… 序号
+      2. 目标目录里已经有同名文件时，按 ondup 处理（见下）
 
-    第 2 条为什么必须做：把十几万个文件拍平塞进 /txt、/mobi 这种目录，撞名是
-    必然的（实测 2000 条里就撞了 56 条）。撞了以后——
-      · 跳过策略：这些文件永远搬不完，每轮都报一批失败，收不了尾
+    ondup 决定「撞到目标目录里**网盘现在就有**的同名文件」时怎么办：
+      skip      （默认）那个旧文件留在原地不动，改给这次要搬的自动编号
+                `A (2).txt` 搬进去。两边数据都在，归档也能收尾
+      overwrite 不编号，直接搬。执行时 apply_plan 会先把被撞的旧文件挪进
+                `_覆盖备份/<时间戳>/` 再搬运，所以是「能找回的替换」。
+
+    注意第 2 条为什么必须做：把十几万个文件拍平塞进 /txt、/mobi 这种目录，撞名
+    是必然的（实测 2000 条里就撞了 56 条）。撞了以后——
+      · 跳过策略：结果符合预期（旧文件没被动），如果不编号它们就永远留在原地，
+        每轮都报一批失败，收不了尾
       · 覆盖策略：旧文件被挤进备份区，同名越多备份区越膨胀
-    加个序号两边都不得罪。移动不能顺带改名，所以撞名的拆成「改名 + 移动」两条，
-    改名在前（apply_plan 本来就先跑 ren 再跑 mov）。
+
+    还有一种撞名跟 ondup 无关：**这份计划内部**互相撞（两个不同目录的 A.txt
+    今晚都要搬进同一个 /txt）。这种情况一律自动编号——那是我们自己刚搬过去的
+    真数据，「覆盖」说的是替掉网盘上的**旧**文件，不是让自己把自己覆盖掉。
+    撞名的移动不拆「改名+移动」两条，move 直接带 newname（一步到位）。
     """
     dest = dest.rstrip("/")
-    used = {d: {n.lower() for n in names} for d, names in (occupied or {}).items()}
-
-    def pick(d, src_dir, name):
-        """挑一个目标目录放得下、源目录也不撞的名字"""
-        pool_d = used.setdefault(d, set())
-        if name.lower() not in pool_d:
-            pool_d.add(name.lower())
-            return name
-        pool_s = used.setdefault(src_dir, set())
-        base, ext = split_name(name)
-        k = 2
-        while True:
-            cand = f"{base} ({k})" + (f".{ext}" if ext else "")
-            if cand.lower() not in pool_d and cand.lower() not in pool_s:
-                pool_d.add(cand.lower())
-                pool_s.add(cand.lower())
-                return cand
-            k += 1
+    overwrite = (ondup == "overwrite")
+    # pre：网盘上现在就有的（扫描得来的实况）；claimed：这份计划已经排进去的
+    pre = {d: {n.lower() for n in names} for d, names in (occupied or {}).items()}
+    claimed = {}
 
     ops = []
     for f in files:
@@ -932,7 +943,23 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None):
         src_dir, _, name = p.rpartition("/")
         if src_dir == d:
             continue                    # 已经在新家了，别再折腾它
-        new = pick(d, src_dir, name)
+        low = name.lower()
+        taken = claimed.setdefault(d, set())
+        pool = pre.setdefault(d, set())
+        hit_pre = low in pool           # 网盘上现在就有一个同名的
+        if hit_pre and overwrite:
+            # 覆盖：名字不改，执行时把被撞的旧文件先挪进备份区。它占的这个
+            # 名字算被消耗掉了——后面再有同名文件搬进来时不能再覆盖第二次，
+            # 那可是我们今晚刚搬过去的数据
+            pool.discard(low)
+            taken.add(low)
+            new = name
+        elif hit_pre or low in taken:
+            new = _numbered_name(name, taken | pool)
+            taken.add(new.lower())
+        else:
+            new = name
+            taken.add(low)
         op = {"op": "move", "path": p, "name": name, "dest": d}
         if new != name:
             # 撞名的直接在移动里改名（move 支持 newname），不再拆「改名+移动」
@@ -940,6 +967,8 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None):
             # 十万条量级下这种连锁失败是灾难（实测 27168 条改名里 25901 条失败）
             op["newname"] = new
             op["auto"] = True
+        if hit_pre and overwrite:
+            op["overwrite"] = True      # 让前端能报出「N 个会替换掉网盘已有的」
         ops.append(op)
     return ops
 
@@ -989,13 +1018,21 @@ def build_delete_plan(files, f: dict):
 # 空目录：找出「整棵子树里连一个文件都没有」的目录
 # ===========================================================================
 
-def build_merge_dirs_plan(entries):
+def build_merge_dirs_plan(entries, ondup: str = "skip"):
     """把 `归档/txt(1)` 这类副本目录合回主目录 → 返回 (ops, info)
 
     背景（2026-09-28 归档目录实况）：按后缀整理几轮下来，归档下 ~40% 是
     `(1)` 副本目录——mobi(1) 40957 个文件、pdf(1) 15861 个、epub(1) 8214 个，
     txt 与 txt(1) 之间有 7710 对同名文件。这些副本让「整理归档」永远收不了尾：
     每轮扫出来的计划都比真实文件多（一对同名文件在扫描里就是两条计划）。
+
+    ondup 决定「主目录里已经有一个同名文件」时怎么办，与整理归档口径一致：
+      skip      （默认）主目录那个不动，把副本里的编成 `A (2)` 搬进去
+      overwrite 不编号，直接搬。执行时旧文件先被挪进 `_覆盖备份/<时间戳>/`
+    计划内部互相撞名（两个副本都要把 A.txt 搬进同一个主目录）时一律自动编号，
+    理由同 build_organize_plan：不能让自己今晚搬过去的数据被自己顶掉。
+
+    两条安全红线：
 
     规则：同一位父目录下同时有 `X` 和 `X(1)`（`X(2)`…`X(9)` 也归到 X）⇒
     副本里的**文件**移进主目录，撞名的自动编号 (2)(3)。两条安全红线：
@@ -1051,36 +1088,44 @@ def build_merge_dirs_plan(entries):
             if d:
                 subdirs_by_dir.setdefault(d, set()).add(e["path"])
 
-    ops, moved, auto, with_sub = [], 0, 0, 0
-    used = {d: {n.lower() for n in names}
-            for d, names in files_by_dir.items()}
+    ops, moved, auto, overwrote, with_sub = [], 0, 0, 0, 0
+    pre = {d: {n.lower() for n in names}
+           for d, names in files_by_dir.items()}
+    claimed = {}
+    overwrite = (ondup == "overwrite")
     for main_path, dup_path in pairs:
-        pool = used.setdefault(main_path, set())
+        pool = pre.setdefault(main_path, set())
+        taken = claimed.setdefault(main_path, set())
         if subdirs_by_dir.get(dup_path):
             with_sub += 1
         for name in files_by_dir.get(dup_path) or []:
-            new = name
-            if name.lower() in pool:
-                b, ext = split_name(name)
-                k = 2
-                while True:
-                    cand = f"{b} ({k})" + (f".{ext}" if ext else "")
-                    if cand.lower() not in pool:
-                        new = cand
-                        break
-                    k += 1
-            pool.add(new.lower())
+            low = name.lower()
+            hit_pre = low in pool
+            if hit_pre and overwrite:
+                pool.discard(low)
+                taken.add(low)
+                new = name
+            elif hit_pre or low in taken:
+                new = _numbered_name(name, pool | taken)
+                taken.add(new.lower())
+            else:
+                new = name
+                taken.add(low)
             op = {"op": "move", "path": f"{dup_path}/{name}", "name": name,
                   "dest": main_path}
             if new != name:
                 op["newname"] = new
                 op["auto"] = True
                 auto += 1
+            if hit_pre and overwrite:
+                op["overwrite"] = True
+                overwrote += 1
             ops.append(op)
             moved += 1
 
     info = {"pairs": len(pairs), "scanned": files_scanned,
-            "moved": moved, "auto": auto, "with_subdirs": with_sub}
+            "moved": moved, "auto": auto, "overwrite": overwrote,
+            "with_subdirs": with_sub}
     return ops, info
 
 
@@ -1518,7 +1563,10 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
             prog["total"] += len(sub)      # 不然进度条会提前顶到 100%
             r2 = [{"path": o["path"], "newname": o["newname"]}
                   for o in sub if o["op"] == "rename"]
-            m2 = [{"path": o["path"], "dest": o["dest"]}
+            # newname 必须带上：撞名编号过的移动如果丢掉新名重试，会撞上
+            # 自己刚搬过去的文件，稳稳一个 -8
+            m2 = [{"path": o["path"], "dest": o["dest"],
+                   **({"newname": o["newname"]} if o.get("newname") else {})}
                   for o in sub if o["op"] == "move"]
             d2 = [o["path"] for o in sub if o["op"] == "delete"]
             f2 = []

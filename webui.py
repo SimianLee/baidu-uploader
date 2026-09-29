@@ -51,6 +51,18 @@ ORGANIZE_LABELS = {"category": "按大类", "ext": "按后缀", "date": "按修�
 OP_TEXT = {"rename": "改名", "move": "移动", "delete": "删除"}
 
 
+def _dup_policy(body) -> str:
+    """取出「重名跳过 / 重名覆盖」，只认这两个值，其余一律按最安全的 skip"""
+    v = str(body.get("ondup") or "skip").lower()
+    return v if v in ("skip", "overwrite") else "skip"
+
+
+def _dup_label(ondup: str) -> str:
+    """预览标题带上重名策略：两份「整理归档·按后缀」如果一份跳过一份覆盖，
+    列表里必须能分清——它们是两份完全不同的计划"""
+    return "（重名覆盖）" if ondup == "overwrite" else "（重名跳过）"
+
+
 def filter_label(f):
     """把删除的筛选条件写成一句人能读的话，用作预览文件标题"""
     f = f or {}
@@ -806,10 +818,11 @@ class Handler(BaseHTTPRequestHandler):
             # 把「影响结果的全部输入」归一化：它既是判断「同参数」的指纹依据（决定能
             # 不能复用旧预览），也随预览文件一起存下来，事后能看清这份计划是拿什么算的
             payload = {"path": p, "recursive": recursive}
-            # exts = 改名页签的「只处理这些后缀」。进指纹是必须的：不然把「只改 txt」
-            # 换成「只改 mobi」时会被当成同参数，直接复用上一份预览——那等于悄悄
-            # 拿错的结果给人看
-            for k in ("mode", "params", "by", "dest", "filters", "skip", "exts"):
+            #   · exts：改名页签的「只处理这些后缀」
+            #   · ondup：整理/合并的「重名跳过 / 重名覆盖」——它**改变计划本身**
+            #     （跳过给后来的自动编号，覆盖不编号直接搬），所以必须进指纹
+            for k in ("mode", "params", "by", "dest", "filters", "skip", "exts",
+                      "ondup"):
                 if k in body:
                     payload[k] = body[k]
             if kind == "empty_dir" or kind == "merge_dirs":
@@ -880,6 +893,9 @@ class Handler(BaseHTTPRequestHandler):
                 if not dest:
                     return self._json({"ok": False, "msg": "请填写归档目标目录"})
                 by = str(body.get("by") or "category")
+                # 重名策略在**生成计划时**就要用：跳过=给后来的自动编号，
+                # 覆盖=不编号、执行时把旧文件先挪进备份区
+                dup_policy = _dup_policy(body)
                 # 撞名检测要用「各目录现在都有什么」。扫描已经把范围内的文件
                 # 全列出来了，现算一份目录→文件名的表，不再多花一次请求
                 occupied = {}
@@ -887,13 +903,15 @@ class Handler(BaseHTTPRequestHandler):
                     fd, _, fn = f["path"].rpartition("/")
                     occupied.setdefault(fd, set()).add(fn)
                 ops = pan_tools.build_organize_plan(files, by, dest, sandbox,
-                                                    occupied)
+                                                    occupied, ondup=dup_policy)
                 # auto 是撞名被自动编号的条数（move 带 newname 一步到位，
                 # 不再拆「改名+移动」两条——两条慢一倍还容易连锁失败）
                 info = {"scanned": len(files),
                         "auto": sum(1 for o in ops
-                                    if o.get("auto") and o["op"] == "move")}
-                label = "整理归档·" + ORGANIZE_LABELS.get(by, by) + " → " + dest
+                                    if o.get("auto") and o["op"] == "move"),
+                        "overwrite": sum(1 for o in ops if o.get("overwrite"))}
+                label = ("整理归档·" + ORGANIZE_LABELS.get(by, by) + " → " + dest
+                         + _dup_label(dup_policy))
             elif kind == "delete":
                 flt = body.get("filters") or {}
                 ops = pan_tools.build_delete_plan(files, flt)
@@ -902,9 +920,11 @@ class Handler(BaseHTTPRequestHandler):
             elif kind == "merge_dirs":
                 # 合并 X(1)/X(2) 副本目录：归档几轮下来攒出的大量 (1) 目录
                 # 是「预览总比真实文件多」的根因——同名对在扫描里就是两条计划
-                ops, minfo = pan_tools.build_merge_dirs_plan(entries)
+                dup_policy = _dup_policy(body)
+                ops, minfo = pan_tools.build_merge_dirs_plan(
+                    entries, ondup=dup_policy)
                 info = {"scanned": len(files), **minfo}
-                label = "合并重复目录"
+                label = "合并重复目录" + _dup_label(dup_policy)
             elif kind == "empty_dir":
                 # skip 由前端给，默认保护本工具自己的备份区；
                 # unreadable 是这次扫不进去的目录——「不知道里面有什么」绝不能
@@ -961,9 +981,7 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(ops, list) or not ops:
                 return self._json({"ok": False, "msg": "没有要执行的操作"})
             # 重名策略：skip 跳过（默认）/ overwrite 覆盖，其余值一律按 skip
-            ondup = str(body.get("ondup") or "skip").lower()
-            if ondup not in ("skip", "overwrite"):
-                ondup = "skip"
+            ondup = _dup_policy(body)
             # 分批提交：百度 filemanager 一次吃不下太多，2000 条一批连着跑完，
             # 中途可以叫停。总条数不再设上限——点执行就是要把扫出来的全做完。
             CHUNK = 2000
