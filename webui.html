@@ -97,6 +97,11 @@
   .sec::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--line),transparent)}
   .sec + .row{margin-bottom:2px}
   .row{display:flex;gap:12px;flex-wrap:wrap}
+  /* 独立成一行的勾选项（「保留分册」那类开关）。gap 调宽一点，两个选项挨太近容易看串行 */
+  .chk{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;
+       color:var(--muted2);cursor:pointer;user-select:none;margin-right:14px}
+  .chk input{margin:0;cursor:pointer;accent-color:var(--accent)}
+  .chk:hover{color:var(--text)}
   .field{flex:1;min-width:160px;margin-bottom:13px}
   .field.sm{flex:0 0 calc(25% - 9px);min-width:112px}
   .field label{display:block;font-size:12.5px;color:#b6bfd4;margin-bottom:5px;font-weight:500}
@@ -696,6 +701,7 @@
         <div class="tabs">
           <button class="tab on" id="tabRename" onclick="panTab('rename')">批量改名</button>
           <button class="tab" id="tabOrganize" onclick="panTab('organize')">整理归档</button>
+          <button class="tab" id="tabCsv" onclick="panTab('csv')">按表改名</button>
           <button class="tab" id="tabDelete" onclick="panTab('delete')">批量删除</button>
         </div>
 
@@ -746,6 +752,17 @@
                      title="只对这些后缀的文件改名，其余的一律不动。逗号分隔，大小写和点号都不挑">
             </div>
           </div>
+          <!-- 只保留书名时的分册处理开关（其他模式不显示） -->
+          <div class="row hidden" id="rnVolBox">
+            <label class="chk" title="套书被分成上下部/第几部时，把「第几部」留在新名字末尾，不然《XX》第一部和第二部会压成同一个名字">
+              <input type="checkbox" id="rnKeepVol" checked>
+              <span>保留分册（上部/下部/第1部…/番外）</span>
+            </label>
+            <label class="chk" title="《白蔷薇之二》这类系列序号。真实数据里「之X」多数是文章序号不是分册，容易串味，默认关">
+              <input type="checkbox" id="rnKeepSeries">
+              <span>同时保留系列序号（之2/之3…）</span>
+            </label>
+          </div>
           <div class="hint" id="rnHint">把文件名里的某串替换成另一串（大小写不敏感）。</div>
         </div>
 
@@ -779,6 +796,30 @@
             </div>
           </div>
           <div class="hint" id="ogHint"></div>
+        </div>
+
+        <!-- 按表改名：导出去的 CSV 在 Excel 里改好了再喂回来 -->
+        <div class="panel" id="paneCsv">
+          <div class="row">
+            <div class="field sm" style="flex:1 1 320px">
+              <label>选择 CSV 表格</label>
+              <input type="file" id="csvFile" accept=".csv,.txt" onchange="csvPick(this.files[0])">
+            </div>
+            <div class="field sm" style="flex:0 0 auto">
+              <label>&nbsp;</label>
+              <div class="btnbar" style="align-items:flex-end">
+                <button class="btn ghost sm" id="btnCsvDo" onclick="csvImport()" disabled>生成预览</button>
+                <button class="btn ghost sm" onclick="csvSample()">下载模板</button>
+              </div>
+            </div>
+          </div>
+          <div class="hint" id="csvHint">
+            把导出去的改名表格（<code>预览_xxx.csv</code>）在 Excel 里改好「新文件名」这一列，再选回来执行。<br>
+            表格只需要两列：<b>原路径</b>（或「路径」「文件名」）和 <b>新文件名</b>（或「新名」「目标名」）；没有表头也认，第 1 列当路径、第 2 列当新名。
+            不在网盘根目录范围内的行、新名字里带斜杠的行会被拦下并报出来。<br>
+            这个页签<b>不需要</b>「生成预览」按钮旁边的那些模式——名字就是表格里写好的，改完后照常在下方预览、执行。
+          </div>
+          <div class="hint" id="csvStat" style="color:#7fa0ff"></div>
         </div>
 
         <!-- 删除 -->
@@ -1412,6 +1453,7 @@ function ogMode(){
 function panTab(k){
   panTab_ = k;
   [['rename','tabRename','paneRename'], ['organize','tabOrganize','paneOrganize'],
+   ['csv','tabCsv','paneCsv'],
    ['delete','tabDelete','paneDelete']].forEach(([key, tab, pane]) => {
     $(tab).classList.toggle('on', key === k);
     $(pane).classList.toggle('on', key === k);
@@ -1499,6 +1541,7 @@ function panModeChange(){
   show('rnTplBox',    m === 'serial');
   show('rnPatternBox', m === 'regex');
   show('rnRepl2Box',   m === 'regex');
+  show('rnVolBox',     m === 'title');
   $('rnHint').textContent = {
     replace: '把文件名里的某串替换成另一串（大小写不敏感）。',
     affix:   '统一加前缀 / 后缀，扩展名不受影响。',
@@ -1506,8 +1549,8 @@ function panModeChange(){
     regex:   '正则作用于「文件名（不含扩展名）」，可用 \\1 \\2 引用捕获组。',
     clean:   '自动去掉网址、广告词、多余括号和空格；清理后为空则保留原名。',
     title:   '按 书名号 → 残缺书名号 → 作者标记 → 前导标签 → 空格-空格 的次序提取书名，'
-             + '再清掉尾部标注（全本/完结/番外/TXT/卷次）。'
-             + '五种信号都没命中就原样保留——宁可不动，也不乱改。'
+             + '再清掉尾部标注（全本/完结/TXT）。'
+             + '五种信号都没命中就原样保留——宁可不动，也不乱改。',
   }[m] || '';
 }
 
@@ -1755,6 +1798,103 @@ function execPaint(d, sec){
   if(bs) bs.classList.remove('hidden');
 }
 
+/* ---------- 按表改名（CSV 导入） ----------
+   典型用法：把改名预览导出成 CSV → 在 Excel 里逐行定好「新文件名」→ 喂回来执行。
+   这样几万条人工判断过的名字，不必在界面里一条条操作。
+   这里不玩任何「聪明」的花样：表格里写什么就改成什么，与批量改名那五个模式无关。 */
+let csvText = '';
+
+function csvPick(f){
+  csvText = '';
+  const btn = $('btnCsvDo'), stat = $('csvStat');
+  if(!f){ btn.disabled = true; stat.textContent = ''; return; }
+  const rd = new FileReader();
+  rd.onload = () => {
+    csvText = String(rd.result || '');
+    // 大量替换字符 U+FFFD = 用 UTF-8 解 GBK 失败的典型症状，退回国标再读一次
+    const bad = (csvText.match(/\uFFFD/g) || []).length;
+    if(bad > 2){
+      const rd2 = new FileReader();
+      rd2.onload = () => {
+        csvText = String(rd2.result || '');
+        finish();
+      };
+      rd2.readAsText(f, 'gb18030');
+      return;
+    }
+    finish();
+  };
+  rd.onerror = () => {
+    stat.textContent = '这个文件读不出来';
+    btn.disabled = true;
+  };
+  rd.readAsText(f, 'utf-8');
+
+  function finish(){
+    const lines = csvText.split(/\r?\n/).filter(l => l.trim()).length;
+    stat.textContent = `已选 ${f.name}：${lines} 行，点「生成预览」看会被改成什么样`;
+    btn.disabled = !lines;
+    setMsg('panMsg', '', null);
+  }
+}
+
+async function csvImport(){
+  if(!csvText.trim()){ setMsg('panMsg', '请先选择一个 CSV 文件', false); return; }
+  const btn = $('btnCsvDo'), stat = $('csvStat');
+  btn.disabled = true;
+  try{
+    const d = await api('/api/pan_import_csv', {csv: csvText});
+    if(!d.ok){
+      setMsg('panMsg', d.msg || '表格里没有可用的改名', false);
+      stat.textContent = (d.errors || []).slice(0, 3).join('；');
+      return;
+    }
+    // 与 pan_plan 的返回同形：预览渲染、执行按钮、预览文件下拉全部照原样复用
+    panOps = d.ops || [];
+    panTotal = d.total || 0;
+    renderPanPreview(panOps, '');
+    pvPaintStats([
+      {n: panTotal, label: '条改名', cls: panTotal ? 'ok' : ''},
+      {n: d.scanned || 0, label: '表格行数', cls: ''},
+      {n: d.skipped || 0, label: '无需改动', cls: ''},
+    ]);
+    $('btnPanApply').disabled = !panOps.length;
+    setPlanReady(!!d.plan_saved);
+    if(typeof pvRefresh === 'function') pvRefresh(d.preview_id || '');
+    const errs = d.errors || [];
+    setMsg('panMsg',
+      `表格里 ${d.scanned} 行 → ${panTotal} 条改名`
+      + (errs.length ? ` ⚠ ${errs.length} 条被拦截：${errs[0].slice(0, 60)}` : ''),
+      errs.length ? null : true);
+    stat.textContent = `已生成预览：${panTotal} 条`
+      + (d.plan_saved ? '（完整计划已存，可一次执行全部）' : '');
+  }finally{
+    btn.disabled = !csvText;
+  }
+}
+
+/* 模板：列名写清楚，后端 `csv_cols` 才能稳稳认出来 */
+function csvSample(){
+  const rows = [
+    ['序号', '原路径', '新文件名'],
+    ['1', '/apps/baidu_uploader/小说/《三体》第一部.txt', '三体 第1部.txt'],
+    ['2', '/apps/baidu_uploader/小说/银河英雄传说(上).txt', '银河英雄传说 上部.txt'],
+  ];
+  const csv = '\ufeff' + rows.map(r => r.join(',')).join('\r\n') + '\r\n';
+  downloadText('按表改名_模板.csv', csv);
+}
+
+/* 下载一段文本。统一加 BOM：Excel 认它是 UTF-8，不然中文全是乱码。
+   导出预览表格和「按表改名」模板都走这里 */
+function downloadText(filename, text){
+  const url = URL.createObjectURL(
+    new Blob(['\ufeff' + String(text || '')], {type: 'text/csv;charset=utf-8'}));
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
 /* ---------- 预览文件（本地存盘，避免反复重扫网盘） ----------
    每点一次「生成预览」都会把计划写进 data/previews/ 下的一个文件；带了「指纹」，
    同参数再点一次直接复用，一个网盘请求都不发。下面是这份文件列表的全部交互：
@@ -1965,13 +2105,9 @@ async function pvExportCsv(){
   setMsg('panMsg', '正在生成表格…', null);
   const d = await api('/api/preview_export', {id});
   if(!d || !d.ok){ setMsg('panMsg', (d && d.msg) || '导出失败', false); return; }
-  const blob = new Blob(['\ufeff' + (d.text || '')], {type: 'text/csv;charset=utf-8'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = d.filename || `预览_${id}.csv`;
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
-  setMsg('panMsg', `已导出 ${d.count} 条 → ${a.download}`
+  const fn = d.filename || `预览_${id}.csv`;
+  downloadText(fn, d.text || '');
+  setMsg('panMsg', `已导出 ${d.count} 条 → ${fn}`
     + (d.source === 'full' ? '' : '；⚠ 这份没有完整计划，导出的只是存下来的那部分操作'),
     true);
 }
@@ -1998,7 +2134,10 @@ async function panPlan(refresh){
                 template: $('rnTpl').value},
       regex:   {pattern: $('rnPattern').value, repl: $('rnRepl2').value},
       clean:   {},
-      title:   {}
+      // 分册/系列要不要留，得发给后端：它俩改变结果，也必须进指纹，
+      // 不然改了开关还拿上一份预览顶上，用户会以为开关没生效
+      title:   {keep_volume: $('rnKeepVol').checked,
+                keep_series: $('rnKeepSeries').checked}
     })[m];
     if(m === 'replace' && !body.params.find){
       setMsg('panMsg', '请先填写「查找」内容', false); return;
@@ -2024,8 +2163,12 @@ async function panPlan(refresh){
     body = {...body, kind: 'delete', filters: {
       exts: $('dlExts').value, keywords: $('dlKw').value,
       regex: $('dlRegex').value, min_mb: +$('dlMin').value || 0, max_mb: +$('dlMax').value || 0}};
+  }else if(panTab_ === 'csv'){
+    // 这个页签不扫网盘：名字就是表格里写好的，用页签内的「生成预览」按钮
+    setMsg('panMsg', '「按表改名」请用上面那个「生成预览」按钮：'
+      + '名字是表格里写好的，不需要下面的模式参数和扫描', null); return;
   }else{
-    // 三个功能页签都处理完了还走到这里，说明前端状态乱了：别往下跑，老实报出来
+    // 各功能页签都处理完了还走到这里，说明前端状态乱了：别往下跑，老实报出来
     setMsg('panMsg', '请先选择功能页签', false); return;
   }
   const planKind = body.kind;          // 结果文案按「真发出去的那种计划」措辞

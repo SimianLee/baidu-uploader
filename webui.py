@@ -578,6 +578,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._preview_ops(body)
         if path == "/api/preview_export":
             return self._preview_export(body)
+        if path == "/api/pan_import_csv":
+            return self._pan_import_csv(body)
 
         # ---------------- 本地改名（上传前预处理，动的是磁盘上的真文件）----------------
         if path == "/api/local_rename_preview":
@@ -712,6 +714,159 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True, "text": buf.getvalue(), "count": len(ops),
                            "source": src, "id": pid,
                            "filename": f"预览_{pid}.csv"})
+
+    # ---------------------------------------------------------------
+    # 按 CSV 表格改名
+    # ---------------------------------------------------------------
+    @staticmethod
+    def _csv_cols(headers):
+        """在表头里认出「原路径 / 新文件名」两列的下标，认不出返回 None
+
+        兼容三套列名：
+          · 本面板导出的：原路径 / 新文件名
+          · 常见表格：路径、原名 + 新名、目标名、改名后
+          · 完全没表头或表头不认识的两列表格：第 1 列当路径、第 2 列当新名
+        """
+        h = [(x or "").strip().lstrip("﻿").lower() for x in headers]
+        new_i = None
+        for want in ("新文件名", "目标文件名", "新名", "目标名", "改名后", "改为",
+                     "新名称"):
+            if want in h:
+                new_i = h.index(want)
+                break
+        if new_i is None:
+            for i, x in enumerate(h):
+                if "新" in x and ("名" in x or "称" in x):
+                    new_i = i
+                    break
+        old_i = None
+        for want in ("原路径", "完整路径", "路径", "原文件名", "文件名", "原名",
+                     "旧名", "原名称"):
+            if want in h:
+                old_i = h.index(want)
+                break
+        if new_i is not None and old_i is None:
+            for i, x in enumerate(h):
+                if i != new_i and ("路径" in x or "名" in x):
+                    old_i = i
+                    break
+        if new_i is None and len(h) >= 2:          # 两列裸表：1=原 2=新
+            return 0, 1
+        if old_i is not None and new_i is not None:
+            return old_i, new_i
+        return None
+
+    @classmethod
+    def _parse_rename_csv(cls, text, sandbox):
+        """把 CSV 文本解析成改名计划，返回 dict（不含 HTTP 包装，便于直接测）
+
+        {ops, errs, skipped, rows} 。只做「认列 + 拼 ops + 拦非法」，落盘由调用方负责。
+        """
+        import csv as _csv
+        import io as _io
+        import pan_tools
+
+        rows = [r for r in _csv.reader(_io.StringIO(text.lstrip("﻿")))
+                if any((c or "").strip() for c in r)]
+        if not rows:
+            return {"ops": [], "errs": ["表格里没有数据行"], "skipped": 0, "rows": 0}
+
+        hdr = rows[0]
+        cols = cls._csv_cols(hdr)
+        head_named = cols is not None and any(
+            (c or "").strip().lstrip("﻿").lower()
+            in ("原路径", "路径", "新文件名", "文件名", "序号") for c in hdr)
+        if cols is None:
+            if len(hdr) < 2:
+                return {"ops": [], "skipped": 0, "rows": len(rows),
+                        "errs": ["认不出表格结构：至少要「原路径」和「新文件名」两列"]}
+            cols, head_named = (0, 1), False
+        old_i, new_i = cols
+        body_rows = rows[1:] if head_named else rows
+
+        ops, errs, skipped = [], [], 0
+        for n, r in enumerate(body_rows, 1):
+            if max(old_i, new_i) >= len(r):
+                errs.append(f"第 {n} 行：列数不够（只有 {len(r)} 列）")
+                continue
+            path = (r[old_i] or "").strip()
+            newname = (r[new_i] or "").strip()
+            if not path or not newname:
+                skipped += 1
+                continue
+            path = "/" + path.lstrip("/")
+            # 新名字里带 / 是借改名偷偷跨目录挪文件，而且 validate_plan 不查这一项
+            if "/" in newname or "\\" in newname or newname in (".", ".."):
+                errs.append(f"第 {n} 行：新文件名不能含斜杠（{newname[:30]}）")
+                continue
+            if path.rsplit("/", 1)[-1] == newname:
+                skipped += 1                 # 新旧同名：没必要凑一条操作
+                continue
+            ops.append({"op": "rename", "path": path,
+                        "name": path.rsplit("/", 1)[-1], "newname": newname})
+
+        # 越界 / 非法一律拦下。CSV 是外部输入，比自家生成的操作更不可信
+        good, verrs = pan_tools.validate_plan({"ops": ops}, sandbox)
+        errs.extend(verrs)
+        return {"ops": good, "errs": errs, "skipped": skipped,
+                "rows": len(body_rows), "parsed": len(ops)}
+
+    def _pan_import_csv(self, body):
+        """读一张 CSV，把它变成一个改名计划（**不需要网盘授权**：先生成预览再说）
+
+        典型用法：先用本面板把某次改名导出成表格，在 Excel 里逐行修好「新文件名」，
+        再导回来执行——几万条手工定过的名字，不必在界面里一条条点。
+
+        只认 rename：CSV 能表达的只有「哪个文件叫哪个新名字」。移动/删除需要「目标
+        目录」这类额外信息，靠猜反而危险。截断预览 2000 条、完整计划照存，
+        与 /api/pan_plan 完全同形。
+        """
+        import csv as _csv
+        import io as _io
+        import pan_tools
+        text = str(body.get("csv") or "")
+        if not text.strip():
+            return self._json({"ok": False, "msg": "表格是空的"})
+        try:
+            cfg = json.loads(CONFIG.read_text(encoding="utf-8-sig")) if CONFIG.exists() else {}
+        except Exception:
+            cfg = {}
+        sandbox = str(cfg.get("remote_dir") or "/apps/baidu_uploader").rstrip("/")
+
+        parsed = self._parse_rename_csv(text, sandbox)
+        errs = parsed["errs"]
+        good = parsed["ops"]
+        skipped = parsed["skipped"]
+        if not good:
+            # 失败也把 skipped 带上：整张表都是「新旧同名」时，
+            # 光说「没解析出任何改名」会让人以为是表格坏了
+            return self._json(
+                {"ok": False, "skipped": skipped, "rows": parsed["rows"],
+                 "msg": (errs[0][:100] if errs else
+                         f"没解析出任何要改名的行：{skipped} 行都是空行或新旧同名"),
+                 "errors": errs[:10]})
+
+        full = len(good)
+        nrows = parsed["rows"]
+        payload = {"kind": "import_csv", "csv_rows": nrows}
+        label = f"按表改名 · CSV {nrows} 行"
+        rec = preview_store.save_preview(
+            PROJ, "import_csv", good[:2000],
+            {"total": full, "scanned": nrows, "skipped": skipped},
+            payload, sandbox=sandbox, path="", label=label)
+        resp = {"ok": True, "ops": good[:2000], "total": full,
+                "scanned": nrows, "skipped": skipped,
+                "reused": False, "plan_saved": False, "errors": errs[:10]}
+        if rec:
+            resp["plan_saved"] = preview_store.save_full_plan(
+                PROJ, rec["id"], good, "import_csv", payload, label)
+            resp.update(preview_id=rec["id"], preview_ts=rec["ts"], preview_age=0)
+        if errs:
+            blocked = max(0, (parsed.get("parsed") or 0) - full)
+            resp["msg"] = (f"解析出 {full} 条改名"
+                           + (f"，拦截 {blocked} 条非法/越界的" if blocked else "")
+                           + f"：{errs[0][:70]}")
+        return self._json(resp)
 
     # ---------------------------------------------------------------
     # 本地改名：预览 → 执行 → （改错了）回退

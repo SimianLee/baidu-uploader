@@ -612,7 +612,11 @@ _TITLE_TAIL_BARE = re.compile(
 _RE_AUTHOR = re.compile(
     r"[\s\-_.·]*\s*(?:作者|著者)\s*[：:]?\s*"
     r"|[\s\-_.·]*\s*(?<![A-Za-z])(?:BY|By|by)\s*[：:]\s*"
-    r"|[\s\-_.·]*\s*(?<![A-Za-z])(?:BY|By|by)\s*(?=[\u4e00-\u9fff])")
+    r"|[\s\-_.·]*\s*(?<![A-Za-z])(?:BY|By|by)\s*(?=[\u4e00-\u9fff])"
+    # 资源站的典型写法「书名_by_作者」，真实数据里就有
+    # （怎见浮生不若梦_BY_seeter）。这里要求 by 两侧**都紧贴** _ - . ，
+    # 不含空格——空格那一律放过，否则《Stand by Me》会被啃成《Stand》
+    r"|(?<![A-Za-z])[_\-.]{1,2}(?:BY|By|by)[_\-.]{1,2}")
 
 _RE_LEAD_TAG = re.compile(r"^\s*[\(\[【][^\)\]】]{0,24}[\)\]】]\s*")
 # 「空格-横杠-空格」是作者分隔符的常见写法：边荒传说 - 黄易 / Rework - Jason Fried
@@ -621,16 +625,140 @@ _RE_SEP = re.compile(r"\s+[-—–]\s+")
 # 前导序号：16、书名 → 书名。分隔符必须显式存在，否则「24个比利」会被啃成「个比利」
 _RE_LEAD_NUM = re.compile(r"^\s*\d{1,4}\s*[、.．,，]\s*(?=[^\d\s])")
 _RE_LEAD_JUNK = re.compile(r"^[\s\-_—–、,，.。·@]+|[\s\-_—–、,，.。·@]+$")
+
+
+# ---------------------------------------------------------------------------
+# 分册信息（上/中/下、第X部、番外、系列之X）
+#
+# 为什么要有这一段：早期 title 模式把「上部/下部/第X部/番外」当成标注**整组丢掉**。
+# 用户 2.5 万条真实数据里就这样丢了 3029 条（12%），最典型的是
+#   F怎见浮生不若梦（第一部）/（第二部）/（第三部）＋番外  四册
+#   → 全部压成「F怎见浮生不若梦」，再被撞名编号成 (2)(3)(4)
+# 彻底分不清哪本是哪本。现在改成**抽出来、规范化、拼回书名末尾**。
+#
+# 规范化：上下写作中文PrettyBooks的通例写法「上部/中部/下部」，序数统一成阿拉伯
+# （利于排序：第2部 < 第10部），番外单列。
+# ---------------------------------------------------------------------------
+
+_CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7,
+           "八": 8, "九": 9, "十": 10}
+
+# 分册写法 → 规范串。顺序=优先级，命中即返回。
+_RE_VOL_UP = re.compile(r"^上[部册卷篇]?$")
+_RE_VOL_MID = re.compile(r"^中[部册卷篇]?$")
+_RE_VOL_DOWN = re.compile(r"^下[部册卷篇]?$")
+_RE_VOL_NTH = re.compile(r"^第?([\d一二三四五六七八九十]{1,3})[部卷册集篇]$")
+# 括号内容是「XXX番外YYY」且整体很短 → 判为番外（把 (全本+番外)、(三部全+番外)
+# 这类连同里面那些「全」一起整组吃掉，否则会留下「(三部全)」这种碎括号）
+_RE_VOL_SIDE = re.compile(r"^[^\n]{0,8}?番外[^\n]{0,6}$")
+# 系列序号：(白蔷薇之二)、(中国通史之三)。要求最后是「之X」，前面允许任意短前缀
+_RE_VOL_SERIES = re.compile(r"^.{0,12}?之([\d一二三四五六七八九十]{1,2})$")
+
+
+def _norm_cn_num(s: str) -> str:
+    """序数统一成阿拉伯：二→2、十一→11、二十→20。已是数字或认不出则原样返回"""
+    if s.isdigit():
+        return s
+    if s in _CN_NUM:
+        return str(_CN_NUM[s])
+    if len(s) == 2 and s.startswith("十"):          # 十一 → 11
+        return str(10 + _CN_NUM.get(s[1], 0))
+    if len(s) == 2 and s.endswith("十"):            # 二十 → 20
+        return str(_CN_NUM.get(s[0], 0) * 10)
+    return s
+
+
+def parse_volume_token(inner: str, keep_series: bool = False):
+    """把一对括号里的**内部文本**解释成分册标记；不是分册就返回 None
+
+    inner: 不含括号本身的文本，例如「上」「第一部」「全本+番外」「白蔷薇之二」
+    """
+    t = inner.strip()
+    if not t:
+        return None
+    if _RE_VOL_UP.fullmatch(t):
+        return "上部"
+    if _RE_VOL_MID.fullmatch(t):
+        return "中部"
+    if _RE_VOL_DOWN.fullmatch(t):
+        return "下部"
+    m = _RE_VOL_NTH.fullmatch(t)
+    if m:
+        return f"第{_norm_cn_num(m.group(1))}部"
+    if _RE_VOL_SIDE.fullmatch(t):
+        return "番外"
+    if keep_series:
+        m = _RE_VOL_SERIES.fullmatch(t)
+        if m:
+            return f"之{_norm_cn_num(m.group(1))}"
+    return None
+
+
+# 一对完整的括号（内容里不能再含括号，避免跨组纠缠）
+_RE_PAREN_GRP = re.compile(r"[（(【\[]([^（()）\[\]【】]{0,40})[）)】\]]")
+# 不带括号的裸写：XX+番外 / XX+番外2则 / 结尾的番外
+_RE_BARE_SIDE = re.compile(r"[+＋]\s*番外[\d零一二三四五六七八九十]{0,3}\s*则?"
+                           r"|\s番外[\d零一二三四五六七八九十]{0,3}\s*则?\s*$")
+
+_VOL_ORDER = {"上部": 0, "中部": 1, "下部": 2}
+
+
+def extract_volumes(s: str, keep_series: bool = False):
+    """抽出名字里的分册标记，返回 (删干净后的名字, 标记列表)
+
+    会把命中的括号**整组删掉**（连同括号），这样后续级联清理看到的是干净的书名。
+    多个标记按「上中部 → 第X部 → 之X → 番外」排序，去重保序。
+    """
+    found = []
+
+    def take(m):
+        tok = parse_volume_token(m.group(1), keep_series)
+        if tok:
+            found.append(tok)
+            return ""
+        return m.group(0)                       # 不是分册，原样留着
+
+    s = _RE_PAREN_GRP.sub(take, s)
+    if _RE_BARE_SIDE.search(s):
+        s = _RE_BARE_SIDE.sub("", s)
+        found.append("番外")
+
+    if not found:
+        return s, []
+
+    def key(t):
+        if t == "番外":
+            return 90
+        if t.startswith("之"):
+            return 80
+        if t.startswith("第"):
+            return 50
+        return _VOL_ORDER.get(t, 60)
+
+    seen, uniq = set(), []
+    for t in found:
+        if t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    uniq.sort(key=key)
+    return s, uniq
 # 「整个名字就是一对括号」的情况。内容里必须不含任何括号字符——否则
 # 首尾各是一个括号的 [棋魂]因为爱你 作者：一叶（亮光） 会被错拆成
 # 「棋魂]因为爱你 作者：一叶（亮光」（内容可以吞掉中间的 ]，fullmatch 照样成立）
 _RE_WHOLE_WRAP = re.compile(r"[（(\[【]\s*([^（()）\[\]【】]{1,60}?)\s*[）)\]】]")
 
 
-def title_name(name: str) -> str:
+def title_name(name: str, keep_volume: bool = True,
+               keep_series: bool = False) -> str:
     """title 模式：把小说文件名清成「只有书名」，无变化时返回原名
 
+    keep_volume: 保留分册（上部/中部/下部/第X部/番外），拼到书名末尾。默认开。
+                 关掉就退回老行为——当标注整组丢掉。
+    keep_series: 连带保留系列序号（白蔷薇之二 → 之二）。默认关：真实数据里
+                 「之X」有 500 条，多数是文章序号而非分册，留着容易串味。
+
     级联顺序（先强信号，后弱信号）：
+      0. 抽分册标记（先下手：书名号提取会把书名外的「（上）」砍掉）
       1. 完整书名号《…》→ 取括号内。天然跳过《《一光年之恋》》这种错套：
          因为要求内容里不含书名号，第一个能配上的其实是内层那一对。
       2. 残缺书名号 → 取最靠左的那个符号，右残取它前面、左残取它后面。
@@ -638,7 +766,7 @@ def title_name(name: str) -> str:
       3. 作者标记（作者：/著者/BY：）→ 取标记之前的部分
       4. 前导标签 [悬疑] / 【类型】 → 去掉
       5. 「空格-空格」作者分隔 → 取前面：边荒传说 - 黄易 / Rework - Jason Fried
-    最后统一清尾部标注（全本/完结/番外/TXT/卷次，整组丢）。
+    之后清尾部标注（全本/完结/TXT/残留卷次），最后把分册标记拼回末尾。
     清成空名字时返回原名——宁可保留脏名字，也不能产生无名文件。
     """
     base, ext = split_name(name)
@@ -652,6 +780,13 @@ def title_name(name: str) -> str:
     s = s.strip()
     if not s:
         return name
+
+    # 0. 抽分册。必须在提取书名号**之前**做：分册标记绝大多数挂在书名号外面
+    #    （《幻世》第一部 / 幻世（上）.txt），先取书名就把它砍没了。
+    vols = []
+    if keep_volume:
+        s, vols = extract_volumes(s, keep_series)
+        s = s.strip()
 
     m = re.search(r"《([^《》]{1,80})》", s)
     if m:
@@ -698,6 +833,10 @@ def title_name(name: str) -> str:
 
     if not s:
         return name
+    # 分册标记拼回末尾。用空格分隔、放在最后，既保留信息又不打断书名本身。
+    # 「42码玻璃鞋（第一部）+番外」→「42码玻璃鞋 第1部 番外」
+    if vols:
+        s = f"{s} {' '.join(vols)}"
     return f"{s}.{ext}" if ext else s
 
 
@@ -739,7 +878,9 @@ def rename_one(name: str, mode: str, p: dict, index: int = 0) -> str:
         return clean_name(name)
 
     elif mode == "title":
-        return title_name(name)
+        return title_name(name,
+                          keep_volume=p.get("keep_volume", True),
+                          keep_series=p.get("keep_series", False))
 
     else:
         return name
