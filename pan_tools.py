@@ -42,6 +42,17 @@ FILEMANAGER = "https://pan.baidu.com/rest/2.0/xpan/file?method=filemanager"
 LIST_URL = "https://pan.baidu.com/rest/2.0/xpan/file?method=list"
 CREATE_URL = "https://pan.baidu.com/rest/2.0/xpan/file?method=create"
 
+# 备份区的名字与位置：**全项目只有这一个**。凡是要被"弄掉"的东西——
+# 重名覆盖顶下来的旧文件、批量删除的文件——统统搬进 <沙盒>/_覆盖备份/时间戳/，
+# 不在当前操作的目录里另起炉灶（那样每整理一个目录就散落一个备份区，找不回来
+# 也清不掉）。改这两行就等于改全局，别在任何地方再手拼一遍 "_覆盖备份"。
+BACKUP_DIR_NAME = "_覆盖备份"
+
+
+def backup_root(sandbox: str) -> str:
+    """备份区根目录 = 沙盒根/_覆盖备份。各处只准调这个函数拿路径"""
+    return f"{str(sandbox).rstrip('/')}/{BACKUP_DIR_NAME}"
+
 # 百度 filemanager 单次最多提交多少个（留余量，官方上限 1000）
 BATCH_LIMIT = 100
 
@@ -968,6 +979,23 @@ def filter_by_exts(files, exts):
     return keep, want
 
 
+def strip_backup(items):
+    """把备份区里的条目从计划素材里剔掉。
+
+    备份区是「留后路」的地方，不是待整理的文件：扫整个沙盒做整理归档/批量改名
+    时，如果不排除它，昨晚刚备份进去的旧文件今晚又被搬进 归档/txt —— 备份等于
+    白做，还平白多出一堆撞名。所以改名/归档/删除/合并重复一律不看备份区。
+    （清理空文件夹另有 skip 参数，默认也是保护它）
+    """
+    out = []
+    for it in items or []:
+        p = str(it.get("path") or "")
+        if f"/{BACKUP_DIR_NAME}/" in f"{p}/" or p.endswith("/" + BACKUP_DIR_NAME):
+            continue
+        out.append(it)
+    return out
+
+
 def build_rename_plan(files, mode: str, params: dict, occupied=None,
                       ondup: str = "skip"):
     """files: [{path, name, size}] → 返回 (ops, unchanged, auto)
@@ -985,6 +1013,7 @@ def build_rename_plan(files, mode: str, params: dict, occupied=None,
     （A.txt → a.txt）会被自己撞到（网盘大小写不敏感），误编成「a (2).txt」。
     本地改名那边同理排除，见 _dedupe_against_disk 的 renaming。
     """
+    files = strip_backup(files)
     ops, unchanged = [], []
     for i, f in enumerate(files):
         new = rename_one(f["name"], mode, params, i)
@@ -1106,6 +1135,7 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None,
     真数据，「覆盖」说的是替掉网盘上的**旧**文件，不是让自己把自己覆盖掉。
     撞名的移动不拆「改名+移动」两条，move 直接带 newname（一步到位）。
     """
+    files = strip_backup(files)
     dest = dest.rstrip("/")
     overwrite = (ondup == "overwrite")
     # pre：网盘上现在就有的（扫描得来的实况）；claimed：这份计划已经排进去的
@@ -1223,7 +1253,7 @@ def filter_files(files, f: dict):
 
 
 def build_delete_plan(files, f: dict):
-    hits = filter_files(files, f)
+    hits = filter_files(strip_backup(files), f)
     return [{"op": "delete", "path": h["path"], "name": h["name"],
              "size": h.get("size", 0)} for h in hits]
 
@@ -1260,6 +1290,7 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
     info = {pairs 合并对数, scanned 扫描文件数, moved 待移动文件数,
             auto 撞名自动编号数, with_subdirs 含子目录的副本数}
     """
+    entries = strip_backup(entries)
     # 按父目录分组：{父: {目录名: 路径}}
     by_parent = {}
     for e in entries:
@@ -1649,23 +1680,32 @@ def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict,
     return done, rest + still
 
 
-def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
+def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
+               backup_delete: bool = True):
     """按类型分组执行计划 → 返回统计
 
     ondup: rename/move 撞到同名文件时的策略
            skip      跳过该条，保留网盘上已有的文件（默认，安全）
            overwrite 覆盖。注意：百度 filemanager 的 ondup 参数对 rename/move
                      不生效（实测撞名一律报 -8），所以覆盖用「先挪备份再执行」
-                     实现：被撞的旧文件移动到 沙盒/_覆盖备份/时间戳/原目录结构
-                     下，不删除、可找回，之后原操作就不会撞名了。
+                     实现：被撞的旧文件移动到 备份区/时间戳/原目录结构 下，
+                     不删除、可找回，之后原操作就不会撞名了。
+
+    backup_delete: 批量删除的**文件**（不含空文件夹）也先搬进备份区再算删掉，
+                   默认开。删错了能找回，代价是网盘空间不释放——备份区要定期
+                   手动清。空文件夹照旧直接删：挪过去只是一堆空壳，没意义。
+
+    备份区统一在 <沙盒>/_覆盖备份/<时间戳>/（见 backup_root），跟当前操作的
+    目录在哪无关——整理哪个目录都不会在它底下另起一个备份区。
 
     on_progress(snap): 每完成一批回调一次，用来显示执行进度。snap =
         {"done": 已完成动作数, "total": 总动作数, "phase": 当前阶段文案,
          "fails": 失败条数}
-        总动作数 = 改名 + 移动 + 删除，覆盖模式下再加「备份被撞文件」的条数。
+        总动作数 = 改名 + 移动 + 删除，覆盖/删除备份模式下再加备份的条数。
         一次几百条要跑好几分钟，没有这个回调前端只能干等。
     """
     stat = {"rename": 0, "move": 0, "delete": 0, "backup": 0,
+            "deleted_backup": 0,     # 删除的文件里已搬进备份区的条数
             "backup_dir": "", "fails": [],
             "verified": 0,          # 复核后确认已生效的条数（响应报错、实际成功）
             "retried": 0,           # 重试一轮后又被救回来的条数
@@ -1676,11 +1716,32 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
     mov = [{"path": o["path"], "dest": o["dest"],
             **({"newname": o["newname"]} if o.get("newname") else {})}
            for o in ops if o["op"] == "move"]
-    dele = [o["path"] for o in ops if o["op"] == "delete"]
+    # 删除分两拨：**文件**进备份区（可找回），**空文件夹**直接删（挪过去是空壳）
+    del_files = [o for o in ops if o["op"] == "delete" and not o.get("isdir")]
+    dele = [o["path"] for o in ops if o["op"] == "delete" and o.get("isdir")]
 
     # 进度快照。用可变 dict 而非局部变量：闭包里改它不需要 nonlocal
-    prog = {"done": 0, "total": len(ren) + len(mov) + len(dele),
+    prog = {"done": 0, "total": len(ren) + len(mov) + len(dele) + len(del_files),
             "phase": "", "fails": 0}
+
+    # 这一趟的备份目录：**整个 apply_plan 共用同一个时间戳目录**，覆盖掉的、
+    # 删掉的都躺在里面，事后按时间找就行。惰性生成——没东西要备份就不建。
+    _bdir = {"p": ""}
+
+    def backup_dir():
+        if not _bdir["p"]:
+            _bdir["p"] = (f"{backup_root(pan.sandbox)}/"
+                          f"{time.strftime('%Y%m%d-%H%M%S')}")
+        return _bdir["p"]
+
+    def backup_dest(path):
+        """备份区里保持原来的目录结构，同名文件在不同目录下不会互相顶掉"""
+        rel = path[len(pan.sandbox) + 1:] if path.startswith(pan.sandbox) \
+            else path.lstrip("/")
+        parent = str(PurePosixPath(rel).parent)
+        # 文件就躺在沙盒根时 parent 是 ".", 拼进去会变成 "…/.", 得直接用根目录
+        return f"{backup_dir()}/{parent}" if parent and parent != "." \
+            else backup_dir()
 
     def emit(phase=None):
         if phase:
@@ -1712,11 +1773,10 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
         emit("检查重名文件")
         conflicts = _find_conflicts(pan, ren, mov)
         if conflicts:
-            bdir = f"{pan.sandbox}/_覆盖备份/{time.strftime('%Y%m%d-%H%M%S')}"
+            bdir = backup_dir()
             mv_ops = []
             for cf in conflicts:
-                rel = cf[len(pan.sandbox) + 1:]
-                bdest = f"{bdir}/{str(PurePosixPath(rel).parent)}"
+                bdest = backup_dest(cf)
                 _mkdirs(pan, bdest)
                 mv_ops.append({"path": cf, "dest": bdest})
             # 备份也是要实现的动作，算进总数；否则进度条先跑到别处再卡住，看着像死机
@@ -1748,6 +1808,37 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
     if mov:
         ok, fails = pan.move_batch(mov, ondup="skip", on_progress=tick("正在移动"))
         stat["move"] = ok; stat["fails"] += fails
+    # 删除的文件先搬进备份区（跟覆盖用同一个备份区）。搬走即等于删掉——
+    # 文件不在原位了，但可以找回。备份没成功的**不删**：宁可删不掉，也不能丢。
+    # 这些路径还要记进 no_retry：事后的「自动重试」是按原 op 再提交一遍，
+    # 那会直接执行 delete —— 跟「先备份再删」的承诺反着来。
+    no_retry = set()
+    if backup_delete and del_files:
+        emit("备份待删除的文件")
+        mv_ops = []
+        for o in del_files:
+            bdest = backup_dest(o["path"])
+            _mkdirs(pan, bdest)
+            mv_ops.append({"path": o["path"], "dest": bdest})
+        ok, fails = pan.move_batch(mv_ops, on_progress=tick("备份待删除的文件"))
+        stat["backup"] = stat.get("backup", 0) + ok
+        stat["backup_dir"] = backup_dir()
+        backed = {m["path"] for m in mv_ops} - {f["path"] for f in fails}
+        stat["deleted_backup"] = len(backed)
+        for f in fails:
+            f["msg"] = f"{f.get('msg')} → 没备份成功，文件保留未删"
+        stat["fails"] += fails
+        no_retry |= {f["path"] for f in fails}
+        for o in del_files:
+            if o["path"] not in backed and o["path"] not in no_retry:
+                # 响应里既没说成功也没说失败（漏了），同样按「没备份成」处理
+                no_retry.add(o["path"])
+                stat["fails"].append({"path": o["path"], "retryable": False,
+                                      "msg": "备份没成功，文件保留未删"})
+        time.sleep(0.5)            # 等索引同步
+    else:
+        dele += [o["path"] for o in del_files]      # 关掉备份 = 照旧真删
+
     if dele:
         ok, fails = pan.delete_batch(dele, on_progress=tick("正在删除"))
         stat["delete"] = ok; stat["fails"] += fails
@@ -1770,10 +1861,14 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None):
     # 再提交一次通常就成了。撞名和「文件压根不在」重试也没用，不做无用功。
     stop_reason = getattr(pan, "last_stop_reason", "")
     if not stop_reason:
-        retry = [f for f in stat["fails"] if f.get("retryable")]
+        # no_retry：备份没搬成的待删文件。复核会把它们重新标成「可重试」
+        # （原处还在 = 没生效），照着重试就是直接真删，绝不许发生
+        retry = [f for f in stat["fails"]
+                 if f.get("retryable") and f["path"] not in no_retry]
         if retry:
             emit(f"重试 {len(retry)} 条未生效的")
-            keep = [f for f in stat["fails"] if not f.get("retryable")]
+            keep = [f for f in stat["fails"]
+                    if not f.get("retryable") or f["path"] in no_retry]
             sub = [by_op[f["path"]] for f in retry if f["path"] in by_op]
             prog["total"] += len(sub)      # 不然进度条会提前顶到 100%
             r2 = [{"path": o["path"], "newname": o["newname"]}

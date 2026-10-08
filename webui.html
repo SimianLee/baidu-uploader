@@ -831,8 +831,16 @@
             <div class="field sm"><label>大于(MB)</label><input id="dlMin" type="number" placeholder="0"></div>
             <div class="field sm"><label>小于(MB)</label><input id="dlMax" type="number" placeholder="0"></div>
           </div>
-          <div class="hint" style="color:#ff8f8f">
-            ⚠ 删除不可撤销。执行前会列出完整清单，需要你再确认一次。
+          <div class="row">
+            <label class="chk" style="margin-top:2px">
+              <input type="checkbox" id="dlBackup" checked onchange="dlSyncHint()">
+              删除前先移到备份区（<code id="dlBackupPath">_覆盖备份</code>，可找回）
+            </label>
+          </div>
+          <div class="hint" id="dlHint" style="color:#ff8f8f">
+            ⚠ 文件会被搬进备份区而不是真删：能找回，但<b>网盘空间不会释放</b>，
+            备份区要定期手动清。取消勾选＝直接删除，不可恢复。
+            执行前会列出完整清单，需要你再确认一次。
           </div>
         </div>
 
@@ -1420,6 +1428,24 @@ async function pollNow(){
 let panTab_ = 'rename';       // 当前功能页
 let panOps  = [];             // 当前已生成的待执行操作
 let panTotal = 0;             // 服务端算出的总条数（预览可能被截断）
+let panSandbox = '';          // 网盘沙盒根，拼备份区路径时要用到
+
+/* 备份区路径：全项目统一在 <沙盒>/_覆盖备份 下，跟当前整理哪个目录无关 */
+function backupPathText(){
+  return (panSandbox ? panSandbox + '/' : '') + '_覆盖备份';
+}
+/* 批量删除要不要先备份。取消勾选＝真删，提示得跟着变红变狠 */
+function dlBackupOn(){
+  const e = $('dlBackup');
+  return !!(e && e.checked);
+}
+function dlSyncHint(){
+  const p = $('dlBackupPath');
+  if(p) p.textContent = backupPathText();
+  const h = $('dlHint');
+  if(!h) return;
+  h.style.color = dlBackupOn() ? '#ffb26b' : '#ff8f8f';
+}
 
 /* 重名策略：skip=跳过（默认，安全） / overwrite=覆盖（不可恢复） */
 let panDup = 'skip';
@@ -1433,7 +1459,8 @@ function setDup(v, silent){
   if(typeof panResetPlan === 'function') panResetPlan();
   if(!silent){
     setMsg('panMsg', v === 'overwrite'
-      ? '⚠ 已选「重名覆盖」：撞到的网盘旧文件会先挪进「_覆盖备份/时间戳/」目录（可找回），'
+      ? '⚠ 已选「重名覆盖」：撞到的网盘旧文件会先挪进「' + backupPathText()
+        + '/时间戳/」目录（可找回），'
         + '再把这次的文件搬/改过去。点「生成预览」重新算一份计划'
       : '已切回「重名跳过」：保留网盘上已有的那个文件，这次搬过去的自动编成 A (2)。'
         + '点「生成预览」重新算一份计划',
@@ -1462,6 +1489,7 @@ function panTab(k){
   // 执行时把策略悄悄带过去（setDup 内部会顺手作废手里的预览）
   if(typeof setDup === 'function') setDup('skip', true);   // silent：切页签不该弹提示
   if(typeof ogModeChange === 'function') ogModeChange();
+  if(k === 'delete') dlSyncHint();     // 备份区路径/提示按当前沙盒刷新一遍
   panResetPlan();
 }
 
@@ -1475,7 +1503,8 @@ function ogModeChange(){
   $('ogHint').innerHTML = ({
     organize: '文件会移动到「归档目录/分类名/」下。撞到网盘已有的同名文件时：'
       + '<b>重名跳过</b>＝保留那一个，这次搬过去的自动编成 <code>A (2).txt</code>（两边都在）；'
-      + '<b>重名覆盖</b>＝不编号直接替换，旧的那个先挪进「_覆盖备份/时间戳/」可找回。',
+      + '<b>重名覆盖</b>＝不编号直接替换，旧的那个先挪进「' + backupPathText()
+      + '/时间戳/」可找回。',
     merge: '把 <b>txt(1)</b>、<b>mobi(1)</b> 这类副本目录里的文件合回 <b>txt</b>、<b>mobi</b> 主目录'
       + '（同一位父目录下同时有 <code>X</code> 和 <code>X(1)</code> 才算一对）。<br>'
       + '副本里的<b>子目录</b>不动；搬空的副本目录也不在这里删——'
@@ -1635,6 +1664,8 @@ async function panBrowse(){
   if(!d.ok){ setMsg('panMsg', d.msg, false); return; }
   $('panPath').value = d.path;
   $('panHint').textContent = `沙盒根目录：${d.sandbox}　·　当前：${d.path}`;
+  panSandbox = d.sandbox || '';      // 备份区路径要拿它来拼
+  dlSyncHint();
   const dirs = d.dirs.map(x => `<div><span class="arrow">📁</span> ${esc(x.name)}/</div>`).join('');
   const files = d.files.map(x => `<div>　${esc(x.name)}　<span style="color:#4d566c">${(x.size/1024).toFixed(1)} KB</span></div>`).join('');
   const el = $('panList');
@@ -2291,7 +2322,10 @@ async function panApply(){
   const tip = onlyEmptyDirs
     ? `即将删除 ${n2} 个空文件夹（内部不含任何文件），删除后不可恢复。确定继续吗？`
     : isDel
-    ? `⚠ 即将删除 ${n2} 个文件，此操作不可撤销。确定继续吗？`
+    ? (dlBackupOn()
+       ? `即将把 ${n2} 个文件移进备份区「${backupPathText()}/时间戳/」（不是真删，可找回；`
+         + `但网盘空间不会释放，备份区要定期手动清）。确定继续吗？`
+       : `⚠ 即将永久删除 ${n2} 个文件，不进备份区，此操作不可撤销。确定继续吗？`)
     : panDup === 'overwrite'
     ? `⚠ 即将执行 ${n2} 条操作（重名覆盖模式）：撞到的旧文件会先挪进「_覆盖备份」目录再执行，可找回。确定继续吗？`
     : `即将对 ${n2} 个文件执行操作（重名跳过），确定继续吗？`;
@@ -2328,7 +2362,8 @@ async function panApply(){
     // total 是扫描出来的真实总数：后端拿它跟手里的清单对数，发现「清单被截过
     // 又没有完整计划」时好如实告诉用户这次只跑了前 N 条
     d = await api('/api/pan_apply',
-                  {ops: panOps, ondup: panDup, preview_id: pvCurrent, total: panTotal});
+                  {ops: panOps, ondup: panDup, preview_id: pvCurrent, total: panTotal,
+                   backup_delete: dlBackupOn()});
   } finally {
     // 收起前补画一次最终进度：最后一批的完成回调常常来不及被 300ms 的轮询画出来，
     // 直接收起会让进度条停在 76% 这种位置，看着像没跑完
@@ -2356,7 +2391,12 @@ async function panApply(){
   if(st.rename) res.push({n: st.rename, label: '改名', cls: 'ok'});
   if(st.move) res.push({n: st.move, label: '移动', cls: 'ok'});
   if(st.delete) res.push({n: st.delete, label: '删除', cls: 'ok'});
-  if(st.backup) res.push({n: st.backup, label: '覆盖已备份', cls: 'warn'});
+  // 删除的文件其实是搬进了备份区，单列一笔：「删除」这个词的口径跟网盘一致吗？
+  // 不一致——原位没了，但文件还在备份区里躺着
+  if(st.deleted_backup) res.push({n: st.deleted_backup, label: '删除已备份', cls: 'warn'});
+  if((st.backup || 0) - (st.deleted_backup || 0) > 0)
+    res.push({n: st.backup - (st.deleted_backup || 0),
+              label: '覆盖已备份', cls: 'warn'});
   if(st.verified) res.push({n: st.verified, label: '复核确认生效', cls: 'acc'});
   if(st.retried) res.push({n: st.retried, label: '重试救回', cls: 'acc'});
   if(st.fails && st.fails.length) res.push({n: st.fails.length, label: '未生效', cls: 'bad'});

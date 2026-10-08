@@ -1100,7 +1100,8 @@ class Handler(BaseHTTPRequestHandler):
                 # unreadable 是这次扫不进去的目录——「不知道里面有什么」绝不能
                 # 当成「里面什么都没有」，那会删掉用户的真数据
                 ops, einfo = pan_tools.build_empty_dir_plan(
-                    entries, p, skip=str(body.get("skip") or "_覆盖备份"),
+                    entries, p,
+                    skip=str(body.get("skip") or pan_tools.BACKUP_DIR_NAME),
                     unreadable=[f["path"] for f in failures])
                 info = {"scanned": len(files), **einfo}
                 label = "空文件夹"
@@ -1152,6 +1153,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "msg": "没有要执行的操作"})
             # 重名策略：skip 跳过（默认）/ overwrite 覆盖，其余值一律按 skip
             ondup = _dup_policy(body)
+            # 删除的文件要不要先搬进备份区（默认开：删错了能找回）。
+            # 老前端没这个字段时按「开」处理，别因为一次升级就把人家的文件真删了
+            bdel = body.get("backup_delete")
+            backup_delete = True if bdel is None else bool(bdel)
             # 分批提交：百度 filemanager 一次吃不下太多，2000 条一批连着跑完，
             # 中途可以叫停。总条数不再设上限——点执行就是要把扫出来的全做完。
             CHUNK = 2000
@@ -1198,9 +1203,10 @@ class Handler(BaseHTTPRequestHandler):
                         return cb
 
                     s = pan_tools.apply_plan(pan, g, ondup=ondup,
-                                             on_progress=tick())
+                                             on_progress=tick(),
+                                             backup_delete=backup_delete)
                     for k in ("rename", "move", "delete", "backup",
-                              "verified", "retried"):
+                              "deleted_backup", "verified", "retried"):
                         stat[k] = stat.get(k, 0) + (s.get(k) or 0)
                     if s.get("backup_dir"):
                         stat["backup_dir"] = s["backup_dir"]
@@ -1216,14 +1222,25 @@ class Handler(BaseHTTPRequestHandler):
             # 整批都是删空文件夹时，报「删除 12 个空文件夹」比「改名 0 / 移动 0 / 删除 12」
             # 直观得多——那些 0 对用户毫无信息量
             dir_del = sum(1 for o in good if o["op"] == "delete" and o.get("isdir"))
-            if dir_del and dir_del == stat["delete"]:
+            bk = stat.get("backup_dir") or pan_tools.backup_root(sandbox)
+            # 删掉的文件其实是被搬进了备份区，说「删除 N 个」会让人以为找不回来了
+            del_moved = stat.get("deleted_backup") or 0
+            if dir_del and dir_del == stat["delete"] and not del_moved:
                 msg = f"完成：删除 {stat['delete']} 个空文件夹，失败 {len(stat['fails'])}"
+            elif del_moved:
+                msg = (f"完成：改名 {stat['rename']} / 移动 {stat['move']} / "
+                       f"移入备份区 {del_moved}"
+                       + (f" / 删除 {stat['delete']}" if stat["delete"] else "")
+                       + f"，失败 {len(stat['fails'])}")
             else:
                 msg = (f"完成：改名 {stat['rename']} / 移动 {stat['move']} / "
                        f"删除 {stat['delete']}，失败 {len(stat['fails'])}")
             if stat.get("backup"):
-                msg += (f"；覆盖旧文件 {stat['backup']} 个"
-                        f"（已备份到 {stat['backup_dir']}）")
+                msg += (f"；另备份被覆盖的旧文件 "
+                        f"{stat['backup'] - del_moved} 个"
+                        f"（备份区 {bk}）")
+            if del_moved:
+                msg += f"；删除的文件已移到 {bk} 下，可找回（占网盘空间，记得定期清）"
             # 百度在高并发/大批量下会整批回错误码而操作其实生效，核对结果如实报出来。
             # 实测一次 2000 条移动：18 批分别回 -9 / 111，1800 条被报成失败，
             # 而源目录里那 2000 个文件一个不剩、全都到了目标目录。
