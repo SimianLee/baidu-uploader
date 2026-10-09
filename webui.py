@@ -1052,8 +1052,9 @@ class Handler(BaseHTTPRequestHandler):
             #   · exts：改名页签的「只处理这些后缀」
             #   · ondup：整理/合并的「重名跳过 / 重名删除」——它**改变计划本身**
             #     （跳过给后来的自动编号，删除不编号直接搬），所以必须进指纹
+            #   · target：合并重复的「目录 / 文件 / 两层都做」——做哪一层结果就长什么样
             for k in ("mode", "params", "by", "dest", "filters", "skip", "exts",
-                      "ondup", "how"):
+                      "ondup", "how", "target"):
                 if k in body:
                     payload[k] = body[k]
             if kind == "empty_dir" or kind == "merge_dirs":
@@ -1165,19 +1166,29 @@ class Handler(BaseHTTPRequestHandler):
                 info = {"scanned": len(files)}
                 label = "批量删除·" + filter_label(flt)
             elif kind == "merge_dirs":
-                # 合并 X(1)/X(2) 副本目录：归档几轮下来攒出的大量 (1) 目录
-                # 是「预览总比真实文件多」的根因——同名对在扫描里就是两条计划
+                # 合并 X(1)/X(2) 副本：归档几轮下来攒出的大量 (1) 副本
+                # 是「预览总比真实文件多」的根因——同名对在扫描里就是两条计划。
+                # 现在是两层一起收拾：重复**目录** txt(1) → txt，重复**文件**
+                # 报告(1).pdf → 报告.pdf，target 决定做哪一层（默认两层都做）
                 dup_policy = _dup_policy(body)
                 # how: move=都搬回主目录（撞名按 ondup）/ dedupe=重复的删掉
                 how = str(body.get("how") or "move").lower()
                 if how not in ("move", "dedupe"):
                     how = "move"
-                ops, minfo = pan_tools.build_merge_dirs_plan(
-                    entries, ondup=dup_policy, how=how)
+                # 认不出来的 target 交给 pan_tools 兜底成 both：宁可多查一层，
+                # 也不能因为参数脏就把用户点名要的那一层悄悄跳过
+                target = str(body.get("target") or "both").lower()
+                ops, minfo = pan_tools.build_merge_plan(
+                    entries, ondup=dup_policy, how=how, target=target)
                 info = {"scanned": len(files), **minfo}
-                label = ("合并重复目录"
-                         + ("· 删除重复文件" if how == "dedupe" else "")
-                         + _dup_label(dup_policy))
+                if target == "file":
+                    label = "合并重复文件"
+                elif target == "dir":
+                    label = "合并重复目录"
+                else:
+                    label = "合并重复（目录+文件）"
+                label += ("· 删除重复那份" if how == "dedupe" else "· 不删只搬回") \
+                    + _dup_label(dup_policy)
             elif kind == "empty_dir":
                 # skip 由前端给，默认保护本工具自己的备份区；
                 # unreadable 是这次扫不进去的目录——「不知道里面有什么」绝不能

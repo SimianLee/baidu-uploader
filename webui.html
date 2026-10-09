@@ -818,7 +818,7 @@
               <label>整理方式</label>
               <select id="ogMode" onchange="ogModeChange()">
                 <option value="organize">归类移动（搬进归档目录）</option>
-                <option value="merge">合并重复目录 txt(1) → txt</option>
+                <option value="merge">合并重复 → txt(1) 合回 txt / a(1).pdf 合回 a.pdf</option>
                 <option value="empty">清理空文件夹</option>
               </select>
             </div>
@@ -838,11 +838,21 @@
               <label>跳过名字含（逗号分隔）</label>
               <input id="edSkip" value="_覆盖备份" placeholder="命中的目录及其子目录都不动">
             </div>
-            <div class="field sm og-merge hidden" style="flex:0 0 230px">
-              <label>重复的文件怎么处理</label>
+            <div class="field sm og-merge hidden" style="flex:0 0 260px">
+              <label>处理哪一层重复</label>
+              <select id="ogMergeTarget" onchange="ogMergeSync()">
+                <option value="both">目录和文件都处理（推荐）</option>
+                <option value="dir">只处理重复目录 txt(1) → txt</option>
+                <option value="file">只处理重复文件 a(1).pdf → a.pdf</option>
+              </select>
+            </div>
+            <!-- 文案随「处理哪一层」变：文件层的「不删」是只把最小号正名，
+                 目录层的「不删」是搬回主目录，混着说会让人以为两头一个规矩 -->
+            <div class="field sm og-merge hidden" style="flex:0 0 250px">
+              <label>重复的那份怎么处理</label>
               <select id="ogMergeHow">
                 <option value="dedupe">删除重复那份（推荐）</option>
-                <option value="move">全部搬回主目录</option>
+                <option value="move">不删，全部搬回主目录</option>
               </select>
             </div>
           </div>
@@ -1545,6 +1555,7 @@ function panTab(k){
   if(typeof ogModeChange === 'function') ogModeChange();
   // 回到改名页签时按当前模式重排一遍显隐：上次可能停在「按表格改名」，
   // 那时第二行的那些参数是藏起来的
+  // 那时第二行的那些参数是藏起来的
   if(typeof panModeChange === 'function') panModeChange();
   if(k === 'delete') dlSyncHint();     // 备份区路径/提示按当前沙盒刷新一遍
   panResetPlan();
@@ -1563,16 +1574,7 @@ function ogModeChange(){
       + '<b>重名跳过</b>＝保留那一个，这次搬过去的自动编成 <code>A (2).txt</code>（两边都在）；'
       + '<b>重名删除</b>＝把网盘上那个旧文件<b>直接删掉</b>（不可恢复、不备份），'
       + '这次的文件不编号直接上位。',
-    merge: '把 <b>txt(1)</b>、<b>txt(2)</b>、<b>txt(3)</b>… 这类副本目录合回 <b>txt</b> 主目录'
-      + '（同一位父目录下的一串同名序号目录算一组）。主目录不在时，<b>序号最小的那个当家</b>，'
-      + '其余合进去——不然那一串副本谁也不动。<br>'
-      + '重复的（主目录里已经有一份的）文件按右边那个下拉办：'
-      + '<b>删除重复那份</b>＝副本里那个直接删掉⚠不可恢复，主目录那份留着；'
-      + '<b>全部搬回主目录</b>＝都搬过去，撞名的按重名策略编号或删旧。'
-      + '副本里主目录<b>没有</b>的文件，两种方式都一样会搬回去——去重不是清空。<br>'
-      + '副本里的<b>子目录</b>不动；搬空的副本目录也不在这里删——'
-      + '合完切到上面的「清理空文件夹」收拾更安全。'
-      + '因为要配对整棵子树的目录名，这个方式<b>总是递归扫描</b>。',
+    merge: ogMergeHint(),
     empty: '判定：一个目录<b>连同它的所有子目录</b>里一个文件都没有，才算空。'
       + '预览只列<b>最外层</b>的空目录——删掉它，嵌套在里面的空目录会一并消失。'
       + '当前正在浏览的这层目录本身不会被删（免得删掉你正站着的地方）。'
@@ -1580,6 +1582,51 @@ function ogModeChange(){
   })[m] || '';
   ogLockRecursive();
   syncDupBox();
+}
+
+/* 整理方式=合并重复时，「处理哪一层」和「重复那份怎么办」这两个下拉联动。
+   文件层没有「搬回主目录」这回事——人家本来就在一个目录里，它的「不删」是
+   只把序号最小的那个正名回主名；目录层的「不删」才真搬回去。文案必须跟着变，
+   否则选了「只处理文件」却看到「全部搬回主目录」，会以为它干了件别的 */
+function ogMergeSync(){
+  const t = $('ogMergeTarget').value;
+  const how = $('ogMergeHow');
+  const lb = (t === 'file')
+    ? {dedupe: '删除多余副本（推荐）', move: '只把最小号改回主名，不删任何东西'}
+    : (t === 'dir')
+    ? {dedupe: '删除重复那份（推荐）', move: '全部搬回主目录（不删）'}
+    : {dedupe: '删除重复那份（推荐）', move: '不删：目录搬回、文件只正名'};
+  how.options[0].textContent = lb.dedupe;
+  how.options[1].textContent = lb.move;
+  if(ogMode() === 'merge') $('ogHint').innerHTML = ogMergeHint();
+}
+
+function ogMergeHint(){
+  const t = $('ogMergeTarget').value;
+  const dirTxt = '把 <b>txt(1)</b>、<b>txt(2)</b>、<b>txt(3)</b>… 这类副本目录合回 <b>txt</b> 主目录'
+    + '（同一位父目录下的一串同名序号目录算一组）。主目录不在时，<b>序号最小的那个当家</b>，'
+    + '其余合进去——不然那一串副本谁也不动。<br>'
+    + '重复的（主目录里已经有一份的）文件按右边那个下拉办：'
+    + '<b>删除重复那份</b>＝副本里那个直接删掉⚠不可恢复，主目录那份留着；'
+    + '<b>全部搬回主目录</b>＝都搬过去，撞名的按重名策略编号或删旧。'
+    + '副本里主目录<b>没有</b>的文件，两种方式都一样会搬回去——去重不是清空。<br>'
+    + '副本里的<b>子目录</b>不动；搬空的副本目录也不在这里删——'
+    + '合完切到上面的「清理空文件夹」收拾更安全。';
+  const fileTxt = '把 <b>书(1).epub</b>、<b>书(2).epub</b>… 这类重复文件合回 <b>书.epub</b>'
+    + '（同一位父目录下名字只差一个 <code>(n)</code> 的算一组；<code>书(1).epub</code> 的'
+    + '主名是 <code>书.epub</code>，括号要塞回后缀之前）。<br>'
+    + '敢下手的前提有三条，缺一条就<b>原样留着</b>：①主名已经在那儿，或者这串'
+    + '<b>至少两兄弟</b>（孤零零一个 <code>书(1).epub</code> 可能本来就叫这个名）；'
+    + '②★<b>大小必须完全一致</b>——重复是「同一个文件反复上传」的结果，字节数必然相同，'
+    + '大小不同的一律当成「成套资料」（<code>报告(1).pdf</code>/<code>报告(2).pdf</code>）'
+    + '放行，绝不当副本删掉；③序号只认 1~9（<code>(2024)</code> 是正经名字）。<br>'
+    + '主名缺席时<b>序号最小的那个上位</b>，多余的按下拉处理：'
+    + '<b>删除多余副本</b>＝删掉⚠不可恢复；<b>只改回主名</b>＝一个不删。';
+  const tail = '因为要配对整棵子树的名字，这个方式<b>总是递归扫描</b>。';
+  if(t === 'dir')  return dirTxt + tail;
+  if(t === 'file') return fileTxt + tail;
+  return '<b>目录层：</b>' + dirTxt + '<br><b>文件层：</b>' + fileTxt
+    + '两层一次做完，重复<b>不会</b>被处理两遍（目录层安排过的子树，文件层会绕开）。' + tail;
 }
 
 /* 合并重复 / 清理空文件夹都得看到整棵子树。不递归只会得出「这一层里没东西＝空」
@@ -1716,6 +1763,16 @@ function pvStatsFrom(d, total){
     // 按表改名那这里的 scanned 是表格行数，不是扫出来的文件数
     it.push({n: d.scanned, label: d.csv ? '表格行数' : '扫描文件', cls: 'acc'});
   }
+  // 文件层、目录层各出一叠：两边的键互不重叠（f 开头的是文件层），
+  // 谁都没出就不用「条操作」那个兜底数字，直接让 panTotal 说话
+  const fileItems = (d.fgroups != null) ? [
+    {n: d.fgroups, label: '重复文件组', cls: 'warn'},
+    ...(d.fdup_deleted ? [{n: d.fdup_deleted, label: '删多余副本', cls: 'bad'}] : []),
+    ...(d.frenamed ? [{n: d.frenamed, label: '改回主名', cls: 'ok'}] : []),
+    ...(d.fadopted ? [{n: d.fadopted, label: '缺主名·小号上位', cls: 'warn'}] : []),
+    ...(d.fsize_diff ? [{n: d.fsize_diff, label: '大小不同·没敢动', cls: 'bad'}] : []),
+    ...(d.fkept ? [{n: d.fkept, label: '不删·原样保留'}] : []),
+  ] : [];
   if(d.pairs != null){
     it.push({n: d.pairs, label: '重复目录对', cls: 'warn'});
     // 「删除重复那份」是混合清单：搬回的和删掉的分开摆，别让人只看见一个总数
@@ -1723,9 +1780,12 @@ function pvStatsFrom(d, total){
       it.push({n: d.moved || 0, label: '搬回主目录', cls: 'ok'});
       it.push({n: d.dup_deleted, label: '删重复文件', cls: 'bad'});
     }else{
-      it.push({n: total, label: '待搬文件', cls: 'ok'});
+      it.push({n: d.moved || total, label: '待搬文件', cls: 'ok'});
     }
     if(d.adopted) it.push({n: d.adopted, label: '缺主目录·小号当家', cls: 'warn'});
+    fileItems.forEach(x => it.push(x));
+  }else if(fileItems.length){
+    fileItems.forEach(x => it.push(x));
   }else{
     it.push({n: total, label: '条操作', cls: total ? 'ok' : ''});
   }
@@ -1735,6 +1795,43 @@ function pvStatsFrom(d, total){
   if(d.with_subdirs) it.push({n: d.with_subdirs, label: '副本含子目录', cls: 'warn'});
   if(d.skipped_total) it.push({n: d.skipped_total, label: '目录没扫到', cls: 'bad'});
   return it;
+}
+
+/* 合并重复的结果文案：目录层、文件层各报各的数。
+   哪一层被跳过（ target=dir / file）就看后端回了哪些键——没那一层的 scanned
+   统计，说明这次压根没算那一层，别拿 0 去冒充「查过了没有」 */
+function mergeTail(d){
+  const seg = [];
+  if(d.pairs != null){
+    let s = `发现 ${d.pairs} 对重复目录（X 与 X(1)） → `
+      + (d.how === 'dedupe'
+         ? `${d.moved || 0} 条搬回主目录 / ${d.dup_deleted || 0} 个重复文件待删除`
+         : `${d.moved || 0} 条搬回主目录`);
+    if(d.adopted) s += ` · ${d.adopted} 组缺主目录，已让序号最小的那个当家`;
+    // 撞名数不在这里重复说：末尾的 dupTxt 会连同「跳过/删除」一起讲清楚
+    if(d.with_subdirs) s += ` · ⚠ ${d.with_subdirs} 个副本里还有子目录（保守起见没动）`;
+    if(d.moved) s += ' · 搬空后切到「清理空文件夹」清掉空壳';
+    seg.push(s);
+  }
+  if(d.fgroups != null){
+    let s = `发现 ${d.fgroups} 组重复文件（A(1).txt 与 A.txt） → `
+      + (d.how === 'dedupe'
+         ? `${d.fdup_deleted || 0} 个多余副本待删除`
+         : `${d.frenamed || 0} 个改回主名，一个不删`);
+    if(d.fadopted) s += ` · ${d.fadopted} 组缺主名，序号最小的那个上位`;
+    // 大小不一致被放行的条数必须报：那是「不敢确定是不是重复」的部分，
+    // 闷声跳过，用户会以为工具漏扫了
+    if(d.fsize_diff) s += ` · ⚠ ${d.fsize_diff} 个大小不一致，当成成套资料留着没敢动`;
+    if(d.fkept) s += ` · ${d.fkept} 个按「不删」策略原样保留`;
+    seg.push(s);
+  }
+  seg.push(panTotal > panOps.length
+      ? ((d.plan_saved || d.plan_ready)
+         ? `列表显示前 ${panOps.length} 条，点「执行」会按完整计划分 `
+           + `${Math.ceil(panTotal / 2000)} 批全部跑完`
+         : `⚠ 完整计划没存下来，本次只能执行前 ${panOps.length} 条，重新生成一次即可全跑完`)
+      : '');
+  return seg.filter(Boolean).join(' · ');
 }
 
 /* 浏览目录 */
@@ -2257,7 +2354,7 @@ async function panPlan(refresh){
     }else if(m === 'merge'){
       // recursive 恒为 true：配对序号副本要看整棵子树，后端也会强制递归
       body = {...body, kind: 'merge_dirs', recursive: true, ondup: panDup,
-              how: $('ogMergeHow').value};
+              target: $('ogMergeTarget').value, how: $('ogMergeHow').value};
     }else{
       // recursive 恒为 true：后端也会强制递归，这里显式写出来免得两头不一致
       body = {...body, kind: 'empty_dir', recursive: true, skip: $('edSkip').value};
@@ -2327,14 +2424,9 @@ async function panPlan(refresh){
           ? ' · ⚠ 这棵树里一个文件都没有（纯目录骨架），删掉后分类结构会一起消失'
           : '')
     : isMergeTab
-    ? `发现 ${d.pairs || 0} 对重复目录（X 与 X(1)） → `
-      + (d.how === 'dedupe'
-         ? `${d.moved || 0} 条搬回主目录 / ${d.dup_deleted || 0} 个重复文件待删除`
-         : `${panTotal} 条移动`)
-      + (d.adopted ? ` · ${d.adopted} 组缺主目录，已让序号最小的那个当家` : '')
-      // 撞名数不在这里重复说：末尾的 dupTxt 会连同「跳过/删除」一起讲清楚
-      + (d.with_subdirs ? ` · ⚠ ${d.with_subdirs} 个副本里还有子目录（保守起见没动，见明细）` : '')
-      + (d.moved ? ' · 搬空后切到「清理空文件夹」清掉空壳' : '')
+    // 合并重复可能两层一起出结果，目录层和文件层各自报自己的数——只报一个总数
+    // 会让人以为另一层没轮到（这正是这次要补的：以前只有目录层那一串）
+    ? (mergeTail(d) || '没有发现可合并的重复（详见上面的方框说明）')
       + (panTotal > panOps.length
           ? ((d.plan_saved || d.plan_ready)
              ? ` · 列表显示前 ${panOps.length} 条，点「执行」会按完整计划分 `

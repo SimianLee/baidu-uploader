@@ -102,6 +102,32 @@ try:
         ck(js("$('recBox').classList.contains('locked')") is True,
            "递归仍然被锁（合并重复必须看整棵子树）", None)
 
+        print("【5b】★ 合并重复：多了一层「处理哪一层」，文案跟着变")
+        ck(js("$('ogMergeTarget').closest('.field').classList.contains('hidden')") is False,
+           "★ 新下拉「处理哪一层重复」跟着合并重复一起露出来", None)
+        ck(js("$('ogMergeTarget').value") == "both",
+           "默认两层都处理", js("$('ogMergeTarget').value"))
+        topts = js("[...$('ogMergeTarget').options].map(o=>o.value)")
+        ck(topts == ["both", "dir", "file"], "三个选项齐全", topts)
+        # 切到「只处理文件」：how 的第二个选项的措辞要换成文件层那句
+        js("$('ogMergeTarget').value='file';ogMergeSync()")
+        ck("改回主名" in js("$('ogMergeHow').options[1].textContent"),
+           "★ 文件层的「不删」说成「改回主名」",
+           js("$('ogMergeHow').options[1].textContent"))
+        ck("大小" in js("$('ogHint').textContent"),
+           "★ 说明里讲清了「大小必须一致」这条闸", None)
+        ck("书(1).epub" in js("$('ogHint').textContent"),
+           "说明举的是文件层的例子", js("$('ogHint').textContent")[:60])
+        js("$('ogMergeTarget').value='dir';ogMergeSync()")
+        ck("搬回主目录" in js("$('ogMergeHow').options[1].textContent"),
+           "切回目录层 ⇒ 措辞回到「搬回主目录」",
+           js("$('ogMergeHow').options[1].textContent"))
+        ck("txt(1)" in js("$('ogHint').textContent"),
+           "目录层的说明讲副本目录那一套", js("$('ogHint').textContent")[:60])
+        js("$('ogMergeTarget').value='both';ogMergeSync()")
+        ck("两层" in js("$('ogHint').textContent"),
+           "两层都做时说明讲明「不会被处理两遍」", None)
+
         print("【6】切回改名页签：改名的显隐状态跟着恢复")
         js("panTab('rename')")
         ck(js("$('rnCsvBox').classList.contains('hidden')") is True,

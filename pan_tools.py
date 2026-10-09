@@ -1279,6 +1279,79 @@ def build_delete_plan(files, f: dict):
 # 空目录：找出「整棵子树里连一个文件都没有」的目录
 # ===========================================================================
 
+def dup_serial(name):
+    """`txt(1)` → ('txt', 1)；不是序号副本则返回 None
+
+    只认 X(1)~X(9)：括号里是大数字的多半是正经名字（如「报告(2024)」），
+    不能因为恰好存在一个「报告」目录就把它当成副本合掉。
+    """
+    m = re.match(r"^(.+)\(([1-9])\)$", name)
+    return (m.group(1), int(m.group(2))) if m else None
+
+
+def dup_file_serial(name):
+    """`报告(1).pdf` → ('报告.pdf', 1)；不是序号副本则返回 None
+
+    和 dup_serial 的差别：要把括号塞回**后缀之前**再对主名配对——
+    `报告(1).pdf` 的主名是 `报告.pdf`，不是 `报告`。
+    同样只认 1~9；括号前允许有空格（有的客户端导出成 `报告 (1).pdf`）。
+    """
+    m = re.match(r"^(.+?)\s*\(([1-9])\)(\.[^/\\]+)?$", name)
+    if not m:
+        return None
+    return (m.group(1) + (m.group(3) or ""), int(m.group(2)))
+
+
+def merge_dir_pairs(entries):
+    """找出 `X` 与 `X(1)` 这类重复目录 → 返回 (pairs, adopted, touched)
+
+    pairs:   [(主目录路径, 副本目录路径)]，副本里的文件往后合进主目录。
+    adopted: 主目录缺席、只好让序号最小的那个当家的组数。
+    touched: 这次会碰到的所有目录路径（主目录+副本），在外面做「文件级去重」
+             时要把它们排除掉——同一批文件不能在两份计划里各安排一次。
+    """
+    entries = strip_backup(entries)
+    # 按父目录分组：{父: {目录名: 路径}}
+    by_parent = {}
+    for e in entries:
+        if not e.get("isdir"):
+            continue
+        p = (e.get("path") or "").rstrip("/")
+        parent, _, name = p.rpartition("/")
+        if parent and name:
+            by_parent.setdefault(parent, {})[name] = p
+
+    pairs, adopted, touched = [], 0, set()
+    for parent, names in by_parent.items():
+        # 先按基础名把副本聚起来：txt(1) txt(2) txt(3) 是一组，各自单独看
+        # 只会知道「没有 txt 主目录」，于是三个副本谁也不动
+        groups = {}
+        for name, path in names.items():
+            got = dup_serial(name)
+            if got:
+                groups.setdefault(got[0], []).append((got[1], name, path))
+        for base, dups in groups.items():
+            dups.sort()                       # 按序号 1,2,3… 排列
+            main = names.get(base)
+            if main:
+                pass
+            else:
+                # 主目录不在这一层里（从没建过、或早先被搬走了）：
+                # 序号最小的那个当家，剩下的合进来。不做这一步，用户看到的
+                # 「一堆 txt(1) txt(2) txt(3)」永远消不掉
+                main = dups[0][2]
+                dups = dups[1:]
+                if dups:
+                    adopted += 1
+            if not dups:
+                continue
+            touched.add(main)
+            for _, _, path in dups:
+                pairs.append((main, path))
+                touched.add(path)
+    return pairs, adopted, touched
+
+
 def build_merge_dirs_plan(entries, ondup: str = "skip", how: str = "move"):
     """把 `归档/txt(1)` 这类副本目录合回主目录 → 返回 (ops, info)
 
@@ -1313,47 +1386,7 @@ def build_merge_dirs_plan(entries, ondup: str = "skip", how: str = "move"):
     """
     entries = strip_backup(entries)
     how = "dedupe" if str(how).lower().startswith("d") else "move"
-    # 按父目录分组：{父: {目录名: 路径}}
-    by_parent = {}
-    for e in entries:
-        if not e.get("isdir"):
-            continue
-        p = (e.get("path") or "").rstrip("/")
-        parent, _, name = p.rpartition("/")
-        if parent and name:
-            by_parent.setdefault(parent, {})[name] = p
-
-    # 只认 X(1)~X(9)：括号里是大数字的多半是正经名字（如「报告(2024)」），
-    # 不能因为恰好存在「报告」就把它合进去
-    def dup_serial(name):
-        m = re.match(r"^(.+)\(([1-9])\)$", name)
-        return (m.group(1), int(m.group(2))) if m else None
-
-    pairs = []                       # (接收方路径, 副本路径)
-    adopted = 0                      # 主目录缺席时拿最小序号当家的组数
-    for parent, names in by_parent.items():
-        # 先按基础名把副本聚起来：txt(1) txt(2) txt(3) 是一组，各自单独看
-        # 只会知道「没有 txt 主目录」，于是三个副本谁也不动
-        groups = {}
-        for name, path in names.items():
-            got = dup_serial(name)
-            if got:
-                groups.setdefault(got[0], []).append((got[1], name, path))
-        for base, dups in groups.items():
-            dups.sort()                       # 按序号 1,2,3… 排列
-            main = names.get(base)
-            if main:
-                pass
-            else:
-                # 主目录不在这一层里（从没建过、或早先被搬走了）：
-                # 序号最小的那个当家，剩下的合进来。不做这一步，用户看到的
-                # 「一堆 txt(1) txt(2) txt(3)」永远消不掉
-                main = dups[0][2]
-                dups = dups[1:]
-                if dups:
-                    adopted += 1
-            for _, _, path in dups:
-                pairs.append((main, path))
+    pairs, adopted, _ = merge_dir_pairs(entries)
 
     # 各目录现有文件名（撞名编号要以主目录的实况为底）。连大小一起记：
     # 导出的 CSV 里有「大小」这一列，计划里不带它就只能给一列空格子
@@ -1424,6 +1457,153 @@ def build_merge_dirs_plan(entries, ondup: str = "skip", how: str = "move"):
             "dup_deleted": dup_deleted, "adopted": adopted, "how": how,
             "with_subdirs": with_sub}
     return ops, info
+
+
+# ===========================================================================
+# 重复文件：A(1).txt / A(2).txt … 合回 A.txt
+# ===========================================================================
+
+MERGE_TARGETS = ("dir", "file", "both")
+
+
+def build_merge_files_plan(entries, ondup: str = "skip", how: str = "dedupe",
+                           exclude_dirs=None, exclude_paths=None):
+    """把 `A(1).txt`、`A(2).txt` 这类重复文件合回 `A.txt` → 返回 (ops, info)
+
+    目录那一层 build_merge_dirs_plan只管 `txt(1)` 这种整个目录的副本，
+    可重复更多时候是**夹在同一层里的文件**：`书(1).epub` `书(2).epub`。这一支就
+    是为它们准备的，两条 pipeline 互不干扰地合成一份计划（见 build_merge_plan）。
+
+    认定「这两份是同一个文件的副本」要同时满足三件事，缺一件都不敢伸手：
+      ① 同一位父目录下，名字只差一个 `(n)`（`A(1).txt` 的主名是 `A.txt`，
+         括号要塞回后缀之前再配对）
+      ② 主名要么已经在那儿（`A.txt`），要么这一串**至少两兄弟**（`A(1)` `A(2)`）
+         ——孤零零一个 `A(1).txt` 完全可能是正经名字（书本身就分「第二部(1)」），
+         没有旁证时不许动它
+      ③ ★ **大小必须和要留下的那份一致**。重复是「同一个文件多次上传」的结果，
+         字节数必然相同；大小不同就意味着内容不同——`报告(1).pdf` `报告(2).pdf`
+         这种成套资料就会被这道闸放行而不是删掉。删错东西比多留一份严重得多。
+
+    how 决定多余那份的下场（跟目录层一个口径：**move 不删任何东西**）：
+      dedupe 多余的副本**删掉**（就是「合并重复文件＝删掉重复文件」那句话）
+      move   不删：只把最小序号的那个**正名**回主名（主名已被占时这一步没法做，
+             于是整组原样留着），其余一个不动
+
+    ondup（重名跳过/删除）在这一支里不参与：正名去的那个名字本来就是空出来的，
+    不存在「撞名」。传进来也不用，只是和目录层保持同一个调用签名。
+
+    info = {fgroups 命中文件组数, fdup_deleted 删掉的重复文件数,
+            frenamed 正名（改回主名）的条数, fadopted 主名缺席时小号当家的组数,
+            fsize_diff 因大小不同**不敢动**的副本数, fkept 按不删策略原样留下的副本数,
+            scanned 扫描文件数}
+    """
+    entries = strip_backup(entries)
+    how = "dedupe" if str(how).lower().startswith("d") else "move"
+    skip_dirs = set(exclude_dirs or ())
+    skip_paths = set(exclude_paths or ())
+    del ondup                       # 正名去的都是空出来的名字，用不上重名策略
+
+    by_parent, files_scanned = {}, 0
+    for e in entries:
+        if e.get("isdir"):
+            continue
+        files_scanned += 1
+        p = (e.get("path") or "").rstrip("/")
+        parent, _, name = p.rpartition("/")
+        # 目录层已经安排过的地方不许插手：同一批文件不能在一份计划里被写两次
+        if not parent or not name or parent in skip_dirs or p in skip_paths:
+            continue
+        # size 取原始值：查不到大小的条目记 None。两个 None 相等会误判成
+        # 「大小一致」，所以下面比对时先把 None 排除掉——不知道有多大，
+        # 就不知道它们是不是同一份
+        sz = e.get("size")
+        by_parent.setdefault(parent, []).append((name, sz, p))
+
+    ops, groups, adopted = [], 0, 0
+    deleted, renamed, size_diff, kept = 0, 0, 0, 0
+    for parent, items in by_parent.items():
+        have = {n.lower(): (n, s, p) for n, s, p in items}
+        by_main = {}
+        for it in items:
+            got = dup_file_serial(it[0])
+            if got:
+                by_main.setdefault(got[0], []).append((got[1], *it))
+        for main_name, dups in by_main.items():
+            dups.sort()                       # 按序号 1,2,3… 排列
+            recv = have.get(main_name.lower())
+            need_adopt = False
+            if recv is None:
+                # 主名缺席：序号最小的那个当家（理由同目录层的最小序号当家）。
+                # 只有一个副本时没有任何旁证，宁可不动
+                if len(dups) < 2:
+                    continue
+                recv = dups[0][1:]
+                dups = dups[1:]
+                need_adopt = True
+            # 只认跟「要留下那份」大小完全一致的：大小不同 ⇒ 多半不是一回事。
+            # 有一边的大小查不到 ⇒ 也算不一致（不知道多大就不知道是不是同一份）
+            know = recv[1] is not None
+            same = [x for x in dups if know and x[2] == recv[1]]
+            if len(dups) != len(same):
+                size_diff += len(dups) - len(same)
+            if not same:
+                # 一个同大小的都没有 ⇒ 这串多半是成套资料（报告(1) 报告(2) 是
+                # 两册），连「给最小的正名」都不该做——那等于给一个没证据的
+                # 猜测改名字
+                continue
+            groups += 1
+            if need_adopt:
+                adopted += 1
+                ops.append({"op": "rename", "path": recv[2], "name": recv[0],
+                            "newname": main_name, "size": recv[1] or 0,
+                            "adopt": True})
+                renamed += 1
+            elif how == "move":
+                # 主名已经有主人，又不许删 ⇒ 这一组什么都做不了，原样留着
+                kept += len(same)
+                continue
+            if how == "dedupe":
+                for _, name, fsize, path in same:
+                    ops.append({"op": "delete", "path": path, "name": name,
+                                "size": fsize or 0, "dup": True})
+                    deleted += 1
+            else:
+                kept += len(same)
+
+    info = {"fgroups": groups, "fdup_deleted": deleted, "frenamed": renamed,
+            "fadopted": adopted, "fsize_diff": size_diff, "fkept": kept,
+            "scanned": files_scanned}
+    return ops, info
+
+
+def build_merge_plan(entries, ondup: str = "skip", how: str = "move",
+                     target: str = "both"):
+    """重复合并总管：目录层 + 文件层合成一份计划
+
+    target: dir  只处理 `txt(1)` 这类重复目录（老行为）
+            file 只处理 `A(1).txt` 这类重复文件
+            both 两层都做（默认）
+    ★ 认不出来的 target 一律按 both 走：宁可多替一种情况检查，也不能因为参数
+      脏就把某一层悄悄跳过——那正是「功能看着有、其实没生效」的老毛病。
+    """
+    target = str(target or "both").lower().strip()
+    if target not in MERGE_TARGETS:
+        target = "both"
+    if target == "file":
+        return build_merge_files_plan(entries, ondup=ondup, how=how)
+    ops, info = build_merge_dirs_plan(entries, ondup=ondup, how=how)
+    if target == "dir":
+        return ops, dict(info, target="dir")
+    # 目录层安排过的地方不许文件层再插手：同一批文件被写两次，第二条必然报
+    # -9「文件不存在」，真实结果就会比预览少。
+    _, _, touched = merge_dir_pairs(entries)
+    fops, finfo = build_merge_files_plan(entries, ondup=ondup, how=how,
+                                         exclude_dirs=touched)
+    merged = dict(info)
+    for k, v in finfo.items():
+        if k != "scanned":          # scanned 两边同义，用目录层那个就够
+            merged[k] = v
+    return ops + fops, dict(merged, target=target, how=str(how))
 
 
 def build_empty_dir_plan(entries, root: str, skip: str = "", unreadable=None):
