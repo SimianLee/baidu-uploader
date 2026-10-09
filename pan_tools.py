@@ -1279,7 +1279,7 @@ def build_delete_plan(files, f: dict):
 # 空目录：找出「整棵子树里连一个文件都没有」的目录
 # ===========================================================================
 
-def build_merge_dirs_plan(entries, ondup: str = "skip"):
+def build_merge_dirs_plan(entries, ondup: str = "skip", how: str = "move"):
     """把 `归档/txt(1)` 这类副本目录合回主目录 → 返回 (ops, info)
 
     背景（2026-09-28 归档目录实况）：按后缀整理几轮下来，归档下 ~40% 是
@@ -1287,16 +1287,18 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
     txt 与 txt(1) 之间有 7710 对同名文件。这些副本让「整理归档」永远收不了尾：
     每轮扫出来的计划都比真实文件多（一对同名文件在扫描里就是两条计划）。
 
-    ondup 决定「主目录里已经有一个同名文件」时怎么办，与整理归档口径一致：
-      skip   （默认）主目录那个不动，把副本里的编成 `A (2)` 搬进去
-      delete 不编号，直接搬。执行时主目录里那个旧文件会被**删掉**（不备份）
+    how 决定「主目录里已经有了同名文件」时，副本那份怎么处理：
+      move   （默认）搬进主目录。撞名时按 ondup 走：
+              skip   保留主目录那个，把这次的编成 `A (2)`
+              delete 把主目录那个旧的删掉（不备份），这次的直接上位
+      dedupe 重复的**删掉**：主目录既有一份了，副本这份就是多余的，直接删。
+              副本里主目录没有的文件照常搬回去——「去重」不是「清空」，
+              独有的东西不能跟着赔进去
     计划内部互相撞名（两个副本都要把 A.txt 搬进同一个主目录）时一律自动编号，
     理由同 build_organize_plan：不能让自己今晚搬过去的数据被自己顶掉。
 
-    两条安全红线：
-
     规则：同一位父目录下同时有 `X` 和 `X(1)`（`X(2)`…`X(9)` 也归到 X）⇒
-    副本里的**文件**移进主目录，撞名的自动编号 (2)(3)。两条安全红线：
+    副本里的**文件**按 how 处理。两条安全红线：
       · 副本里的**子目录**不动（move 目录进主目录，主目录有同名目录时会出
         各种意外，保守起见留给人工/后续处理）
       · 移空的副本目录**不在这份计划里删**——百度 delete 对目录是连根拔的，
@@ -1305,9 +1307,12 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
 
     entries: PanFiles.list_dir(root, recursive=True) 的原始结果（目录+文件都要）。
     info = {pairs 合并对数, scanned 扫描文件数, moved 待移动文件数,
-            auto 撞名自动编号数, with_subdirs 含子目录的副本数}
+            dup_deleted 删掉的重复文件数, auto 撞名自动编号数,
+            adopted 主目录缺席时拿最小序号当家的组数,
+            with_subdirs 含子目录的副本数}
     """
     entries = strip_backup(entries)
+    how = "dedupe" if str(how).lower().startswith("d") else "move"
     # 按父目录分组：{父: {目录名: 路径}}
     by_parent = {}
     for e in entries:
@@ -1320,16 +1325,35 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
 
     # 只认 X(1)~X(9)：括号里是大数字的多半是正经名字（如「报告(2024)」），
     # 不能因为恰好存在「报告」就把它合进去
-    def dup_of(name):
+    def dup_serial(name):
         m = re.match(r"^(.+)\(([1-9])\)$", name)
-        return m.group(1) if m else None
+        return (m.group(1), int(m.group(2))) if m else None
 
-    pairs = []                       # (主目录路径, 副本路径)
+    pairs = []                       # (接收方路径, 副本路径)
+    adopted = 0                      # 主目录缺席时拿最小序号当家的组数
     for parent, names in by_parent.items():
+        # 先按基础名把副本聚起来：txt(1) txt(2) txt(3) 是一组，各自单独看
+        # 只会知道「没有 txt 主目录」，于是三个副本谁也不动
+        groups = {}
         for name, path in names.items():
-            base = dup_of(name)
-            if base and base in names:
-                pairs.append((names[base], path))
+            got = dup_serial(name)
+            if got:
+                groups.setdefault(got[0], []).append((got[1], name, path))
+        for base, dups in groups.items():
+            dups.sort()                       # 按序号 1,2,3… 排列
+            main = names.get(base)
+            if main:
+                pass
+            else:
+                # 主目录不在这一层里（从没建过、或早先被搬走了）：
+                # 序号最小的那个当家，剩下的合进来。不做这一步，用户看到的
+                # 「一堆 txt(1) txt(2) txt(3)」永远消不掉
+                main = dups[0][2]
+                dups = dups[1:]
+                if dups:
+                    adopted += 1
+            for _, _, path in dups:
+                pairs.append((main, path))
 
     # 各目录现有文件名（撞名编号要以主目录的实况为底）。连大小一起记：
     # 导出的 CSV 里有「大小」这一列，计划里不带它就只能给一列空格子
@@ -1352,6 +1376,7 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
                 subdirs_by_dir.setdefault(d, set()).add(e["path"])
 
     ops, moved, auto, overwrote, with_sub = [], 0, 0, 0, 0
+    dup_deleted = 0                  # dedupe 模式下删掉的重复文件数
     pre = {d: {n.lower() for n, _ in names}
            for d, names in files_by_dir.items()}
     claimed = {}
@@ -1364,6 +1389,14 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
         for name, fsize in files_by_dir.get(dup_path) or []:
             low = name.lower()
             hit_pre = low in pool
+            # dedupe：主目录已经有一份了 ⇒ 副本这份多余，删掉。
+            # low in taken 也算——那是今晚刚从另一个副本搬过去的，同样是重复。
+            # 只有主目录里真没有的（独有文件）才谈得上搬回去
+            if how == "dedupe" and (hit_pre or low in taken):
+                ops.append({"op": "delete", "path": f"{dup_path}/{name}",
+                            "name": name, "size": fsize, "dup": True})
+                dup_deleted += 1
+                continue
             if hit_pre and overwrite:
                 pool.discard(low)
                 taken.add(low)
@@ -1388,6 +1421,7 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
 
     info = {"pairs": len(pairs), "scanned": files_scanned,
             "moved": moved, "auto": auto, "overwrite": overwrote,
+            "dup_deleted": dup_deleted, "adopted": adopted, "how": how,
             "with_subdirs": with_sub}
     return ops, info
 

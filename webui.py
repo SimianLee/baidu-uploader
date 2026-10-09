@@ -562,6 +562,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": ok, "msg": msg})
 
         # ---------------- 网盘整理 / 批量改名 / 批量删除（沙盒内） ----------------
+        if path == "/api/pan_plan" and str(body.get("kind") or "") == "rename_csv":
+            # 「按表改名」没有 token 也能先生成预览：名字是表格里写好的，
+            # 执行才需要授权。所以它必须在下面那条要求授权的分支之前分流
+            return self._pan_plan_csv(body)
         if path in ("/api/pan_browse", "/api/pan_plan", "/api/pan_apply"):
             return self._handle_pan(path, body)
 
@@ -605,8 +609,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._preview_ops(body)
         if path == "/api/preview_export":
             return self._preview_export(body)
+        # 老入口，保留给写过的脚本/书签；新界面走 565 行那条 kind=rename_csv
         if path == "/api/pan_import_csv":
-            return self._pan_import_csv(body)
+            return self._pan_plan_csv(body)
 
         # ---------------- 本地改名（上传前预处理，动的是磁盘上的真文件）----------------
         if path == "/api/local_rename_preview":
@@ -838,7 +843,7 @@ class Handler(BaseHTTPRequestHandler):
         return {"ops": good, "errs": errs, "skipped": skipped,
                 "rows": len(body_rows), "parsed": len(ops)}
 
-    def _pan_import_csv(self, body):
+    def _pan_plan_csv(self, body):
         """读一张 CSV，把它变成一个改名计划（**不需要网盘授权**：先生成预览再说）
 
         典型用法：先用本面板把某次改名导出成表格，在 Excel 里逐行修好「新文件名」，
@@ -847,9 +852,13 @@ class Handler(BaseHTTPRequestHandler):
         只认 rename：CSV 能表达的只有「哪个文件叫哪个新名字」。移动/删除需要「目标
         目录」这类额外信息，靠猜反而危险。截断预览 2000 条、完整计划照存，
         与 /api/pan_plan 完全同形。
+
+        走的是 pan_plan 那套管道（指纹复用 → 落盘 → 存完整计划），所以同一张表
+        再点一次「生成预览」不必重解析几万行，也能一次性执行完。
         """
         import csv as _csv
         import io as _io
+        import hashlib as _hashlib
         import pan_tools
         text = str(body.get("csv") or "")
         if not text.strip():
@@ -860,10 +869,46 @@ class Handler(BaseHTTPRequestHandler):
             cfg = {}
         sandbox = str(cfg.get("remote_dir") or "/apps/baidu_uploader").rstrip("/")
 
+        refresh = bool(body.get("refresh"))
+        dup_policy = _dup_policy(body)
+        # 指纹：表格内容 + 重名策略 + 文件名。表格内容用摘要——几万行原文塞进
+        # 指纹既浪费又没必要，内容一样才算同一份计划
+        payload = {"csv_sha1": _hashlib.sha1(text.encode("utf-8")).hexdigest()[:16],
+                   "rows": text.count("\n"), "ondup": dup_policy}
+        kind = "rename_csv"
+        if not refresh:
+            old = preview_store.find_recent(
+                PROJ, preview_store.fingerprint(kind, payload, sandbox))
+            if old:
+                return self._json(self._preview_resp(old, reused=True))
+
         parsed = self._parse_rename_csv(text, sandbox)
         errs = parsed["errs"]
         good = parsed["ops"]
         skipped = parsed["skipped"]
+        # 表格里写的目标名互相撞了（或撞到同目录不用改名的文件）：按重名策略处理，
+        # 与改名页签口径一致。跳过＝编号保住两边，删除＝旧的那个被删掉。
+        # 这里没有网盘实况（本入口刻意不联网），拿「表格里出现过的原名」当底：
+        # 它们改完就把名字让出来了，剩下的漏网之鱼执行时会报撞名，
+        # apply_plan 的复核会把它如实标出来，而不是假装成功
+        if good:
+            # 注意 validate_plan 过一遍后 op 上只剩 path/op/newname，name 被洗掉了
+            # （前端画预览也是靠 path 兜底），所以这里自己从 path 取
+            view = [{"dir": o["path"].rsplit("/", 1)[0],
+                     "name": o["path"].rsplit("/", 1)[-1],
+                     "newname": o["newname"], "_op": o} for o in good]
+            used = {}
+            for v in view:
+                used.setdefault(v["dir"], set()).add(v["name"].lower())
+            csv_auto = pan_tools.dedupe_newnames(view, used, dup_policy)
+            for v in view:
+                # 把 name 补回去：导出的预览表格里有「文件名」这一列
+                v["_op"]["name"] = v["name"]
+                v["_op"]["newname"] = v["newname"]
+                if v.get("overwrite"):
+                    v["_op"]["overwrite"] = True
+        else:
+            csv_auto = 0
         if not good:
             # 失败也把 skipped 带上：整张表都是「新旧同名」时，
             # 光说「没解析出任何改名」会让人以为是表格坏了
@@ -875,18 +920,22 @@ class Handler(BaseHTTPRequestHandler):
 
         full = len(good)
         nrows = parsed["rows"]
-        payload = {"kind": "import_csv", "csv_rows": nrows}
-        label = f"按表改名 · CSV {nrows} 行"
+        dup_mark = " · 重名删除" if pan_tools.dup_kind(dup_policy) == "delete" else ""
+        label = f"按表改名 · CSV {nrows} 行{dup_mark}"
         rec = preview_store.save_preview(
-            PROJ, "import_csv", good[:2000],
-            {"total": full, "scanned": nrows, "skipped": skipped},
+            PROJ, kind, good[:2000],
+            {"total": full, "scanned": nrows, "skipped": skipped, "csv": 1,
+             "auto": csv_auto,
+             "overwrite": sum(1 for o in good if o.get("overwrite"))},
             payload, sandbox=sandbox, path="", label=label)
         resp = {"ok": True, "ops": good[:2000], "total": full,
-                "scanned": nrows, "skipped": skipped,
+                "scanned": nrows, "skipped": skipped, "csv": 1, "auto": csv_auto,
+                "overwrite": sum(1 for o in good if o.get("overwrite")),
                 "reused": False, "plan_saved": False, "errors": errs[:10]}
         if rec:
+            # 完整计划照存：预览只回传前 2000 条，执行靠它一次跑完
             resp["plan_saved"] = preview_store.save_full_plan(
-                PROJ, rec["id"], good, "import_csv", payload, label)
+                PROJ, rec["id"], good, kind, payload, label)
             resp.update(preview_id=rec["id"], preview_ts=rec["ts"], preview_age=0)
         if errs:
             blocked = max(0, (parsed.get("parsed") or 0) - full)
@@ -1004,7 +1053,7 @@ class Handler(BaseHTTPRequestHandler):
             #   · ondup：整理/合并的「重名跳过 / 重名删除」——它**改变计划本身**
             #     （跳过给后来的自动编号，删除不编号直接搬），所以必须进指纹
             for k in ("mode", "params", "by", "dest", "filters", "skip", "exts",
-                      "ondup"):
+                      "ondup", "how"):
                 if k in body:
                     payload[k] = body[k]
             if kind == "empty_dir" or kind == "merge_dirs":
@@ -1119,10 +1168,16 @@ class Handler(BaseHTTPRequestHandler):
                 # 合并 X(1)/X(2) 副本目录：归档几轮下来攒出的大量 (1) 目录
                 # 是「预览总比真实文件多」的根因——同名对在扫描里就是两条计划
                 dup_policy = _dup_policy(body)
+                # how: move=都搬回主目录（撞名按 ondup）/ dedupe=重复的删掉
+                how = str(body.get("how") or "move").lower()
+                if how not in ("move", "dedupe"):
+                    how = "move"
                 ops, minfo = pan_tools.build_merge_dirs_plan(
-                    entries, ondup=dup_policy)
+                    entries, ondup=dup_policy, how=how)
                 info = {"scanned": len(files), **minfo}
-                label = "合并重复目录" + _dup_label(dup_policy)
+                label = ("合并重复目录"
+                         + ("· 删除重复文件" if how == "dedupe" else "")
+                         + _dup_label(dup_policy))
             elif kind == "empty_dir":
                 # skip 由前端给，默认保护本工具自己的备份区；
                 # unreadable 是这次扫不进去的目录——「不知道里面有什么」绝不能

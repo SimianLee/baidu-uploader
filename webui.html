@@ -717,7 +717,6 @@
         <div class="tabs">
           <button class="tab on" id="tabRename" onclick="panTab('rename')">批量改名</button>
           <button class="tab" id="tabOrganize" onclick="panTab('organize')">整理归档</button>
-          <button class="tab" id="tabCsv" onclick="panTab('csv')">按表改名</button>
           <button class="tab" id="tabDelete" onclick="panTab('delete')">批量删除</button>
         </div>
 
@@ -733,6 +732,7 @@
                 <option value="regex">正则替换</option>
                 <option value="clean">去广告/括号清理</option>
                 <option value="title">只保留书名（整理小说用）</option>
+                <option value="csv">按表格改名（导入 CSV）</option>
               </select>
             </div>
             <div class="field sm" id="rnFindBox">
@@ -780,6 +780,34 @@
             </label>
           </div>
           <div class="hint" id="rnHint">把文件名里的某串替换成另一串（大小写不敏感）。</div>
+          <!-- 「按表格改名」：把导出去的 CSV 在 Excel 里改好再喂回来。
+               跟上面那五种模式互斥——名字是表格里写好的，混着显示只会让人以为
+               还要再配一遍参数，所以它自己单独占一块 -->
+          <div class="row hidden" id="rnCsvBox">
+            <div class="field sm" style="flex:1 1 320px">
+              <label>选择 CSV 表格</label>
+              <input type="file" id="csvFile" accept=".csv,.txt" onchange="csvPick(this.files[0])">
+            </div>
+            <div class="field sm" style="flex:0 0 auto">
+              <label>&nbsp;</label>
+              <div class="btnbar" style="align-items:flex-end">
+                <button class="btn ghost sm" onclick="csvSample()">下载模板</button>
+              </div>
+            </div>
+          </div>
+          <div class="hint hidden" id="rnCsvHint">
+            把导出去的改名表格（<code>预览_xxx.csv</code>）在 Excel 里改好「新文件名」这一列，
+            选回来后点下面的<b>「生成预览」</b>。<br>
+            表格只需要两列：<b>原路径</b>（或「路径」「文件名」）和 <b>新文件名</b>（或「新名」「目标名」）；
+            没有表头也认，第 1 列当路径、第 2 列当新名。不在网盘根目录范围内的行、
+            新名字里带斜杠的行会被拦下并报出来。<br>
+            这个模式<b>不扫网盘</b>：名字就是表格里写好的，所以上面的「查找/模板」那些参数、
+            「含子目录」在这里都没有意义。<br>
+            表格里两行撞成同一个名字时<b>一律自动编号</b>（绝不能自己顶掉自己）；
+            真正由左上角「重名跳过 / 重名删除」决定的是表格<b>之外</b>同名的那份——
+            它不在这张表里，体现在执行那一刻：跳过＝那一条报失败，删除＝把它删掉。
+          </div>
+          <div class="hint hidden" id="rnCsvStat" style="color:#7fa0ff"></div>
         </div>
 
         <!-- 整理：归类移动 / 合并重复目录 / 清理空文件夹 三种方式共用一个页签，
@@ -806,37 +834,22 @@
               <label>归档到</label>
               <input id="ogDest" placeholder="/apps/baidu_uploader/归档">
             </div>
-            <div class="field og-empty hidden">
+            <div class="field sm og-empty hidden">
               <label>跳过名字含（逗号分隔）</label>
               <input id="edSkip" value="_覆盖备份" placeholder="命中的目录及其子目录都不动">
+            </div>
+            <div class="field sm og-merge hidden" style="flex:0 0 230px">
+              <label>重复的文件怎么处理</label>
+              <select id="ogMergeHow">
+                <option value="dedupe">删除重复那份（推荐）</option>
+                <option value="move">全部搬回主目录</option>
+              </select>
             </div>
           </div>
           <div class="hint" id="ogHint"></div>
         </div>
 
-        <!-- 按表改名：导出去的 CSV 在 Excel 里改好了再喂回来 -->
-        <div class="panel" id="paneCsv">
-          <div class="row">
-            <div class="field sm" style="flex:1 1 320px">
-              <label>选择 CSV 表格</label>
-              <input type="file" id="csvFile" accept=".csv,.txt" onchange="csvPick(this.files[0])">
-            </div>
-            <div class="field sm" style="flex:0 0 auto">
-              <label>&nbsp;</label>
-              <div class="btnbar" style="align-items:flex-end">
-                <button class="btn ghost sm" id="btnCsvDo" onclick="csvImport()" disabled>生成预览</button>
-                <button class="btn ghost sm" onclick="csvSample()">下载模板</button>
-              </div>
-            </div>
-          </div>
-          <div class="hint" id="csvHint">
-            把导出去的改名表格（<code>预览_xxx.csv</code>）在 Excel 里改好「新文件名」这一列，再选回来执行。<br>
-            表格只需要两列：<b>原路径</b>（或「路径」「文件名」）和 <b>新文件名</b>（或「新名」「目标名」）；没有表头也认，第 1 列当路径、第 2 列当新名。
-            不在网盘根目录范围内的行、新名字里带斜杠的行会被拦下并报出来。<br>
-            这个页签<b>不需要</b>「生成预览」按钮旁边的那些模式——名字就是表格里写好的，改完后照常在下方预览、执行。
-          </div>
-          <div class="hint" id="csvStat" style="color:#7fa0ff"></div>
-        </div>
+        <!-- 「按表改名」已并入上面「批量改名」页签的一种模式（后面那个选项） -->
 
         <!-- 删除 -->
         <div class="panel" id="paneDelete">
@@ -1522,7 +1535,6 @@ function ogMode(){
 function panTab(k){
   panTab_ = k;
   [['rename','tabRename','paneRename'], ['organize','tabOrganize','paneOrganize'],
-   ['csv','tabCsv','paneCsv'],
    ['delete','tabDelete','paneDelete']].forEach(([key, tab, pane]) => {
     $(tab).classList.toggle('on', key === k);
     $(pane).classList.toggle('on', key === k);
@@ -1531,6 +1543,9 @@ function panTab(k){
   // 执行时把策略悄悄带过去（setDup 内部会顺手作废手里的预览）
   if(typeof setDup === 'function') setDup('skip', true);   // silent：切页签不该弹提示
   if(typeof ogModeChange === 'function') ogModeChange();
+  // 回到改名页签时按当前模式重排一遍显隐：上次可能停在「按表格改名」，
+  // 那时第二行的那些参数是藏起来的
+  if(typeof panModeChange === 'function') panModeChange();
   if(k === 'delete') dlSyncHint();     // 备份区路径/提示按当前沙盒刷新一遍
   panResetPlan();
 }
@@ -1542,13 +1557,19 @@ function ogModeChange(){
   const m = ogMode();
   document.querySelectorAll('.og-org').forEach(e => e.classList.toggle('hidden', m !== 'organize'));
   document.querySelectorAll('.og-empty').forEach(e => e.classList.toggle('hidden', m !== 'empty'));
+  document.querySelectorAll('.og-merge').forEach(e => e.classList.toggle('hidden', m !== 'merge'));
   $('ogHint').innerHTML = ({
     organize: '文件会移动到「归档目录/分类名/」下。撞到网盘已有的同名文件时：'
       + '<b>重名跳过</b>＝保留那一个，这次搬过去的自动编成 <code>A (2).txt</code>（两边都在）；'
       + '<b>重名删除</b>＝把网盘上那个旧文件<b>直接删掉</b>（不可恢复、不备份），'
       + '这次的文件不编号直接上位。',
-    merge: '把 <b>txt(1)</b>、<b>mobi(1)</b> 这类副本目录里的文件合回 <b>txt</b>、<b>mobi</b> 主目录'
-      + '（同一位父目录下同时有 <code>X</code> 和 <code>X(1)</code> 才算一对）。<br>'
+    merge: '把 <b>txt(1)</b>、<b>txt(2)</b>、<b>txt(3)</b>… 这类副本目录合回 <b>txt</b> 主目录'
+      + '（同一位父目录下的一串同名序号目录算一组）。主目录不在时，<b>序号最小的那个当家</b>，'
+      + '其余合进去——不然那一串副本谁也不动。<br>'
+      + '重复的（主目录里已经有一份的）文件按右边那个下拉办：'
+      + '<b>删除重复那份</b>＝副本里那个直接删掉⚠不可恢复，主目录那份留着；'
+      + '<b>全部搬回主目录</b>＝都搬过去，撞名的按重名策略编号或删旧。'
+      + '副本里主目录<b>没有</b>的文件，两种方式都一样会搬回去——去重不是清空。<br>'
       + '副本里的<b>子目录</b>不动；搬空的副本目录也不在这里删——'
       + '合完切到上面的「清理空文件夹」收拾更安全。'
       + '因为要配对整棵子树的目录名，这个方式<b>总是递归扫描</b>。',
@@ -1613,6 +1634,16 @@ function panModeChange(){
   show('rnPatternBox', m === 'regex');
   show('rnRepl2Box',   m === 'regex');
   show('rnVolBox',     m === 'title');
+  // 「按表格改名」独占一块：它跟上面这些参数互斥（名字是表格里写好的），
+  // 所以连「只处理后缀」一起藏掉——留着只会让人以为还得再配一遍
+  show('rnCsvBox',    m === 'csv');
+  show('rnCsvHint',   m === 'csv');
+  show('rnCsvStat',   m === 'csv' && !!$('rnCsvStat').textContent);
+  show('rnExtBox',    m !== 'csv');
+  $('rnHint').classList.toggle('hidden', m === 'csv');   // 说明换成表格那一块的
+  // 表格模式不扫网盘，「含子目录」在这没有意义。它不会被 ogLockRecursive 抢回去：
+  // panTab 先跑 ogModeChange（那时已不在整理页签，会解锁），再跑这里
+  $('recBox').classList.toggle('hidden', m === 'csv');
   $('rnHint').textContent = {
     replace: '把文件名里的某串替换成另一串（大小写不敏感）。',
     affix:   '统一加前缀 / 后缀，扩展名不受影响。',
@@ -1682,11 +1713,19 @@ function pvStatsFrom(d, total){
     it.push({n: d.dirs_scanned || 0, label: '扫描目录', cls: 'acc'});
     it.push({n: d.files_scanned || 0, label: '扫描文件', cls: 'acc'});
   }else if(d.scanned){
-    it.push({n: d.scanned, label: '扫描文件', cls: 'acc'});
+    // 按表改名那这里的 scanned 是表格行数，不是扫出来的文件数
+    it.push({n: d.scanned, label: d.csv ? '表格行数' : '扫描文件', cls: 'acc'});
   }
   if(d.pairs != null){
     it.push({n: d.pairs, label: '重复目录对', cls: 'warn'});
-    it.push({n: total, label: '待搬文件', cls: 'ok'});
+    // 「删除重复那份」是混合清单：搬回的和删掉的分开摆，别让人只看见一个总数
+    if(d.dup_deleted){
+      it.push({n: d.moved || 0, label: '搬回主目录', cls: 'ok'});
+      it.push({n: d.dup_deleted, label: '删重复文件', cls: 'bad'});
+    }else{
+      it.push({n: total, label: '待搬文件', cls: 'ok'});
+    }
+    if(d.adopted) it.push({n: d.adopted, label: '缺主目录·小号当家', cls: 'warn'});
   }else{
     it.push({n: total, label: '条操作', cls: total ? 'ok' : ''});
   }
@@ -1874,13 +1913,14 @@ function execPaint(d, sec){
 /* ---------- 按表改名（CSV 导入） ----------
    典型用法：把改名预览导出成 CSV → 在 Excel 里逐行定好「新文件名」→ 喂回来执行。
    这样几万条人工判断过的名字，不必在界面里一条条操作。
-   这里不玩任何「聪明」的花样：表格里写什么就改成什么，与批量改名那五个模式无关。 */
+   这里不玩任何「聪明」的花样：表格里写什么就改成什么，与批量改名那几个模式无关。
+   生成预览统一用下方那颗「生成预览」按钮——panPlan() 看到 rnMode=csv 就走这条路 */
 let csvText = '';
 
 function csvPick(f){
   csvText = '';
-  const btn = $('btnCsvDo'), stat = $('csvStat');
-  if(!f){ btn.disabled = true; stat.textContent = ''; return; }
+  const stat = $('rnCsvStat');
+  if(!f){ stat.textContent = ''; stat.classList.add('hidden'); return; }
   const rd = new FileReader();
   rd.onload = () => {
     csvText = String(rd.result || '');
@@ -1899,51 +1939,30 @@ function csvPick(f){
   };
   rd.onerror = () => {
     stat.textContent = '这个文件读不出来';
-    btn.disabled = true;
+    stat.classList.remove('hidden');
   };
   rd.readAsText(f, 'utf-8');
 
   function finish(){
     const lines = csvText.split(/\r?\n/).filter(l => l.trim()).length;
-    stat.textContent = `已选 ${f.name}：${lines} 行，点「生成预览」看会被改成什么样`;
-    btn.disabled = !lines;
+    stat.textContent = `已选 ${f.name}：${lines} 行，点下面的「生成预览」看会被改成什么样`;
+    stat.classList.remove('hidden');
     setMsg('panMsg', '', null);
   }
 }
 
-async function csvImport(){
-  if(!csvText.trim()){ setMsg('panMsg', '请先选择一个 CSV 文件', false); return; }
-  const btn = $('btnCsvDo'), stat = $('csvStat');
-  btn.disabled = true;
-  try{
-    const d = await api('/api/pan_import_csv', {csv: csvText});
-    if(!d.ok){
-      setMsg('panMsg', d.msg || '表格里没有可用的改名', false);
-      stat.textContent = (d.errors || []).slice(0, 3).join('；');
-      return;
-    }
-    // 与 pan_plan 的返回同形：预览渲染、执行按钮、预览文件下拉全部照原样复用
-    panOps = d.ops || [];
-    panTotal = d.total || 0;
-    renderPanPreview(panOps, '');
-    pvPaintStats([
-      {n: panTotal, label: '条改名', cls: panTotal ? 'ok' : ''},
-      {n: d.scanned || 0, label: '表格行数', cls: ''},
-      {n: d.skipped || 0, label: '无需改动', cls: ''},
-    ]);
-    $('btnPanApply').disabled = !panOps.length;
-    setPlanReady(!!d.plan_saved);
-    if(typeof pvRefresh === 'function') pvRefresh(d.preview_id || '');
-    const errs = d.errors || [];
-    setMsg('panMsg',
-      `表格里 ${d.scanned} 行 → ${panTotal} 条改名`
-      + (errs.length ? ` ⚠ ${errs.length} 条被拦截：${errs[0].slice(0, 60)}` : ''),
-      errs.length ? null : true);
-    stat.textContent = `已生成预览：${panTotal} 条`
-      + (d.plan_saved ? '（完整计划已存，可一次执行全部）' : '');
-  }finally{
-    btn.disabled = !csvText;
-  }
+/* 表格 → 预览。跟 pan_plan 的返回同形，所以预览渲染、执行按钮、
+   预览文件下拉全部照原样复用 */
+function csvAfterPlan(d){
+  const stat = $('rnCsvStat');
+  const errs = d.errors || [];
+  const total = d.total || 0;
+  stat.textContent = total
+    ? `已生成预览：${total} 条`
+      + (d.plan_saved ? '（完整计划已存，可一次执行全部）' : '')
+    : '';
+  stat.classList.toggle('hidden', !total);
+  return (errs.length ? ` ⚠ ${errs.length} 条被拦截：${errs[0].slice(0, 60)}` : '');
 }
 
 /* 模板：列名写清楚，后端 `csv_cols` 才能稳稳认出来 */
@@ -2194,29 +2213,39 @@ async function panPlan(refresh){
 
   if(panTab_ === 'rename'){
     const m = $('rnMode').value;
-    body.kind = 'rename';
-    body.mode = m;
-    // 重名策略对改名同样有效，而且**影响计划本身**（跳过给撞车的编号、覆盖直接顶），
-    // 所以必须发过去：既让后端照它算，也让它进指纹（换策略不会拿旧预览顶上）
-    body.ondup = panDup;
-    body.exts = $('rnExts').value;      // 留空=全部；填了就只改这些后缀的文件
-    body.params = ({
-      replace: {find: $('rnFind').value, replace: $('rnRepl').value},
-      affix:   {prefix: $('rnPrefix').value, suffix: $('rnSuffix').value},
-      serial:  {start: +$('rnStart').value || 1, width: +$('rnWidth').value || 3,
-                template: $('rnTpl').value},
-      regex:   {pattern: $('rnPattern').value, repl: $('rnRepl2').value},
-      clean:   {},
-      // 分册/系列要不要留，得发给后端：它俩改变结果，也必须进指纹，
-      // 不然改了开关还拿上一份预览顶上，用户会以为开关没生效
-      title:   {keep_volume: $('rnKeepVol').checked,
-                keep_series: $('rnKeepSeries').checked}
-    })[m];
-    if(m === 'replace' && !body.params.find){
-      setMsg('panMsg', '请先填写「查找」内容', false); return;
-    }
-    if(m === 'regex' && !body.params.pattern){
-      setMsg('panMsg', '请先填写正则表达式', false); return;
+    if(m === 'csv'){
+      // 「按表格改名」：名字是表格里写好的，不扫网盘，也不用上面那些参数。
+      // 但重名策略仍然生效——表格里两行撞成同一个名字时按它办
+      if(!csvText.trim()){
+        setMsg('panMsg', '请先选一张 CSV 表格；没有的话点上面的「下载模板」照着装', false);
+        return;
+      }
+      body = {kind: 'rename_csv', csv: csvText, ondup: panDup};
+    }else{
+      body.kind = 'rename';
+      body.mode = m;
+      // 重名策略对改名同样有效，而且**影响计划本身**（跳过给撞车的编号、删除直接删旧），
+      // 所以必须发过去：既让后端照它算，也让它进指纹（换策略不会拿旧预览顶上）
+      body.ondup = panDup;
+      body.exts = $('rnExts').value;    // 留空=全部；填了就只改这些后缀的文件
+      body.params = ({
+        replace: {find: $('rnFind').value, replace: $('rnRepl').value},
+        affix:   {prefix: $('rnPrefix').value, suffix: $('rnSuffix').value},
+        serial:  {start: +$('rnStart').value || 1, width: +$('rnWidth').value || 3,
+                  template: $('rnTpl').value},
+        regex:   {pattern: $('rnPattern').value, repl: $('rnRepl2').value},
+        clean:   {},
+        // 分册/系列要不要留，得发给后端：它俩改变结果，也必须进指纹，
+        // 不然改了开关还拿上一份预览顶上，用户会以为开关没生效
+        title:   {keep_volume: $('rnKeepVol').checked,
+                  keep_series: $('rnKeepSeries').checked}
+      })[m];
+      if(m === 'replace' && !body.params.find){
+        setMsg('panMsg', '请先填写「查找」内容', false); return;
+      }
+      if(m === 'regex' && !body.params.pattern){
+        setMsg('panMsg', '请先填写正则表达式', false); return;
+      }
     }
   }else if(panTab_ === 'organize'){
     // 一个页签三种整理方式，挑出来的 kind 记下来：下面的结果文案要按它措辞
@@ -2226,8 +2255,9 @@ async function panPlan(refresh){
       if(!dest){ setMsg('panMsg', '请填写归档目标目录', false); return; }
       body = {...body, kind: 'organize', by: $('ogBy').value, dest, ondup: panDup};
     }else if(m === 'merge'){
-      // recursive 恒为 true：配对 (1) 目录要看整棵子树，后端也会强制递归
-      body = {...body, kind: 'merge_dirs', recursive: true, ondup: panDup};
+      // recursive 恒为 true：配对序号副本要看整棵子树，后端也会强制递归
+      body = {...body, kind: 'merge_dirs', recursive: true, ondup: panDup,
+              how: $('ogMergeHow').value};
     }else{
       // recursive 恒为 true：后端也会强制递归，这里显式写出来免得两头不一致
       body = {...body, kind: 'empty_dir', recursive: true, skip: $('edSkip').value};
@@ -2236,10 +2266,6 @@ async function panPlan(refresh){
     body = {...body, kind: 'delete', filters: {
       exts: $('dlExts').value, keywords: $('dlKw').value,
       regex: $('dlRegex').value, min_mb: +$('dlMin').value || 0, max_mb: +$('dlMax').value || 0}};
-  }else if(panTab_ === 'csv'){
-    // 这个页签不扫网盘：名字就是表格里写好的，用页签内的「生成预览」按钮
-    setMsg('panMsg', '「按表改名」请用上面那个「生成预览」按钮：'
-      + '名字是表格里写好的，不需要下面的模式参数和扫描', null); return;
   }else{
     // 各功能页签都处理完了还走到这里，说明前端状态乱了：别往下跑，老实报出来
     setMsg('panMsg', '请先选择功能页签', false); return;
@@ -2270,6 +2296,7 @@ async function panPlan(refresh){
   // 按真发出去的那种计划措辞：用户中途把下拉改了也不该改变这份结果的解说
   const isEmptyTab = planKind === 'empty_dir';
   const isMergeTab = planKind === 'merge_dirs';
+  const isCsvTab   = planKind === 'rename_csv';   // 按表改名：不扫网盘，行数≠扫描数
   // 重名策略说人话：「跳过」不是不搬，是给后来的编个号谁都不丢；
   // 「删除」才会把网盘上那个旧文件删掉（不可恢复）
   const dupTxt = isDupDelete()
@@ -2300,10 +2327,28 @@ async function panPlan(refresh){
           ? ' · ⚠ 这棵树里一个文件都没有（纯目录骨架），删掉后分类结构会一起消失'
           : '')
     : isMergeTab
-    ? `发现 ${d.pairs || 0} 对重复目录（X 与 X(1)） → ${panTotal} 条移动`
-      // 撞名数不在这里重复说：末尾的 dupTxt 会连同「跳过/覆盖」一起讲清楚
+    ? `发现 ${d.pairs || 0} 对重复目录（X 与 X(1)） → `
+      + (d.how === 'dedupe'
+         ? `${d.moved || 0} 条搬回主目录 / ${d.dup_deleted || 0} 个重复文件待删除`
+         : `${panTotal} 条移动`)
+      + (d.adopted ? ` · ${d.adopted} 组缺主目录，已让序号最小的那个当家` : '')
+      // 撞名数不在这里重复说：末尾的 dupTxt 会连同「跳过/删除」一起讲清楚
       + (d.with_subdirs ? ` · ⚠ ${d.with_subdirs} 个副本里还有子目录（保守起见没动，见明细）` : '')
-      + (d.pairs ? ' · 搬空后切到「清理空文件夹」清掉空壳' : '')
+      + (d.moved ? ' · 搬空后切到「清理空文件夹」清掉空壳' : '')
+      + (panTotal > panOps.length
+          ? ((d.plan_saved || d.plan_ready)
+             ? ` · 列表显示前 ${panOps.length} 条，点「执行」会按完整计划分 `
+               + `${Math.ceil(panTotal / 2000)} 批全部跑完`
+             : ` · ⚠ 完整计划没存下来，本次只能执行前 ${panOps.length} 条，`
+               + `重新生成一次即可全跑完`)
+          : '')
+    : isCsvTab
+    ? `表格 ${d.scanned || 0} 行 → ${panTotal} 条改名`
+      + (d.skipped ? `（${d.skipped} 行空行或新旧同名）` : '')
+      // 表格里两行改成同一个名字时跟改名页签一个口径：跳过=编号，删除=删掉旧的
+      + (isDupDelete()
+         ? ` · ⚠ 重名删除：${d.overwrite || 0} 个会删掉网盘上已有的同名文件`
+         : (d.auto ? ` · ${d.auto} 个撞名已自动编号 (2)(3)` : ''))
       + (panTotal > panOps.length
           ? ((d.plan_saved || d.plan_ready)
              ? ` · 列表显示前 ${panOps.length} 条，点「执行」会按完整计划分 `
@@ -2332,7 +2377,9 @@ async function panPlan(refresh){
   const srcTxt = d.reused
     ? `♻ 复用了 ${pvAge(d.preview_age)}生成的同参数预览，没有重新扫描网盘`
     : (d.preview_ts ? `已存为预览文件 ${String(d.preview_ts).slice(11)}` : '');
-  renderPanPreview(panOps, tail + (srcTxt ? ` · ${srcTxt}` : ''));
+  // 表格模式把自己的状态行刷新一遍（行数统计写在页签里，别占着结果区）
+  const csvErr = isCsvTab ? csvAfterPlan(d) : '';
+  renderPanPreview(panOps, tail + (srcTxt ? ` · ${srcTxt}` : '') + csvErr);
   pvPaintStats(pvStatsFrom(d, panTotal));
   $('btnPanApply').disabled = !panOps.length;
   setPlanReady(!!(d.plan_saved || d.plan_ready));
@@ -2343,7 +2390,7 @@ async function panPlan(refresh){
           : '没有空的文件夹，很干净')
     : (sk ? `没有符合条件的文件（另有 ${sk} 个目录没扫到）` : '没有符合条件的文件');
   setMsg('panMsg', panOps.length
-    ? `${tail}${srcTxt ? '；' + srcTxt : ''}，确认后点「执行」`
+    ? `${tail}${srcTxt ? '；' + srcTxt : ''}${csvErr}，确认后点「执行」`
       + (skipDetail ? `。${skipDetail}` : '')
     : noneTxt + (skipDetail ? `。${skipDetail}` : ''),
     !panOps.length ? false : null);
@@ -2361,8 +2408,16 @@ async function panApply(){
   // 只有旧版本存的预览（没有完整计划）才只能跑前端手里那 2000 条。
   const full = !!(pvCurrent && pvPlanReady && panTotal > n);
   const n2 = full ? panTotal : n;
+  const delN = panOps.filter(o => o.op === 'delete').length;
+  const mvN  = panOps.filter(o => o.op === 'move').length;
+  // 合并重复·「删除重复那份」出来的清单是混合的：既有搬回主目录的，也有要删的。
+  // 这时候说「即将永久删除 N 个文件」会把要搬走的那部分也算进去，得拆开讲
+  const mixedPlan = delN > 0 && (mvN > 0 || panOps.some(o => o.op === 'rename'));
   const tip = onlyEmptyDirs
     ? `即将删除 ${n2} 个空文件夹（内部不含任何文件），删除后不可恢复。确定继续吗？`
+    : mixedPlan
+    ? `⚠ 即将把 ${mvN} 个主目录里没有的文件搬回主目录，并永久删除 ${delN} 个重复的`
+      + `同名文件（不进备份区，不可恢复）。确定继续吗？`
     : isDel
     ? (dlBackupOn()
        ? `即将把 ${n2} 个文件移进备份区「${backupPathText()}/时间戳/」（不是真删，可找回；`
