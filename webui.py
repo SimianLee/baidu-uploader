@@ -52,15 +52,39 @@ OP_TEXT = {"rename": "改名", "move": "移动", "delete": "删除"}
 
 
 def _dup_policy(body) -> str:
-    """取出「重名跳过 / 重名覆盖」，只认这两个值，其余一律按最安全的 skip"""
-    v = str(body.get("ondup") or "skip").lower()
-    return v if v in ("skip", "overwrite") else "skip"
+    """取出「重名跳过 / 重名删除」，归一成 pan_tools 认的 skip / delete。
+
+    老客户端（含已经落盘的旧预览）还在发 overwrite —— 那是「把旧文件挪进备份区」
+    的老叫法，现在等价于 delete，直接映射过去，别以非法值为由悄悄降级成 skip，
+    那会让用户以为选了删除、实际啥也没删。
+    """
+    # pan_tools 是函数内延迟导入的（顶层不写 import：它要读 token，而 webui 有些
+    # 路由压根用不到它），这里跟着用同一套路子
+    import pan_tools
+    return pan_tools.dup_kind(body.get("ondup"))
 
 
 def _dup_label(ondup: str) -> str:
-    """预览标题带上重名策略：两份「整理归档·按后缀」如果一份跳过一份覆盖，
+    """预览标题带上重名策略：两份「整理归档·按后缀」如果一份跳过一份删除，
     列表里必须能分清——它们是两份完全不同的计划"""
-    return "（重名覆盖）" if ondup == "overwrite" else "（重名跳过）"
+    import pan_tools
+    return "（重名删除）" if pan_tools.dup_kind(ondup) == "delete" else "（重名跳过）"
+
+
+def _upload_dup(cfg_or_val) -> str:
+    """上传时「网盘目标处已有同名文件」怎么处理，只认三种：
+
+    skip   跳过不上传，本地那份留着（默认）
+    delete 跳过不上传，本地那份按 after_upload 处理掉
+    upload 照常上传、覆盖网盘上那个
+
+    认不出来的写法一律按 skip —— 宁可少传，也不能因为一个写错的值把网盘上的
+    旧文件悄悄覆盖掉。这里的常量跟 upload_baidu.py 里的 UPLOAD_DUPS 保持一致。
+    """
+    if isinstance(cfg_or_val, dict):
+        cfg_or_val = cfg_or_val.get("upload_dup")
+    v = str(cfg_or_val or "skip").strip().lower()
+    return v if v in ("skip", "delete", "upload") else "skip"
 
 
 def filter_label(f):
@@ -492,6 +516,9 @@ class Handler(BaseHTTPRequestHandler):
             # pre_rename（上传前本地改名方式）只允许三种；默认不改名最安全
             if cfg.get("pre_rename") not in ("none", "title", "clean"):
                 cfg["pre_rename"] = "none"
+            # upload_dup（网盘已有同名时怎么办）只允许三种；认不出来一律按跳过，
+            # 别让一个手改错的值变成「悄悄覆盖网盘上的旧文件」
+            cfg["upload_dup"] = _upload_dup(cfg.get("upload_dup"))
             if not str(cfg.get("done_dir", "")).strip():
                 cfg["done_dir"] = str(Path(cfg["local_dir"]).parent / "已上传")
             CONFIG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -974,8 +1001,8 @@ class Handler(BaseHTTPRequestHandler):
             # 不能复用旧预览），也随预览文件一起存下来，事后能看清这份计划是拿什么算的
             payload = {"path": p, "recursive": recursive}
             #   · exts：改名页签的「只处理这些后缀」
-            #   · ondup：整理/合并的「重名跳过 / 重名覆盖」——它**改变计划本身**
-            #     （跳过给后来的自动编号，覆盖不编号直接搬），所以必须进指纹
+            #   · ondup：整理/合并的「重名跳过 / 重名删除」——它**改变计划本身**
+            #     （跳过给后来的自动编号，删除不编号直接搬），所以必须进指纹
             for k in ("mode", "params", "by", "dest", "filters", "skip", "exts",
                       "ondup"):
                 if k in body:
@@ -1034,8 +1061,9 @@ class Handler(BaseHTTPRequestHandler):
                 files, want_exts = pan_tools.filter_by_exts(
                     files, str(body.get("exts") or ""))
                 # 重名策略对改名同样生效：跳过=把撞车的编成 A (2) 保住两边，
-                # 覆盖=直接顶掉（旧文件执行时先进备份区）。build_rename_plan 用
-                # 扫描结果自己兜底 occupied，所以能发现「撞到目录里不用改名的那些」
+                # 删除=不编号，网盘上那个旧文件执行时**直接删掉**（不可恢复）。
+                # build_rename_plan 用扫描结果自己兜底 occupied，所以能发现
+                # 「撞到目录里不用改名的那些」
                 dup_policy = _dup_policy(body)
                 ops, unchanged, auto = pan_tools.build_rename_plan(
                     files, mode, body.get("params") or {}, ondup=dup_policy)
@@ -1055,7 +1083,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": False, "msg": "请填写归档目标目录"})
                 by = str(body.get("by") or "category")
                 # 重名策略在**生成计划时**就要用：跳过=给后来的自动编号，
-                # 覆盖=不编号、执行时把旧文件先挪进备份区
+                # 删除=不编号，执行时把网盘上那个旧文件直接删掉
                 dup_policy = _dup_policy(body)
                 # 撞名检测要用「各目录现在都有什么」。扫描已经把范围内的文件
                 # 全列出来了，现算一份目录→文件名的表，不再多花一次请求
@@ -1151,12 +1179,11 @@ class Handler(BaseHTTPRequestHandler):
             want_total = int(body.get("total") or 0)
             if not isinstance(ops, list) or not ops:
                 return self._json({"ok": False, "msg": "没有要执行的操作"})
-            # 重名策略：skip 跳过（默认）/ overwrite 覆盖，其余值一律按 skip
+            # 重名策略：skip 跳过（默认，安全）/ delete 删掉旧文件（不可恢复）
             ondup = _dup_policy(body)
-            # 删除的文件要不要先搬进备份区（默认开：删错了能找回）。
-            # 老前端没这个字段时按「开」处理，别因为一次升级就把人家的文件真删了
-            bdel = body.get("backup_delete")
-            backup_delete = True if bdel is None else bool(bdel)
+            # 删除的文件要不要先搬进备份区（**默认关**：删就是删，不留副本）。
+            # 要留后路的话前端会显式传 backup_delete=true
+            backup_delete = bool(body.get("backup_delete"))
             # 分批提交：百度 filemanager 一次吃不下太多，2000 条一批连着跑完，
             # 中途可以叫停。总条数不再设上限——点执行就是要把扫出来的全做完。
             CHUNK = 2000
@@ -1174,7 +1201,8 @@ class Handler(BaseHTTPRequestHandler):
             # 执行可能几百条、要好几分钟，进度交给前端轮询 /api/pan_apply_progress
             total_ops = sum(len(g) for g in all_good)
             exec_begin(total_ops, rounds=len(all_good))
-            stat = {"rename": 0, "move": 0, "delete": 0, "backup": 0,
+            stat = {"rename": 0, "move": 0, "delete": 0,
+                    "dup_deleted": 0, "backup": 0, "deleted_backup": 0,
                     "backup_dir": "", "fails": [], "verified": 0,
                     "retried": 0, "stop_reason": "", "rounds": 0}
             try:
@@ -1205,8 +1233,8 @@ class Handler(BaseHTTPRequestHandler):
                     s = pan_tools.apply_plan(pan, g, ondup=ondup,
                                              on_progress=tick(),
                                              backup_delete=backup_delete)
-                    for k in ("rename", "move", "delete", "backup",
-                              "deleted_backup", "verified", "retried"):
+                    for k in ("rename", "move", "delete", "dup_deleted",
+                              "backup", "deleted_backup", "verified", "retried"):
                         stat[k] = stat.get(k, 0) + (s.get(k) or 0)
                     if s.get("backup_dir"):
                         stat["backup_dir"] = s["backup_dir"]
@@ -1235,10 +1263,10 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 msg = (f"完成：改名 {stat['rename']} / 移动 {stat['move']} / "
                        f"删除 {stat['delete']}，失败 {len(stat['fails'])}")
-            if stat.get("backup"):
-                msg += (f"；另备份被覆盖的旧文件 "
-                        f"{stat['backup'] - del_moved} 个"
-                        f"（备份区 {bk}）")
+            if stat.get("dup_deleted"):
+                msg += f"；重名删掉旧文件 {stat['dup_deleted']} 个（不可恢复）"
+            if stat.get("backup") and stat["backup"] != del_moved:
+                msg += f"；备份 {stat['backup'] - del_moved} 个（备份区 {bk}）"
             if del_moved:
                 msg += f"；删除的文件已移到 {bk} 下，可找回（占网盘空间，记得定期清）"
             # 百度在高并发/大批量下会整批回错误码而操作其实生效，核对结果如实报出来。

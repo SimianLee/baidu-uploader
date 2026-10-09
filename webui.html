@@ -203,7 +203,7 @@
   .scantxt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
            font-variant-numeric:tabular-nums}
   .scantime{flex:0 0 auto;color:var(--muted2);font-variant-numeric:tabular-nums}
-  /* 扫描条里的「停止」：小号 + 警示色，与「重名覆盖」同一套红色语义 */
+  /* 扫描条里的「停止」：小号 + 警示色，与「重名删除」同一套红色语义 */
   .scanstop{
     flex:0 0 auto;padding:4px 11px;border-radius:7px;cursor:pointer;
     font-family:inherit;font-size:11.5px;line-height:normal;
@@ -634,6 +634,22 @@
           网盘上会按本地的目录结构原样长一份；换布局只影响之后新传的文件。
         </div>
 
+        <div class="sec headroom">网盘上已经有同名文件时</div>
+        <div class="row">
+          <div class="field">
+            <label>重名处理</label>
+            <select id="upload_dup" onchange="dupUploadHint()">
+              <option value="skip">跳过不上传，本地那份留着（默认）</option>
+              <option value="delete">跳过不上传，本地那份按上面「上传成功后」处理掉</option>
+              <option value="upload">照常上传，覆盖网盘上那个</option>
+            </select>
+          </div>
+        </div>
+        <div class="hint" id="dupUploadHint">
+          按<b>完整文件名</b>（含后缀）比对，大小写不敏感。开始前会先列一遍网盘目标目录
+          看看有没有撞名的，命中的按这里的策略处理。
+        </div>
+
         <div class="btnbar" style="align-items:flex-end;margin-top:10px">
           <button class="btn ghost" onclick="dryrun()" id="btnDry">干跑预览</button>
           <button class="btn ghost" id="btnRescan" onclick="rescanUpload()"
@@ -833,14 +849,14 @@
           </div>
           <div class="row">
             <label class="chk" style="margin-top:2px">
-              <input type="checkbox" id="dlBackup" checked onchange="dlSyncHint()">
+              <input type="checkbox" id="dlBackup" onchange="dlSyncHint()">
               删除前先移到备份区（<code id="dlBackupPath">_覆盖备份</code>，可找回）
             </label>
           </div>
           <div class="hint" id="dlHint" style="color:#ff8f8f">
-            ⚠ 文件会被搬进备份区而不是真删：能找回，但<b>网盘空间不会释放</b>，
-            备份区要定期手动清。取消勾选＝直接删除，不可恢复。
-            执行前会列出完整清单，需要你再确认一次。
+            ⚠ <b>默认直接删除，不可恢复</b>，也不产生任何备份文件。
+            勾上「删除前先移到备份区」能找回，但<b>网盘空间不会释放</b>，备份区要定期手动清。
+            空文件夹永远直接删。执行前会列出完整清单，需要你再确认一次。
           </div>
         </div>
 
@@ -859,11 +875,11 @@
                 </label>
               </div>
               <div class="dupseg" id="dupBox" style="margin:0 8px 0 0"
-                   title="改名/整理撞到网盘已有的同名文件时：跳过保留旧文件；覆盖则把旧文件挪进备份目录再执行">
+                   title="改名/整理撞到网盘已有的同名文件时：跳过＝保留旧文件、给这次的编号；删除＝把旧文件直接删掉">
                 <button type="button" class="segbtn on" id="dupSkip"
                         onclick="setDup('skip')">重名跳过</button>
-                <button type="button" class="segbtn warn" id="dupOver"
-                        onclick="setDup('overwrite')">重名覆盖</button>
+                <button type="button" class="segbtn warn" id="dupDel"
+                        onclick="setDup('delete')">重名删除</button>
               </div>
               <button class="btn ghost" id="btnPanPlan" onclick="panPlan()">生成预览</button>
               <button class="btn ghost" id="btnPanFresh" onclick="panPlan(true)"
@@ -1009,7 +1025,8 @@ async function api(path, body){
 /* ---------- 配置 ---------- */
 const FIELDS = ['app_key','secret_key','local_dir','remote_dir','done_dir','after_upload',
                 'batch_size','batch_pause_sec','file_interval_sec','max_file_size_mb',
-                'workers','recursive','exclude_patterns','upload_layout','pre_rename'];
+                'workers','recursive','exclude_patterns','upload_layout','pre_rename',
+                'upload_dup'];
 
 /* 推荐默认值：海量小文件场景（9.9 万文件 / 21GB）实测调优 */
 const DEFAULTS = {
@@ -1025,6 +1042,9 @@ const DEFAULTS = {
   // 默认不改名：只保留书名会清掉「Movie (2019).mkv」里的年份，非小说目录会误伤。
   // 想用的人自己选一次，选项会随配置存下来。
   pre_rename: 'none',
+  // 网盘上已经有同名文件时：默认跳过不上传。默认「覆盖」等于让用户不明不白
+  // 丢数据——上万文件的库里撞名太常见了
+  upload_dup: 'skip',
   exclude_patterns: 'Thumbs.db, desktop.ini, *.tmp, ~$*, *.partial'
 };
 
@@ -1054,6 +1074,21 @@ function layoutHint(){
   h.textContent = tips[el.value] || tips.mirror;
 }
 
+/* 上传的「网盘重名」策略提示：选 delete 时把「会处理掉本地那份」说清楚，
+   否则用户以为只是跳过，回来发现本地文件没了 */
+function dupUploadHint(){
+  const el = $('upload_dup'), h = $('dupUploadHint');
+  if(!el || !h) return;
+  const base = '按<b>完整文件名</b>（含后缀）比对，大小写不敏感。开始前会先列一遍'
+    + '网盘目标目录看看有没有撞名的';
+  h.innerHTML = el.value === 'delete'
+    ? base + '，命中的<b>不上传</b>，本地那份按上面「上传成功后」的方式处置'
+      + '（保留=不动，移动/回收站=处理掉）。'
+    : el.value === 'upload'
+    ? base + '，命中的<b>照常上传</b>，网盘上那个会被替换掉。'
+    : base + '，命中的<b>跳过不上传</b>，本地那份留着不动。';
+}
+
 function fillDefaults(){
   Object.entries(DEFAULTS).forEach(([k, v]) => { if($(k)) $(k).value = v; });
   setMsg('cfgMsg', '已填入推荐值（AppKey/SecretKey 和本地目录需自己填写）');
@@ -1077,6 +1112,8 @@ async function loadConfig(){
   // 上传前改名：选择随配置存下来；顺带按「有没有可回退的记录」点亮撤销按钮
   $('pre_rename').value = c.pre_rename || DEFAULTS.pre_rename;
   preRenameChange(true);          // true=回填，不触发自动保存
+  $('upload_dup').value = c.upload_dup || DEFAULTS.upload_dup;
+  dupUploadHint();
   updateUndoBtn(d.rename_undo);
   // 卡片4 的「操作目录」默认取上传用的远程目录
   const rd = String(c.remote_dir || DEFAULTS.remote_dir).replace(/\/+$/, '');
@@ -1447,24 +1484,29 @@ function dlSyncHint(){
   h.style.color = dlBackupOn() ? '#ffb26b' : '#ff8f8f';
 }
 
-/* 重名策略：skip=跳过（默认，安全） / overwrite=覆盖（不可恢复） */
+/* 重名策略：skip=跳过（默认，安全） / delete=把网盘上被撞的旧文件删掉（不可恢复）
+   老预览文件里存的是 overwrite（旧叫法，当年会把旧文件挪进备份区），
+   读到它一律当成 delete —— 行为本来就已经一致了 */
 let panDup = 'skip';
-/* 「重名跳过 / 重名覆盖」会**改变生成的计划本身**（跳过给后来的自动编号，
-   覆盖不编号直接搬），所以换策略后必须把手里这份预览作废——否则拿跳过模式下
-   算好的编号去执行覆盖，或者反过来，结果都对不上 */
+const DUP_DELETE = 'delete';
+function isDupDelete(){ return panDup === DUP_DELETE || panDup === 'overwrite'; }
+/* 「重名跳过 / 重名删除」会**改变生成的计划本身**（跳过给后来的自动编号，
+   删除不编号直接搬），所以换策略后必须把手里这份预览作废——否则拿跳过模式下
+   算好的编号去执行删除，或者反过来，结果都对不上 */
 function setDup(v, silent){
-  panDup = v;
-  $('dupSkip').classList.toggle('on', v === 'skip');
-  $('dupOver').classList.toggle('on', v === 'overwrite');
+  // 历史预览/旧版参数可能送来 overwrite，统一收编成 delete
+  panDup = (v === 'overwrite') ? DUP_DELETE : v;
+  $('dupSkip').classList.toggle('on', !isDupDelete());
+  $('dupDel').classList.toggle('on', isDupDelete());
   if(typeof panResetPlan === 'function') panResetPlan();
   if(!silent){
-    setMsg('panMsg', v === 'overwrite'
-      ? '⚠ 已选「重名覆盖」：撞到的网盘旧文件会先挪进「' + backupPathText()
-        + '/时间戳/」目录（可找回），'
-        + '再把这次的文件搬/改过去。点「生成预览」重新算一份计划'
+    setMsg('panMsg', isDupDelete()
+      ? '⚠ 已选「重名删除」：撞到的网盘旧文件会被直接删掉、不可恢复，'
+        + '不再生成任何备份文件，然后这次的文件才搬/改过去。'
+        + '点「生成预览」看看会删掉多少'
       : '已切回「重名跳过」：保留网盘上已有的那个文件，这次搬过去的自动编成 A (2)。'
         + '点「生成预览」重新算一份计划',
-      v === 'overwrite' ? false : true);
+      isDupDelete() ? false : true);
   }
 }
 
@@ -1485,7 +1527,7 @@ function panTab(k){
     $(tab).classList.toggle('on', key === k);
     $(pane).classList.toggle('on', key === k);
   });
-  // 切页签一律把重名策略拨回「跳过」，避免在整理页选了覆盖、切到改名页
+  // 切页签一律把重名策略拨回「跳过」，避免在整理页选了删除、切到改名页
   // 执行时把策略悄悄带过去（setDup 内部会顺手作废手里的预览）
   if(typeof setDup === 'function') setDup('skip', true);   // silent：切页签不该弹提示
   if(typeof ogModeChange === 'function') ogModeChange();
@@ -1503,8 +1545,8 @@ function ogModeChange(){
   $('ogHint').innerHTML = ({
     organize: '文件会移动到「归档目录/分类名/」下。撞到网盘已有的同名文件时：'
       + '<b>重名跳过</b>＝保留那一个，这次搬过去的自动编成 <code>A (2).txt</code>（两边都在）；'
-      + '<b>重名覆盖</b>＝不编号直接替换，旧的那个先挪进「' + backupPathText()
-      + '/时间戳/」可找回。',
+      + '<b>重名删除</b>＝把网盘上那个旧文件<b>直接删掉</b>（不可恢复、不备份），'
+      + '这次的文件不编号直接上位。',
     merge: '把 <b>txt(1)</b>、<b>mobi(1)</b> 这类副本目录里的文件合回 <b>txt</b>、<b>mobi</b> 主目录'
       + '（同一位父目录下同时有 <code>X</code> 和 <code>X(1)</code> 才算一对）。<br>'
       + '副本里的<b>子目录</b>不动；搬空的副本目录也不在这里删——'
@@ -2229,9 +2271,9 @@ async function panPlan(refresh){
   const isEmptyTab = planKind === 'empty_dir';
   const isMergeTab = planKind === 'merge_dirs';
   // 重名策略说人话：「跳过」不是不搬，是给后来的编个号谁都不丢；
-  // 「覆盖」才是换掉网盘上那个（旧的先进备份区）
-  const dupTxt = panDup === 'overwrite'
-    ? `⚠ 重名覆盖：${d.overwrite || 0} 个会替换掉网盘已有的（旧的先进 _覆盖备份）`
+  // 「删除」才会把网盘上那个旧文件删掉（不可恢复）
+  const dupTxt = isDupDelete()
+    ? `⚠ 重名删除：${d.overwrite || 0} 个会删掉网盘上已有的同名文件（不可恢复、不备份）`
     : `重名跳过` + (d.auto ? `：${d.auto} 个编成 A (2)` : '（没撞上）');
   // 有目录没扫进去 ⇒ 这次结果不完整。悄悄少扫一个目录比直接报错更危险：
   // 用户会以为「就这些文件」，然后照着这份「完整」清单去改名/删除。
@@ -2308,7 +2350,7 @@ async function panPlan(refresh){
   pvRefresh(d.preview_id || '');       // 列表里把刚生成的这份选中
 }
 
-/* 执行：删除类操作必须二次确认；覆盖模式同样二次确认 */
+/* 执行：删除类操作必须二次确认；重名删除模式同样二次确认 */
 async function panApply(){
   if(!panOps.length){ setMsg('panMsg', '没有待执行的操作', false); return; }
   const isDel = panOps.some(o => o.op === 'delete');
@@ -2326,8 +2368,9 @@ async function panApply(){
        ? `即将把 ${n2} 个文件移进备份区「${backupPathText()}/时间戳/」（不是真删，可找回；`
          + `但网盘空间不会释放，备份区要定期手动清）。确定继续吗？`
        : `⚠ 即将永久删除 ${n2} 个文件，不进备份区，此操作不可撤销。确定继续吗？`)
-    : panDup === 'overwrite'
-    ? `⚠ 即将执行 ${n2} 条操作（重名覆盖模式）：撞到的旧文件会先挪进「_覆盖备份」目录再执行，可找回。确定继续吗？`
+    : isDupDelete()
+    ? `⚠ 即将执行 ${n2} 条操作（重名删除模式）：撞到的网盘旧文件会被`
+      + `永久删除、不进备份区，此操作不可撤销。确定继续吗？`
     : `即将对 ${n2} 个文件执行操作（重名跳过），确定继续吗？`;
   const batches = Math.ceil(n2 / 2000);
   const batchTip = batches > 1
@@ -2391,12 +2434,10 @@ async function panApply(){
   if(st.rename) res.push({n: st.rename, label: '改名', cls: 'ok'});
   if(st.move) res.push({n: st.move, label: '移动', cls: 'ok'});
   if(st.delete) res.push({n: st.delete, label: '删除', cls: 'ok'});
-  // 删除的文件其实是搬进了备份区，单列一笔：「删除」这个词的口径跟网盘一致吗？
-  // 不一致——原位没了，但文件还在备份区里躺着
+  // 删除的文件若勾了备份其实是搬进了备份区，单列一笔：原位没了，但文件还在
   if(st.deleted_backup) res.push({n: st.deleted_backup, label: '删除已备份', cls: 'warn'});
-  if((st.backup || 0) - (st.deleted_backup || 0) > 0)
-    res.push({n: st.backup - (st.deleted_backup || 0),
-              label: '覆盖已备份', cls: 'warn'});
+  // 重名模式删掉的网盘旧文件：也是真没了，跟上面的备份不是一回事
+  if(st.dup_deleted) res.push({n: st.dup_deleted, label: '重名删旧文件', cls: 'bad'});
   if(st.verified) res.push({n: st.verified, label: '复核确认生效', cls: 'acc'});
   if(st.retried) res.push({n: st.retried, label: '重试救回', cls: 'acc'});
   if(st.fails && st.fails.length) res.push({n: st.fails.length, label: '未生效', cls: 'bad'});

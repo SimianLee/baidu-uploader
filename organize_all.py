@@ -18,12 +18,12 @@ organize_all.py —— 整理归档「循环执行」版
     # 确认无误后真跑
     python -X utf8 organize_all.py --path "..." --by ext --dest /apps/baidu_uploader/归档
 
-    # 归档目标里已经有同名文件时，加 --ondup overwrite（否则它们搬不走，见下）
+    # 归档目标里已经有同名文件时，加 --ondup delete（否则它们搬不走，见下）
 
 关于重名：默认策略是 skip —— 撞到同名就跳过。但被跳过的是**源目录里那个文件**，
 它会留在原地，下一轮重新扫描又扫到、又撞名、又被跳过，永远搬不完。脚本每轮
-会把这个数字报出来；要连这些一起搬就加 --ondup overwrite，撞到的旧文件会先
-挪进「_覆盖备份/时间戳/」再覆盖，能找回。
+会把这个数字报出来；要连这些一起搬就加 --ondup delete，归档处那个同名的旧文件
+会被**直接删掉**（不可恢复、不进备份区），这次的文件就能不编号地搬进去。
 
 关于并发：脚本默认**拒绝**在上传任务运行时执行。实测过——上传和整理同时操作
 网盘（同一个 access_token），百度会整批整批地回假错误（-9 / 111），一次 2000 条
@@ -51,7 +51,7 @@ def dup_skipped(fails) -> int:
     正常情况不该出现：skip 策略下 build_organize_plan 会给撞名的自动编号
     `A (2).txt`，两边数据都保住。真还报 -8，说明撞的那个名字**没被计划看见**
     ——典型是归档目录不在扫描范围内、而我们也没去列它。所以这里的文案要指
-    向「换 overwrite」而不是干等下一轮。
+    向「换 --ondup delete」而不是干等下一轮。
     """
     return sum(1 for f in (fails or []) if f.get("errno") == -8)
 
@@ -92,9 +92,10 @@ def main():
     ap.add_argument("--by", default="ext", choices=("ext", "category", "date"),
                     help="整理方式：ext 按后缀 / category 按大类 / date 按修改月份")
     ap.add_argument("--dest", required=True, help="归档目标目录，会在此之下按分类建子目录")
-    ap.add_argument("--ondup", default="skip", choices=("skip", "overwrite"),
+    ap.add_argument("--ondup", default="skip", choices=("skip", "delete", "overwrite"),
                     help="撞到同名文件时：skip 跳过（默认，撞名的会留在源目录搬不走）"
-                         " / overwrite 先把旧文件备份到 _覆盖备份/ 再覆盖")
+                         " / delete 把网盘上那个同名旧文件直接删掉（不可恢复）；"
+                         "overwrite 是 delete 的旧称，行为相同")
     ap.add_argument("--limit", type=int, default=EXEC_LIMIT,
                     help=f"每轮最多执行多少条（默认 {EXEC_LIMIT}，与面板一致）")
     ap.add_argument("--rounds", type=int, default=0,
@@ -201,10 +202,9 @@ def main():
         dup = dup_skipped(stat["fails"])
         if dup:
             print(f"  ⚠ {dup} 个文件因「归档处已有同名」没搬成，仍留在源目录")
-            print(f"     跳过策略下撞名的本该自动编成 A (2).txt 照搬过去，")
-            print(f"     还撞 -8 说明那个同名没被计划看见（归档目录在扫描范围外等）。")
-            print(f"     要连这些一起搬，加参数：--ondup overwrite")
-            print(f"     （覆盖前旧文件会先挪进 {sandbox}/_覆盖备份/时间戳/，可找回）")
+            print(f"     跳过后仍撞 -8 说明那个同名没被计划看见（归档目录在扫描范围外等）。")
+            print(f"     要连这些一起搬，加参数：--ondup delete")
+            print(f"     ⚠ 归档处那个同名旧文件会被直接删掉，不可恢复")
         if not stat["move"] and stat["fails"]:
             # 一条都没动：再循环下去只是重复报错，不如停下来让人看原因
             print("  本轮没有任何文件被移动，停止。失败原因见下：")
@@ -223,7 +223,7 @@ def main():
     if dup_all:
         print()
         print(f"⚠ 其中 {dup_all} 个是「归档处已有同名」被跳过的，还留在源目录里。")
-        print(f"  想连这些一起搬：--ondup overwrite（旧文件先备份，可找回）")
+        print(f"  想连这些一起搬：--ondup delete（删掉归档处的同名旧文件，不可恢复）")
     if args.dry_run:
         print("（干跑模式，网盘没有任何改动）")
     print("=" * 62)

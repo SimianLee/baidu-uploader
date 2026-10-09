@@ -42,11 +42,27 @@ FILEMANAGER = "https://pan.baidu.com/rest/2.0/xpan/file?method=filemanager"
 LIST_URL = "https://pan.baidu.com/rest/2.0/xpan/file?method=list"
 CREATE_URL = "https://pan.baidu.com/rest/2.0/xpan/file?method=create"
 
-# 备份区的名字与位置：**全项目只有这一个**。凡是要被"弄掉"的东西——
-# 重名覆盖顶下来的旧文件、批量删除的文件——统统搬进 <沙盒>/_覆盖备份/时间戳/，
-# 不在当前操作的目录里另起炉灶（那样每整理一个目录就散落一个备份区，找不回来
-# 也清不掉）。改这两行就等于改全局，别在任何地方再手拼一遍 "_覆盖备份"。
+# 备份区（可选）的名字与位置：**全项目只有这一个**。
+#
+# 注意口径改了：重名不再「覆盖备份」，而是**直接删掉被撞的旧文件**（见 apply_plan
+# 的 ondup="delete"）。所以默认任何操作都不再产生备份文件。只有用户在删除页签里
+# 显式勾了「删除前先移到备份区」，要删的文件才会搬进 <沙盒>/_覆盖备份/时间戳/。
+#
+# 位置仍然固定在沙盒根，不在当前操作的目录里另起炉灶（那样每整理一个目录就散落
+# 一个备份区，找不回来也清不掉）。改这两行就等于改全局，别在任何地方再手拼一遍。
 BACKUP_DIR_NAME = "_覆盖备份"
+
+# 「重名」策略的合法取值。skip=保留旧文件、给后来的编号；delete=删掉旧文件，
+# 让这次的名字直接上位。overwrite 是 delete 的旧叫法（早期版本是把旧文件挪进
+# 备份区），保留它只为兼容已经落盘的预览文件与命令行历史，行为与 delete 完全相同。
+DUP_SKIP = "skip"
+DUP_DELETE = "delete"
+
+
+def dup_kind(ondup: str) -> str:
+    """把各种写法归一成 skip / delete。认不出来的值一律按最安全的 skip"""
+    v = str(ondup or "skip").strip().lower()
+    return DUP_DELETE if v in ("delete", "overwrite", "replace") else DUP_SKIP
 
 
 def backup_root(sandbox: str) -> str:
@@ -911,9 +927,9 @@ def dedupe_newnames(rows, occupied=None, ondup="skip"):
               改名的那些文件）；网盘侧现在由 build_rename_plan 用**扫描结果**自
               动兜底——scan 出来的文件就是那个目录的实况，不必再花请求去问。
     ondup:   撞到 occupied（网盘/磁盘上**现在就有**的同名）怎么办：
-             skip      （默认）保留那一个，把这次要改的编成 `A (2).txt`
-             overwrite 不编号，直接顶掉。执行时由 apply_plan 先把旧的挪进
-                       `_覆盖备份/<时间戳>/`，所以是「能找回的替换」
+             skip   （默认）保留那一个，把这次要改的编成 `A (2).txt`
+             delete 不编号，网盘上那个旧文件由 apply_plan 执行时**直接删掉**，
+                    ⚠ 不可恢复、不产生备份文件
 
     撞名分两种，口径不同（与 build_organize_plan 一致）：
       · **本批内部**互相撞（两条都要改成 A.txt）→ 一律编号。那是这一趟刚排进去的
@@ -932,6 +948,7 @@ def dedupe_newnames(rows, occupied=None, ondup="skip"):
         for d, names in occupied.items():
             ext[d] = {n.lower() for n in names}
     auto = 0
+    del_mode = dup_kind(ondup) == DUP_DELETE
     for r in rows:
         pool = used.setdefault(r["dir"], set())
         outside = ext.get(r["dir"], set())
@@ -942,12 +959,12 @@ def dedupe_newnames(rows, occupied=None, ondup="skip"):
             pool.add(cand.lower())
             auto += 1
         elif low in outside:                  # 撞到目录里已有的那个
-            if ondup == "overwrite":
-                # 旧文件将被顶掉（执行时先备份），它占的名字让出来了——
-                # 后面再有同名改过来时不能再顶第二次，那可能是刚改好的数据
+            if del_mode:
+                # 旧文件将被删掉，它占的名字让出来了——后面再有同名改过来时
+                # 不能再删第二次，那可能是刚改好的数据
                 outside.discard(low)
                 pool.add(low)
-                r["overwrite"] = True
+                r["overwrite"] = True   # 沿用旧键名，前端报表/旧版预览都认它
             else:
                 r["newname"] = cand = _numbered_name(want, pool | outside)
                 pool.add(cand.lower())
@@ -1045,7 +1062,7 @@ def build_rename_plan(files, mode: str, params: dict, occupied=None,
         if r["newname"] != b:
             o["auto"] = True        # 撞名被自动编号，预览里要标出来
         if r.get("overwrite"):
-            o["overwrite"] = True   # 会顶掉目录里已有的那个（执行时先备份）
+            o["overwrite"] = True   # 会把目录里已有的那个删掉（执行时直删，不备份）
     return ops, unchanged, auto
 
 
@@ -1119,25 +1136,25 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None,
       2. 目标目录里已经有同名文件时，按 ondup 处理（见下）
 
     ondup 决定「撞到目标目录里**网盘现在就有**的同名文件」时怎么办：
-      skip      （默认）那个旧文件留在原地不动，改给这次要搬的自动编号
-                `A (2).txt` 搬进去。两边数据都在，归档也能收尾
-      overwrite 不编号，直接搬。执行时 apply_plan 会先把被撞的旧文件挪进
-                `_覆盖备份/<时间戳>/` 再搬运，所以是「能找回的替换」。
+      skip   （默认）那个旧文件留在原地不动，改给这次要搬的自动编号
+             `A (2).txt` 搬进去。两边数据都在，归档也能收尾
+      delete 不编号，直接搬。执行时 apply_plan 会把被撞的旧文件**先删掉**
+             ⚠ 不可恢复、不产生备份文件
 
     注意第 2 条为什么必须做：把十几万个文件拍平塞进 /txt、/mobi 这种目录，撞名
     是必然的（实测 2000 条里就撞了 56 条）。撞了以后——
       · 跳过策略：结果符合预期（旧文件没被动），如果不编号它们就永远留在原地，
         每轮都报一批失败，收不了尾
-      · 覆盖策略：旧文件被挤进备份区，同名越多备份区越膨胀
+      · 删除策略：同名越多删掉的旧文件越多，执行前务必确认预览里的数字
 
     还有一种撞名跟 ondup 无关：**这份计划内部**互相撞（两个不同目录的 A.txt
     今晚都要搬进同一个 /txt）。这种情况一律自动编号——那是我们自己刚搬过去的
-    真数据，「覆盖」说的是替掉网盘上的**旧**文件，不是让自己把自己覆盖掉。
+    真数据，「重名删除」说的是替掉网盘上的**旧**文件，不是让自己把自己删掉。
     撞名的移动不拆「改名+移动」两条，move 直接带 newname（一步到位）。
     """
     files = strip_backup(files)
     dest = dest.rstrip("/")
-    overwrite = (ondup == "overwrite")
+    overwrite = (dup_kind(ondup) == DUP_DELETE)
     # pre：网盘上现在就有的（扫描得来的实况）；claimed：这份计划已经排进去的
     pre = {d: {n.lower() for n in names} for d, names in (occupied or {}).items()}
     claimed = {}
@@ -1165,8 +1182,8 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None,
         pool = pre.setdefault(d, set())
         hit_pre = low in pool           # 网盘上现在就有一个同名的
         if hit_pre and overwrite:
-            # 覆盖：名字不改，执行时把被撞的旧文件先挪进备份区。它占的这个
-            # 名字算被消耗掉了——后面再有同名文件搬进来时不能再覆盖第二次，
+            # 重名删除：名字不改，执行时把被撞的旧文件删掉。它占的这个
+            # 名字算被消耗掉了——后面再有同名文件搬进来时不能删第二次，
             # 那可是我们今晚刚搬过去的数据
             pool.discard(low)
             taken.add(low)
@@ -1186,7 +1203,7 @@ def build_organize_plan(files, by: str, dest: str, sandbox: str, occupied=None,
             op["newname"] = new
             op["auto"] = True
         if hit_pre and overwrite:
-            op["overwrite"] = True      # 让前端能报出「N 个会替换掉网盘已有的」
+            op["overwrite"] = True      # 让前端能报出「N 个会删掉网盘已有的」
         ops.append(op)
     return ops
 
@@ -1271,8 +1288,8 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
     每轮扫出来的计划都比真实文件多（一对同名文件在扫描里就是两条计划）。
 
     ondup 决定「主目录里已经有一个同名文件」时怎么办，与整理归档口径一致：
-      skip      （默认）主目录那个不动，把副本里的编成 `A (2)` 搬进去
-      overwrite 不编号，直接搬。执行时旧文件先被挪进 `_覆盖备份/<时间戳>/`
+      skip   （默认）主目录那个不动，把副本里的编成 `A (2)` 搬进去
+      delete 不编号，直接搬。执行时主目录里那个旧文件会被**删掉**（不备份）
     计划内部互相撞名（两个副本都要把 A.txt 搬进同一个主目录）时一律自动编号，
     理由同 build_organize_plan：不能让自己今晚搬过去的数据被自己顶掉。
 
@@ -1338,7 +1355,7 @@ def build_merge_dirs_plan(entries, ondup: str = "skip"):
     pre = {d: {n.lower() for n, _ in names}
            for d, names in files_by_dir.items()}
     claimed = {}
-    overwrite = (ondup == "overwrite")
+    overwrite = (dup_kind(ondup) == DUP_DELETE)
     for main_path, dup_path in pairs:
         pool = pre.setdefault(main_path, set())
         taken = claimed.setdefault(main_path, set())
@@ -1527,9 +1544,8 @@ def _find_conflicts(pan: PanFiles, ren, mov):
     每个涉及目录只 list 一次（缓存），文件名按小写比较（网盘大小写不敏感）。
 
     一个坑：**只改大小写的文件会被自己撞到**。A.txt → a.txt 时，目标名 a.txt
-    按小写比就是它自己（网盘大小写不敏感）。若不排除，覆盖模式会先把这个「被撞
-    的旧文件」搬进备份区——搬的正是要改名的那个文件，于是改名必然失败，文件还
-    被挪走了。所以命中的条目若就是某条 rename 的源路径本身，一律不算撞名。
+    按小写比就是它自己（网盘大小写不敏感）。若不排除，重名删除模式会先把这个
+    「被撞的旧文件」删掉——删的正是要改名的那个文件，改名自然再也无从谈起。所以命中的条目若就是某条 rename 的源路径本身，一律不算撞名。
     """
     targets = {}                       # 目录 -> {小写目标名}
     self_src = {}                      # 目录 -> {小写目标名: {源文件完整路径}}
@@ -1657,7 +1673,7 @@ def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict,
     for f, d, n, dst_d, dst_n, op in pending:
         f.pop("uncertain", None)
         # 失败要说到点子上：撞名、还在原处、压根没有，三种情况三种说法，
-        # 用户一看就知道下一步该选「覆盖」还是别折腾了
+        # 用户一看就知道下一步该选「重名删除」还是别折腾了
         src, dst = last.get(d), (last.get(dst_d) if dst_d else None)
         if src is None or (dst_d and dst is None):
             why = "目录读不到，无从核对"
@@ -1668,8 +1684,8 @@ def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict,
             why = "原处和目标处都没有它（文件本就不在网盘上）"
             f["retryable"] = False      # 文件压根没有，重试也没用
         elif dst_d and dst_n and dst_n.lower() in dst:
-            why = "原处还在，目标处已有同名文件（撞名未覆盖）"
-            f["retryable"] = False      # 重试还是撞名，除非改用「覆盖」
+            why = "原处还在，目标处已有同名文件（撞名，本次没动它）"
+            f["retryable"] = False      # 重试还是撞名，除非改用「重名删除」
         else:
             why = "原处还在，没生效"
             f["retryable"] = True       # 限流/被打回这类，再提交一次常常就成了
@@ -1681,30 +1697,32 @@ def _verify_uncertain(pan: PanFiles, fails: list, op_of: dict,
 
 
 def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
-               backup_delete: bool = True):
+               backup_delete: bool = False):
     """按类型分组执行计划 → 返回统计
 
     ondup: rename/move 撞到同名文件时的策略
-           skip      跳过该条，保留网盘上已有的文件（默认，安全）
-           overwrite 覆盖。注意：百度 filemanager 的 ondup 参数对 rename/move
-                     不生效（实测撞名一律报 -8），所以覆盖用「先挪备份再执行」
-                     实现：被撞的旧文件移动到 备份区/时间戳/原目录结构 下，
-                     不删除、可找回，之后原操作就不会撞名了。
+           skip    跳过该条，保留网盘上已有的文件（默认，安全）
+           delete  把网盘上那个被撞的旧文件**删掉**，让这次的名字直接上位。
+                   百度 filemanager 的 ondup 参数对 rename/move 不生效（实测撞名
+                   一律报 -8），所以先找出撞名的旧文件删掉，再执行原操作。
+                   ⚠ 不可恢复，不产生任何备份文件。overwrite 是它的旧名（历史上
+                   会把旧文件挪进备份区），现已等价于 delete，留着只为兼容旧预览。
 
-    backup_delete: 批量删除的**文件**（不含空文件夹）也先搬进备份区再算删掉，
-                   默认开。删错了能找回，代价是网盘空间不释放——备份区要定期
-                   手动清。空文件夹照旧直接删：挪过去只是一堆空壳，没意义。
-
-    备份区统一在 <沙盒>/_覆盖备份/<时间戳>/（见 backup_root），跟当前操作的
-    目录在哪无关——整理哪个目录都不会在它底下另起一个备份区。
+    backup_delete: 批量删除的**文件**（不含空文件夹）先搬进 <沙盒>/_覆盖备份/
+                   <时间戳>/ 再算删掉，删错了能找回。**默认关**——老李要的就是
+                   「删就是删」，要留后路自己勾（代价：网盘空间不释放）。
+                   空文件夹永远直接删：挪过去只是一堆空壳，没意义。
 
     on_progress(snap): 每完成一批回调一次，用来显示执行进度。snap =
         {"done": 已完成动作数, "total": 总动作数, "phase": 当前阶段文案,
          "fails": 失败条数}
-        总动作数 = 改名 + 移动 + 删除，覆盖/删除备份模式下再加备份的条数。
+        总动作数 = 改名 + 移动 + 删除，重名删除/删除备份模式下再加那部分的条数。
         一次几百条要跑好几分钟，没有这个回调前端只能干等。
     """
-    stat = {"rename": 0, "move": 0, "delete": 0, "backup": 0,
+    ondup = dup_kind(ondup)
+    stat = {"rename": 0, "move": 0, "delete": 0,
+            "dup_deleted": 0,    # 重名模式删掉的网盘旧文件数
+            "backup": 0,
             "deleted_backup": 0,     # 删除的文件里已搬进备份区的条数
             "backup_dir": "", "fails": [],
             "verified": 0,          # 复核后确认已生效的条数（响应报错、实际成功）
@@ -1716,7 +1734,7 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
     mov = [{"path": o["path"], "dest": o["dest"],
             **({"newname": o["newname"]} if o.get("newname") else {})}
            for o in ops if o["op"] == "move"]
-    # 删除分两拨：**文件**进备份区（可找回），**空文件夹**直接删（挪过去是空壳）
+    # 删除分两拨：开备份时**文件**先搬进备份区（可找回），空文件夹永远直接删
     del_files = [o for o in ops if o["op"] == "delete" and not o.get("isdir")]
     dele = [o["path"] for o in ops if o["op"] == "delete" and o.get("isdir")]
 
@@ -1724,8 +1742,8 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
     prog = {"done": 0, "total": len(ren) + len(mov) + len(dele) + len(del_files),
             "phase": "", "fails": 0}
 
-    # 这一趟的备份目录：**整个 apply_plan 共用同一个时间戳目录**，覆盖掉的、
-    # 删掉的都躺在里面，事后按时间找就行。惰性生成——没东西要备份就不建。
+    # 备份目录只在 backup_delete 打开时才会用到：整个 apply_plan 共用同一个
+    # 时间戳目录，事后按时间找就行。惰性生成——没东西要备份就不建。
     _bdir = {"p": ""}
 
     def backup_dir():
@@ -1768,27 +1786,21 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
     # 而不是「准备中」那种看不出进展的说法
     emit("提交中")
 
-    # 覆盖模式：先找出撞名文件，挪进带时间戳的备份目录（保留原路径结构）
-    if ondup == "overwrite" and (ren or mov):
-        emit("检查重名文件")
+    # 重名删除：先找出撞名的网盘旧文件，**直接删掉**（不挪备份区、不留副本），
+    # 删干净了再执行改名/移动，原操作就不会撞名。
+    if ondup == DUP_DELETE and (ren or mov):
+        emit("查找重名文件")
         conflicts = _find_conflicts(pan, ren, mov)
         if conflicts:
-            bdir = backup_dir()
-            mv_ops = []
-            for cf in conflicts:
-                bdest = backup_dest(cf)
-                _mkdirs(pan, bdest)
-                mv_ops.append({"path": cf, "dest": bdest})
-            # 备份也是要实现的动作，算进总数；否则进度条先跑到别处再卡住，看着像死机
-            prog["total"] += len(mv_ops)
-            ok, fails = pan.move_batch(mv_ops, on_progress=tick("备份被撞的旧文件"))
-            stat["backup"] = ok
-            stat["backup_dir"] = bdir
+            prog["total"] += len(conflicts)   # 算进总数，否则进度条看着像卡住
+            ok, fails = pan.delete_batch(conflicts,
+                                         on_progress=tick("删除重名的旧文件"))
+            stat["dup_deleted"] = ok
             stat["fails"] += fails
             if fails:
-                # 有文件没备份成功就不能继续覆盖（会导致误删），直接返回
-                stat["fails"].insert(0, {"path": bdir,
-                                         "msg": "备份失败，覆盖中止（见下方明细）"})
+                # 有旧文件没删掉就不能继续（紧接着的改名/移动必然撞 -8），直接返回
+                stat["fails"].insert(0, {"path": "", "retryable": False,
+                                         "msg": "有重名旧文件没删掉，为避免漏改已中止（见下方明细）"})
                 return stat
             time.sleep(0.5)            # 等索引同步，避免紧跟着的操作读到旧状态
 

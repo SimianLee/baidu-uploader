@@ -12,6 +12,7 @@
   "recursive": true,
   "upload_layout": "mirror",
   "pre_rename": "none",
+  "upload_dup": "skip",
   "done_dir": "",
   "after_upload": "keep",
   "exclude_patterns": ["Thumbs.db", "desktop.ini", "*.tmp", "~$*", "*.partial"]

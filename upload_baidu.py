@@ -59,6 +59,21 @@ PROGRESS_FILE = "progress.json"  # 上传进度（网页面板轮询它来画进
 # 运行状态文件（断点/进度/锁）统一收在 data/ 目录，项目根只留代码和配置
 DATA_DIR = "data"
 
+# 网盘目标目录里已经有**同名同后缀**的文件时怎么办（config 的 upload_dup）：
+#   skip   跳过不上传，本地那份留着不动（默认，最安全——上万文件里撞名很常见，
+#          默认覆盖等于让用户不明不白丢数据）
+#   delete 跳过上传，并且本地这份按 after_upload 的策略处理（move 进已完成目录
+#          / 送回收站）——「网盘上已经有了，本地这份是重复的」时用它清理本地
+#   upload 照常上传并把网盘上那个覆盖掉（rtype=3，百度会把它替换掉）
+UPLOAD_DUPS = ("skip", "delete", "upload")
+DEFAULT_UPLOAD_DUP = "skip"
+
+
+def norm_dup(v) -> str:
+    """归一化 upload_dup：认不出来的写法一律按最安全的 skip"""
+    v = str(v or DEFAULT_UPLOAD_DUP).strip().lower()
+    return v if v in UPLOAD_DUPS else DEFAULT_UPLOAD_DUP
+
 
 def data_dir_of(cfg_path: Path) -> Path:
     d = cfg_path.parent / DATA_DIR
@@ -338,6 +353,7 @@ class PanApi:
     PRECREATE = "https://pan.baidu.com/rest/2.0/xpan/file?method=precreate"
     CREATE = "https://pan.baidu.com/rest/2.0/xpan/file?method=create"
     SUPERFILE = "https://d.pcs.baidu.com/rest/2.0/pcs/superfile2"
+    LIST = "https://pan.baidu.com/rest/2.0/xpan/file?method=list"
 
     def __init__(self, auth: BaiduAuth):
         self.auth = auth
@@ -394,6 +410,33 @@ class PanApi:
                 log(f"[OK] 远程目录已存在: {remote_dir}")
         else:
             log(f"[警告] 创建远程目录失败: {errno_msg(errno)}（可能已存在，继续尝试上传）")
+
+    # ---- 列远程目录里已有的文件名（重名检测用） ----
+    def list_names(self, remote_dir: str, page_size: int = 1000):
+        """返回该目录下已有条目的**完整文件名**集合（含后缀，小写化）。
+
+        百度 netdisk 的 file/list 一次最多给 1000 条，所以分页取到底。列不出来
+        就返回空集合 + False——「查不到」必须能跟「确实没有」区分开：查不到时
+        错把重名当没重名，等于把用户的文件悄悄覆盖一遍，那是绝不能出的错。
+
+        返回 (names, ok)
+        """
+        names, start, ok = set(), 0, True
+        while True:
+            r = self._get(self.LIST, {"dir": remote_dir, "order": "name",
+                                      "start": start, "limit": page_size})
+            errno = r.get("errno", 0)
+            if errno not in (0,):
+                return set(), False
+            for e in r.get("list") or []:
+                n = e.get("server_filename")
+                if n:
+                    names.add(n.lower())
+            got = len(r.get("list") or [])
+            if got < page_size:
+                break
+            start += got
+        return names, ok
 
     # ---- 计算分片 MD5 ----
     @staticmethod
@@ -681,6 +724,62 @@ def build_remote_map(files, root: Path, remote_base: str, layout: str, old_map=N
 
 
 
+def remote_dups(api, items, remote_map):
+    """挑出「网盘目标目录里已经有同名文件」的那些本地文件。
+
+    items: [(Path, size)]，remote_map: {Path: 远程完整路径}
+    返回 (重复的 [(Path, size)], 没查成的目录数)
+
+    按**完整文件名**（含后缀）比、且大小写不敏感——网盘本身大小写不敏感，
+    `Book.TXT` 和 `book.txt` 在网盘眼里是同一个文件。
+
+    每个涉及的远程目录只列一次（缓存）。目录**列不出来**时必须如实报：查不出
+    来不等于没有，把「查不到」当成「没重名」就会悄悄把人家网盘上的文件覆盖掉。
+    """
+    if not api or not items:
+        return [], 0
+    need = {}
+    for p, _ in items:
+        d, _, nm = remote_map[p].rpartition("/")
+        need.setdefault(d, set()).add(nm.lower())
+    cache, bad = {}, 0
+    for d in sorted(need):
+        names, ok = api.list_names(d)
+        if not ok:
+            bad += 1
+            continue                      # 列不出来就不敢下结论，这些目录不参与判定
+        cache[d] = names
+    dups = []
+    for p, s in items:
+        d, _, nm = remote_map[p].rpartition("/")
+        names = cache.get(d)
+        if names is None:                 # 这个目录没查成，放过去让它照常上传
+            continue
+        if nm.lower() in names:
+            dups.append((p, s))
+    return dups, bad
+
+
+def settle_dups(dups, dup_mode, cfg):
+    """重名跳过的本地文件：delete 模式下按 after_upload 把它们处理掉。
+
+    逻辑出发点：网盘上已经有同名（同后缀）的了，本地这份就是重复占地方的那份。
+    after_upload=keep（或 ask）时**一个都不动**——无交互环境里替用户删文件太冒险。
+    """
+    if dup_mode != "delete" or not dups:
+        return 0
+    mode = cfg.get("after_upload", "keep")
+    if mode == "ask":
+        mode = "keep"           # 无交互没有答案，最安全的处理就是不处理
+    if mode == "keep":
+        print("  [重名] after_upload=keep，本地那份重复的保留不动")
+        return 0
+    done_dir = Path(cfg.get("done_dir", "")).expanduser() if cfg.get("done_dir") else None
+    print(f"  [重名] 本地这 {len(dups)} 份按 after_upload={mode} 处理")
+    handle_uploaded(dups, mode, done_dir)
+    return len(dups)
+
+
 # ---------------- 上传后处理（手动确认） ----------------
 def ask_action(uploaded, cfg):
     """上传成功后的处理：ask=逐批询问（默认）/ move / trash / keep"""
@@ -818,6 +917,10 @@ def build_argparser():
     ap.add_argument("--limit", type=int, help="本次最多上传多少个文件（测试用）")
     ap.add_argument("--yes", action="store_true",
                     help="跳过手动确认，直接按配置里的 after_upload 处理（ask 视为 keep）")
+    ap.add_argument("--upload-dup", dest="upload_dup", choices=UPLOAD_DUPS,
+                    help="网盘目标目录里已有同名（同后缀）文件时：skip 跳过不上传"
+                         "（默认）/ delete 跳过并把本地这份按 after_upload 清掉"
+                         " / upload 照常上传并覆盖网盘上那个")
     ap.add_argument("--no-resume", dest="no_resume", action="store_true",
                     help="重新扫描上传：忽略断点记录，本地扫到的文件全部纳入本次上传"
                          "（怀疑记录与实际不符时用；网盘已有的会走秒传，不重复占空间）")
@@ -849,8 +952,13 @@ def main():
         auth.login_by_code(args.login_code)
         return
     # 干跑不需要 Token，没登录也能先预览分批计划
+    api = None
     if not args.dry_run:
         auth.ensure_token()
+        api = PanApi(auth)
+    elif auth.access_token:
+        # 已经登录过的话，干跑也顺带把网盘的重名查出来 —— 干跑本来就是为了看
+        # 清楚「这一趟会发生什么」，少了重名这一项它就不完整了
         api = PanApi(auth)
 
     root = Path(cfg["local_dir"]).expanduser()
@@ -923,12 +1031,32 @@ def main():
     renamed = sum(1 for p, _ in pending
                   if layout != "mirror" and remote_map[p].rsplit("/", 1)[-1] != p.name)
 
+    # ---- 网盘重名：目标目录里已经有同名（同后缀）时按 upload_dup 处理 ----
+    dup_mode = norm_dup(args.upload_dup or cfg.get("upload_dup"))
+    # upload 模式就是「照旧上传并覆盖」，压根不必去查重（查了也没用）
+    dup_hits, dup_bad = (remote_dups(api, pending, remote_map)
+                         if dup_mode != "upload" else ([], 0))
+    if dup_hits:
+        dupset = {str(p) for p, _ in dup_hits}
+        pending = [it for it in pending if str(it[0]) not in dupset]
+        print(f"\n[重名] 网盘上已经有 {len(dup_hits)} 个同名文件"
+              + (f"（{dup_bad} 个目录列不出来，那些文件照常上传）" if dup_bad else ""))
+        for p, s in dup_hits[:5]:
+            print(f"   {human_size(s):>10}  {p.name}  ->  {remote_map[p]}")
+        if len(dup_hits) > 5:
+            print(f"   ... 其余 {len(dup_hits) - 5} 个略")
+        print("  处理办法：" + {
+            "skip":   "跳过不上传，本地文件留在原处",
+            "delete": "跳过不上传，本地这份按 after_upload 处理（移走/送回收站）",
+            "upload": "照常上传并覆盖网盘上那个",
+        }[dup_mode] + f"（upload_dup={dup_mode}）")
+
     # 干跑：只出计划
     if args.dry_run:
         total_size = sum(s for _, s in pending)
         print(f"\n[干跑] 扫描 {stats['scanned']} 个文件 → 排除 {stats['excluded']} / "
               f"空文件 {stats['empty']} / 超大 {len(too_big)} / 已传过 {skipped} / "
-              f"待上传 {len(pending)}")
+              f"网盘重名跳过 {len(dup_hits)} / 待上传 {len(pending)}")
         if stats.get("long_path"):
             print(f"[干跑]   其中 {stats['long_path']} 个文件路径超过 260 字符，"
                   f"已用长路径方式读取（旧版本会漏掉）")
@@ -958,6 +1086,13 @@ def main():
         return
 
     if not pending:
+        if dup_hits:
+            # 全是重名被剔掉的：得说清楚「一个都没传」是因为网盘上都有了，
+            # 否则用户会对着「没有文件需要上传」一头雾水
+            print(f"\n待传的文件在网盘上都已经有同名的了，"
+                  f"{len(dup_hits)} 个全部跳过，本次没有东西要上传。")
+            settle_dups(dup_hits, dup_mode, cfg)
+            return
         explain_empty(stats, cfg, root, skipped, len(too_big))
         return
 
@@ -993,6 +1128,14 @@ def main():
     n_batch = (len(pending) + batch_size - 1) // batch_size
     # 断点记录改为追加写文本（一行一个路径），海量文件下比整份 JSON 重写快得多
     done_log_fh = open(done_log_path.with_suffix(".txt"), "a", encoding="utf-8")
+
+    # 重名跳过的：网盘上已经有了，它们也算「处理完了」——写进断点记录，
+    # 下次不会再被当成待传文件反复折腾
+    if dup_hits:
+        for p, _ in dup_hits:
+            done_log_fh.write(str(p) + "\n")
+        done_log_fh.flush()
+        settle_dups(dup_hits, dup_mode, cfg)
 
     # 进度状态文件（供网页控制面板轮询）：原子写 + 重试，写不进去也绝不中断上传
     progress_path = data_dir_of(cfg_path) / PROGRESS_FILE
