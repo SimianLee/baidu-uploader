@@ -128,6 +128,19 @@ try:
         ck("两层" in js("$('ogHint').textContent"),
            "两层都做时说明讲明「不会被处理两遍」", None)
 
+        print("【5c】★ 只处理文件层：重名策略收起来（它在文件层不生效）")
+        ck(js("$('dupBox').classList.contains('hidden')") is False,
+           "两层都做时重名策略还在（目录层搬回撞名要用）", None)
+        js("$('ogMergeTarget').value='file';ogMergeSync()")
+        ck(js("$('dupBox').classList.contains('hidden')") is True,
+           "★ 切到只处理文件 ⇒ 重名跳过/删除藏起来", None)
+        ck("重名跳过 / 重名删除" in js("$('ogHint').textContent")
+           or "重名" in js("$('ogHint').textContent"),
+           "说明里写明了为什么用不上重名策略", None)
+        js("$('ogMergeTarget').value='dir';ogMergeSync()")
+        ck(js("$('dupBox').classList.contains('hidden')") is False,
+           "切回目录层 ⇒ 重名策略回来", None)
+
         print("【6】切回改名页签：改名的显隐状态跟着恢复")
         js("panTab('rename')")
         ck(js("$('rnCsvBox').classList.contains('hidden')") is True,

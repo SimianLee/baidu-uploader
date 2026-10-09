@@ -1599,6 +1599,7 @@ function ogMergeSync(){
   how.options[0].textContent = lb.dedupe;
   how.options[1].textContent = lb.move;
   if(ogMode() === 'merge') $('ogHint').innerHTML = ogMergeHint();
+  syncDupBox();        // 只处理文件层时重名策略用不上，把左下角那对收起来
 }
 
 function ogMergeHint(){
@@ -1621,7 +1622,11 @@ function ogMergeHint(){
     + '大小不同的一律当成「成套资料」（<code>报告(1).pdf</code>/<code>报告(2).pdf</code>）'
     + '放行，绝不当副本删掉；③序号只认 1~9（<code>(2024)</code> 是正经名字）。<br>'
     + '主名缺席时<b>序号最小的那个上位</b>，多余的按下拉处理：'
-    + '<b>删除多余副本</b>＝删掉⚠不可恢复；<b>只改回主名</b>＝一个不删。';
+    + '<b>删除多余副本</b>＝删掉⚠不可恢复；<b>只改回主名</b>＝一个不删。<br>'
+    + '这一层用不上左下角的「重名跳过 / 重名删除」（所以把它收起来了）：'
+    + '正名去的名字本来就是空出来的，不存在撞名；删不删重复由右边的下拉直接决定。'
+    + '「重名删除」管的是另一件事——<b>往主目录搬文件时撞到网盘上已有的旧文件</b>，'
+    + '那是目录层才会发生的事。';
   const tail = '因为要配对整棵子树的名字，这个方式<b>总是递归扫描</b>。';
   if(t === 'dir')  return dirTxt + tail;
   if(t === 'file') return fileTxt + tail;
@@ -1651,11 +1656,16 @@ function ogLockRecursive(){
   $('recChip').classList.toggle('on', rc.checked);   // 点亮状态跟着 checkbox 走
 }
 
-/* 重名策略只对「会往网盘里写名字」的操作有意义：改名、归类移动、合并重复。
-   清理空文件夹是删，跟重名无关，摆着反而让人以为它会影响删除结果 */
+/* 重名策略只对「会往网盘里写名字」的操作有意义：改名、归类移动、合并重复的
+   目录层。清理空文件夹是删，跟重名无关；合并重复的**文件层**也用不上——
+   正名去的名字本来就是空出来的，「删重复那份」又由旁边的下拉直接决定，
+   摆着反而让人以为它会影响结果 */
 function syncDupBox(){
+  const mergeNoDup = panTab_ === 'organize' && ogMode() === 'merge'
+    && $('ogMergeTarget').value === 'file';
   $('dupBox').classList.toggle('hidden',
-    !(panTab_ === 'rename' || (panTab_ === 'organize' && ogMode() !== 'empty')));
+    !(panTab_ === 'rename' || (panTab_ === 'organize' && ogMode() !== 'empty'))
+    || mergeNoDup);
 }
 
 function panResetPlan(){
