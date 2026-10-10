@@ -1238,14 +1238,41 @@ def occupy_dests(pan: PanFiles, ops, occupied: dict) -> int:
 # 删除：按条件筛选
 # ===========================================================================
 
+# 汉字（含繁体）+ 中文标点。全角字母（ＡＢＣ）和日文假名、韩文都不算——
+# 它们的名字里一个汉字也没有，按「没有中文名」处理才符合直觉
+CJK_RE = re.compile(
+    "[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+    "\U00020000-\U0002ebef]")
+
+
+def has_cjk(name):
+    """文件名里有没有汉字/中文标点 → bool
+
+    只看文件名本身，不看所在的目录名：目录叫「归档」不代表里面的
+    `Steve Jobs.epub` 有中文名。
+    """
+    return bool(CJK_RE.search(name or ""))
+
+
+def cjk_mode(f):
+    """取出「要不要按中文名筛」→ any / no / yes
+
+    认不出来的值一律按 any（不筛）：这是个会删文件的条件，宁可少删，
+    也不能因为参数脏就把一整批英文文件当垃圾清掉。
+    """
+    v = str((f or {}).get("cjk") or "any").strip().lower()
+    return v if v in ("any", "no", "yes") else "any"
+
+
 def filter_files(files, f: dict):
-    """筛选条件：ext / name_contains / name_regex / min_mb / max_mb"""
+    """筛选条件：ext / name_contains / name_regex / min_mb / max_mb / cjk"""
     import fnmatch
     exts = {e.strip().lower().lstrip(".") for e in (f.get("exts") or "").split(",") if e.strip()}
     kw = [k.strip() for k in (f.get("keywords") or "").split(",") if k.strip()]
     pattern = (f.get("regex") or "").strip()
     min_mb = float(f.get("min_mb") or 0)
     max_mb = float(f.get("max_mb") or 0)
+    cjk = cjk_mode(f)
     keep = []
     for it in files:
         name = it["name"]
@@ -1253,6 +1280,11 @@ def filter_files(files, f: dict):
         if exts and ext.lower() not in exts:
             continue
         if kw and not any(k.lower() in name.lower() for k in kw):
+            continue
+        # no=只要名字里一个汉字都没有的；yes=只要含汉字的
+        if cjk == "no" and has_cjk(name):
+            continue
+        if cjk == "yes" and not has_cjk(name):
             continue
         if pattern:
             try:

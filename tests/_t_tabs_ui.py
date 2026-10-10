@@ -141,6 +141,22 @@ try:
         ck(js("$('dupBox').classList.contains('hidden')") is False,
            "切回目录层 ⇒ 重名策略回来", None)
 
+        print("【5d】★ 批量删除多了「中文名」筛选，说明随档位变")
+        js("panTab('delete')")
+        ck(js("!!$('dlCjk')") is True, "删除面板里有中文名下拉", None)
+        ck(js("$('dlCjk').value") == "any", "默认不限制（不会一进来就挑文件）",
+           js("$('dlCjk').value"))
+        ck(js("$('dlCjkNote').innerHTML") == "",
+           "不限制时不显示额外说明", js("$('dlCjkNote').innerHTML"))
+        js("$('dlCjk').value='no';dlSyncHint()")
+        note = js("$('dlCjkNote').textContent")
+        ck("没有中文" in note and "英文原版" in note,
+           "★ 选「没有中文」时提醒英文原版书也在里面", note[:60])
+        js("$('dlCjk').value='yes';dlSyncHint()")
+        ck("含中文" in js("$('dlCjkNote').textContent"),
+           "选「含中文」时换成另一套说明", js("$('dlCjkNote').textContent")[:40])
+        js("$('dlCjk').value='any';dlSyncHint()")
+
         print("【6】切回改名页签：改名的显隐状态跟着恢复")
         js("panTab('rename')")
         ck(js("$('rnCsvBox').classList.contains('hidden')") is True,

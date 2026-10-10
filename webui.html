@@ -869,6 +869,14 @@
             <div class="field sm"><label>正则</label><input id="dlRegex" placeholder="可选"></div>
             <div class="field sm"><label>大于(MB)</label><input id="dlMin" type="number" placeholder="0"></div>
             <div class="field sm"><label>小于(MB)</label><input id="dlMax" type="number" placeholder="0"></div>
+            <div class="field sm" style="flex:0 0 210px">
+              <label>中文名</label>
+              <select id="dlCjk" onchange="dlSyncHint()">
+                <option value="any">不限制</option>
+                <option value="no">只删名字没有中文的</option>
+                <option value="yes">只删名字含中文的</option>
+              </select>
+            </div>
           </div>
           <div class="row">
             <label class="chk" style="margin-top:2px">
@@ -880,6 +888,7 @@
             ⚠ <b>默认直接删除，不可恢复</b>，也不产生任何备份文件。
             勾上「删除前先移到备份区」能找回，但<b>网盘空间不会释放</b>，备份区要定期手动清。
             空文件夹永远直接删。执行前会列出完整清单，需要你再确认一次。
+            <span id="dlCjkNote"></span>
           </div>
         </div>
 
@@ -1505,6 +1514,16 @@ function dlSyncHint(){
   const h = $('dlHint');
   if(!h) return;
   h.style.color = dlBackupOn() ? '#ffb26b' : '#ff8f8f';
+  // 「中文名」这条筛的是名字本身（不看目录名）：没有中文的往往是被反反复复
+  // 传上来、名字变成一串乱码或哈希的垃圾，但英文原版书也长这样，所以先说清
+  const n = $('dlCjkNote');
+  if(n) n.innerHTML = ($('dlCjk') && $('dlCjk').value === 'no')
+    ? '<br>已选「名字没有中文」：一个汉字（含繁体）都没有的才入选，'
+      + '日文假名、韩文、纯数字、<b>英文原版书名</b>也都算「没有中文」，'
+      + '建议再配合后缀限定，先生成预览看清清单再执行。'
+    : ($('dlCjk') && $('dlCjk').value === 'yes'
+      ? '<br>已选「名字含中文」：只要名字里至少有一个汉字（含繁体）就入选。'
+      : '');
 }
 
 /* 重名策略：skip=跳过（默认，安全） / delete=把网盘上被撞的旧文件删掉（不可恢复）
@@ -1554,7 +1573,6 @@ function panTab(k){
   if(typeof setDup === 'function') setDup('skip', true);   // silent：切页签不该弹提示
   if(typeof ogModeChange === 'function') ogModeChange();
   // 回到改名页签时按当前模式重排一遍显隐：上次可能停在「按表格改名」，
-  // 那时第二行的那些参数是藏起来的
   // 那时第二行的那些参数是藏起来的
   if(typeof panModeChange === 'function') panModeChange();
   if(k === 'delete') dlSyncHint();     // 备份区路径/提示按当前沙盒刷新一遍
@@ -2370,9 +2388,12 @@ async function panPlan(refresh){
       body = {...body, kind: 'empty_dir', recursive: true, skip: $('edSkip').value};
     }
   }else if(panTab_ === 'delete'){
+    // cjk：中文名筛选（any 不限制 / no 只要没有中文的 / yes 只要含中文的）。
+    // 它跟后缀一样会改变命中清单，filters 整包进指纹，所以换一档必定重算预览
     body = {...body, kind: 'delete', filters: {
       exts: $('dlExts').value, keywords: $('dlKw').value,
-      regex: $('dlRegex').value, min_mb: +$('dlMin').value || 0, max_mb: +$('dlMax').value || 0}};
+      regex: $('dlRegex').value, min_mb: +$('dlMin').value || 0, max_mb: +$('dlMax').value || 0,
+      cjk: $('dlCjk').value}};
   }else{
     // 各功能页签都处理完了还走到这里，说明前端状态乱了：别往下跑，老实报出来
     setMsg('panMsg', '请先选择功能页签', false); return;
@@ -2460,6 +2481,11 @@ async function panPlan(refresh){
           : '')
     : `扫描 ${d.scanned} 个文件 → ${panTotal} 条操作`
       + (d.exts ? ` · 只处理 ${d.exts} 后缀（其余不改名，也不算进上面这个数）` : '')
+      // 按中文名筛的时候报出「这一类在整棵树里到底有多少」：命中的条数会被后缀
+      // 等条件再砍一刀，只看它会以为工具漏扫了大半
+      + (d.cjk && d.cjk_hits != null
+         ? ` · ${d.cjk === 'yes' ? '名字含中文' : '名字没有中文'}的共 ${d.cjk_hits} 个`
+         : '')
       + (d.unchanged ? `（${d.unchanged} 个无变化）` : '')
       // 只保留书名会把「《A》作者：甲」「A - 乙」压成同一个 A，撞车的自动加了 (2)(3)，
       // 这事必须说出来——悄悄改名字比让人看见更糟。改名自己能兜住，整理归档那边
@@ -2515,6 +2541,12 @@ async function panApply(){
   // 合并重复·「删除重复那份」出来的清单是混合的：既有搬回主目录的，也有要删的。
   // 这时候说「即将永久删除 N 个文件」会把要搬走的那部分也算进去，得拆开讲
   const mixedPlan = delN > 0 && (mvN > 0 || panOps.some(o => o.op === 'rename'));
+  // 「名字没有中文」挑出来的是一堆乱码/哈希名，但英文原版书、纯数字名也长这样，
+  // 真删之前把这句话摆出来：清单里看见「Steve Jobs.epub」时还来得及取消
+  const cjkTip = (isDel && $('dlCjk') && $('dlCjk').value === 'no')
+    ? `\n\n注意：这批是按「名字里没有中文」挑出来的，英文原版书名、纯数字名`
+      + `也在这个范围里——先翻一眼清单再确定。`
+    : '';
   const tip = onlyEmptyDirs
     ? `即将删除 ${n2} 个空文件夹（内部不含任何文件），删除后不可恢复。确定继续吗？`
     : mixedPlan
@@ -2546,7 +2578,7 @@ async function panApply(){
     ? `\n\n⚠ 这份预览已经执行过一次了：清单里的大多数路径可能已经不存在，`
       + `再执行一遍多半只会得到一堆失败。确定还要继续吗？`
     : '';
-  if(!confirm(tip + batchTip + oldTip + doneTip)) return;
+  if(!confirm(tip + cjkTip + batchTip + oldTip + doneTip)) return;
 
   $('btnPanApply').disabled = true;
   $('btnPanPlan').disabled = true;      // 执行期间不许再生成预览：两边同时操作网盘只会互相干扰

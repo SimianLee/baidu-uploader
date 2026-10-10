@@ -89,8 +89,16 @@ def _upload_dup(cfg_or_val) -> str:
 
 def filter_label(f):
     """把删除的筛选条件写成一句人能读的话，用作预览文件标题"""
+    # pan_tools 是延迟导入的（顶层不 import：它要读 token，而 webui 有些
+    # 子命令压根用不到网盘），这里跟其它函数一样随用随导
+    import pan_tools
     f = f or {}
     bits = []
+    # 中文名条件放在最前面：它往往是这批文件被挑出来的主因，后缀只是再收一道
+    if pan_tools.cjk_mode(f) == "no":
+        bits.append("名字没有中文")
+    elif pan_tools.cjk_mode(f) == "yes":
+        bits.append("名字含中文")
     if f.get("exts"):
         bits.append("后缀 " + str(f["exts"]))
     if f.get("keywords"):
@@ -1164,6 +1172,14 @@ class Handler(BaseHTTPRequestHandler):
                 flt = body.get("filters") or {}
                 ops = pan_tools.build_delete_plan(files, flt)
                 info = {"scanned": len(files)}
+                # 按中文名筛的时候多报一个数：光看命中的条数不知道「筛得狠不狠」，
+                # 得让人看见这批文件在整棵树里占多大比例（英文原版书也会落进来）
+                cjk = pan_tools.cjk_mode(flt)
+                if cjk != "any":
+                    want = (cjk == "yes")
+                    info["cjk"] = cjk
+                    info["cjk_hits"] = sum(
+                        1 for f in files if pan_tools.has_cjk(f["name"]) == want)
                 label = "批量删除·" + filter_label(flt)
             elif kind == "merge_dirs":
                 # 合并 X(1)/X(2) 副本：归档几轮下来攒出的大量 (1) 副本
