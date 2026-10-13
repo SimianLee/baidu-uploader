@@ -159,6 +159,31 @@ try:
         ck("改名" in js("$('panMsg').textContent"),
            "结果提示里有改名", js("$('panMsg').textContent")[:80])
 
+        print("\n【4b】★ 浏览下钻不改整理范围；归档填到范围外会被当场说清")
+        js(f"$('panPath').value = {json.dumps(str(local / '小说'))}; panBrowse();")
+        time.sleep(1.2)
+        ck("A.txt" in js("$('panList').textContent"),
+           "下钻进了子目录", js("$('panList').textContent")[:60])
+        ck(js("localRoot").replace("\\", "/").lower()
+           == str(local).replace("\\", "/").lower(),
+           "★ 整理范围仍是上一级（浏览下钻不把它收窄）", js("localRoot"))
+        ck(js("$('panLocalScope').textContent").replace("\\", "/").lower()
+           == str(local).replace("\\", "/").lower(),
+           "★ 界面上把整理范围写出来给人看", js("$('panLocalScope').textContent"))
+        js("panTab('organize'); $('ogMode').value='organize'; ogModeChange();")
+        js(f"$('ogDest').value = {json.dumps(str(tmp / '范围外'))};")
+        js("panPlan()")
+        time.sleep(1.2)
+        msg = js("$('panMsg').textContent")
+        ck("整理范围之外" in msg, "★ 归档目录在范围外：当场说清，而不是执行时才报越界",
+           msg)
+        ck("操作目录" in msg, "★ 给出「把操作目录改成 X」这条明路", msg)
+        js(f"$('ogDest').value = {json.dumps(str(local / '归档'))};")
+        js("panPlan()")
+        time.sleep(1.2)
+        ck(js("panOps.length") == 1,
+           "★ 归档目录挪回范围内就能正常生成", js("$('panMsg').textContent"))
+
         print("\n【5】★ 切回网盘：手里的本地预览必须作废")
         js("setPanSrc('remote')")
         ck(js("panOps.length") == 0,

@@ -1821,7 +1821,9 @@ def validate_plan(plan: dict, sandbox: str):
         elif op == "move":
             dest = plan_path(o.get("dest"), sb)
             if not inside_root(dest, sb):
-                errs.append(f"第 {i} 条目标越界：{dest}"); continue
+                # 带上根目录：光说「目标越界」谁也看不出该改哪个框
+                errs.append(f"第 {i} 条目标越界（不在根目录 {sb} 内）：{dest}")
+                continue
             it = {"op": "move", "path": path, "dest": dest.rstrip("/")}
             # newname（搬过去的同时改名）必须保住——完整计划执行前都要过这道
             # 校验，丢了它撞名编号就没了，真网盘上会整批撞 -8。

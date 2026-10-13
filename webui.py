@@ -51,6 +51,19 @@ ORGANIZE_LABELS = {"category": "按大类", "ext": "按后缀", "date": "按修�
 OP_TEXT = {"rename": "改名", "move": "移动", "delete": "删除"}
 
 
+def _common_prefix(a: str, b: str) -> str:
+    """两条路径的公共上级（大小写不敏感）：归档目录落在整理范围之外时，
+    给用户指一条「把操作目录改成 X」的明路，而不是让他自己猜"""
+    A = str(a or "").replace("\\", "/").split("/")
+    B = str(b or "").replace("\\", "/").split("/")
+    out = []
+    for x, y in zip(A, B):
+        if x.lower() != y.lower():
+            break
+        out.append(x)
+    return "/".join(out)
+
+
 def _dup_policy(body) -> str:
     """取出「重名跳过 / 重名删除」，归一成 pan_tools 认的 skip / delete。
 
@@ -1199,6 +1212,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": False, "msg": "请填写归档目标目录"})
                 if src == "local":
                     dest = pan.check_path(dest)     # `D:\书籍\归档` → `D:/书籍/归档`
+                    # 归档目录必须在整理范围里。**生成时就拦**：放过去的话，计划里
+                    # 每一条 move 都会在执行时被判越界，用户只看到一串「第 N 条
+                    # 目标越界」，根本看不出该改哪个框
+                    if not pan_tools.inside_root(dest, sandbox):
+                        up = _common_prefix(dest, sandbox) or sandbox
+                        return self._json({"ok": False, "msg": (
+                            f"归档目录在整理范围之外：整理范围 {sandbox}，"
+                            f"归档目录 {dest}。把归档目录改成 {sandbox}/归档（推荐），"
+                            f"或把「操作目录」改成 {up} 后再生成一次。")})
                 by = str(body.get("by") or "category")
                 # 重名策略在**生成计划时**就要用：跳过=给后来的自动编号，
                 # 删除=不编号，执行时把网盘上那个旧文件直接删掉

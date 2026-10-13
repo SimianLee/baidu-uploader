@@ -214,7 +214,27 @@ def main():
         finally:
             webui.is_running = saved_running
 
-        print("\n【6】src 不同 = 另一份预览，不许互相顶替")
+        print("\n【6】★ 归档目录在整理范围之外：生成时就拦，且说清该改哪个框")
+        sub = root / "子目录"
+        touch(sub / "z.txt", 100)
+        d = api("/api/pan_plan", {"src": "local", "path": str(sub),
+                                  "recursive": True, "kind": "organize", "by": "ext",
+                                  "dest": str(root / "已整理"), "root": str(sub)})
+        msg = d.get("msg") or ""
+        ck(d["ok"] is False, "★ 越界的归档目录不给生成计划", msg)
+        ck("整理范围之外" in msg, "★ 说清是「归档目录在整理范围之外」", msg)
+        ck(str(sub).replace("\\", "/") in msg, "★ 报出整理范围是哪个目录", msg)
+        ck("已整理" in msg, "报出归档目录是哪个", msg)
+        ck(str(root).replace("\\", "/") in msg,
+           "★ 给出「把操作目录改成两者的公共上级」这条明路", msg)
+        # 反例：整理范围定在上一级（浏览进子目录不该把范围收窄）→ 归档合法
+        d = api("/api/pan_plan", {"src": "local", "path": str(sub),
+                                  "recursive": True, "kind": "organize", "by": "ext",
+                                  "dest": str(root / "已整理"), "root": str(root)})
+        ck(d["ok"] and d.get("total") == 1,
+           "★ 整理范围定在上一级 → 归档到上一级就合法了", d.get("msg"))
+
+        print("\n【7】src 不同 = 另一份预览，不许互相顶替")
         f_loc = ps.fingerprint("rename", {"path": "X:/x", "src": "local"}, "X:/x")
         f_rem = ps.fingerprint("rename", {"path": "X:/x", "src": "remote"}, "X:/x")
         ck(f_loc != f_rem, "★ 同一条路径，local 与 remote 指纹不同",

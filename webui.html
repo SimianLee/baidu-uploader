@@ -727,7 +727,9 @@
           ⚠ 整理的是<b>本机磁盘上的真文件</b>：<b>删除不进回收站、不可恢复</b>，
           改名/移动会立刻生效。执行前一定先看预览清单；
           上传任务在跑时<b>不允许</b>整理本地目录（两边按路径对不上号）。
-          想留后路就在「批量删除」里勾「删除前先移到备份区」。
+          想留后路就在「批量删除」里勾「删除前先移到备份区」。<br>
+          整理范围：<b id="panLocalScope">（未定）</b>——归档目录必须落在它里面；
+          点进子目录只是换起点，范围不会跟着变窄。
         </div>
         <pre class="term headroom empty" id="panList" data-empty="点「浏览」列出该目录下的子目录与文件"></pre>
 
@@ -1532,6 +1534,31 @@ let panSandbox = '';          // 根目录（网盘沙盒 / 本地文件夹）�
 let panSrc = 'remote';        // 整理对象：remote=百度网盘 / local=本地文件夹
 let cfgLocalDir = '';         // 配置里的本地上传目录，切到 local 时当默认值
 let remoteRoot = '';          // 网盘沙盒根（切回「百度网盘」时把目录填回去）
+let localRoot = '';           // 本地整理的「根」（越界就按它判）
+/* 本地整理的根**不能跟着浏览一路收窄**：点进子目录只是换扫描起点，范围若跟着
+   变窄，归档到上一级（Downloads/书籍 → Downloads/已整理）就会被判成越界。
+   只有「手填了一个不在当前根里的目录」才认作换整理范围。 */
+function underRoot(p, root){
+  const a = String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const b = String(root || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  if(!a || !b) return false;
+  return a === b || a.startsWith(b + '/');
+}
+function localRootOf(cur){
+  if(!localRoot) return cur;                 // 还没定过根：填什么就是什么
+  return underRoot(cur, localRoot) ? localRoot : cur;   // 手填了别的范围 → 换根
+}
+/* 两条路径的公共上级：归档目录落在整理范围之外时，用它给用户一个能直接点的建议 */
+function commonPrefix(a, b){
+  const A = String(a || '').replace(/\\/g, '/').split('/');
+  const B = String(b || '').replace(/\\/g, '/').split('/');
+  const out = [];
+  for(let i = 0; i < Math.min(A.length, B.length); i++){
+    if(A[i].toLowerCase() !== B[i].toLowerCase()) break;
+    out.push(A[i]);
+  }
+  return out.join('/') || '';
+}
 
 /* 整理对象切换：换的是「谁去执行那些改名/移动/删除」，不是另一套功能 */
 function setPanSrc(v){
@@ -1549,8 +1576,10 @@ function setPanSrc(v){
     const cur = $('panPath').value.trim();
     if(next === 'local'){
       if(!cur || cur.startsWith('/')) $('panPath').value = cfgLocalDir || '';
+      // 整理范围就定在这个目录上：后面浏览下钻不改它（见 localRootOf）
+      localRoot = $('panPath').value.trim();
       if($('ogDest').value.trim().startsWith('/'))
-        $('ogDest').value = ($('panPath').value.trim() || 'D:\\') + '\\归档';
+        $('ogDest').value = (localRoot || 'D:\\') + '\\归档';
     }else{
       if(cur && !cur.startsWith('/')) $('panPath').value = remoteRoot || '';
     }
@@ -1944,16 +1973,27 @@ function mergeTail(d){
 
 /* 浏览目录 */
 async function panBrowse(){
-  const p = $('panPath').value.trim();
+  let p = $('panPath').value.trim();
   setMsg('panMsg', '正在列目录…', null);
-  // src/root 一并带过去：本地浏览列的是磁盘目录，没填路径时后端给盘符列表
+  // src/root 一并带过去：本地浏览列的是磁盘目录，没填路径时后端给盘符列表。
+  // ★ root 是**整理范围**，不是当前目录：点进子目录只换扫描起点，范围若跟着
+  //   收窄，归档到上一级（…/Downloads/书籍 → …/Downloads/已整理）就会被判成越界
+  if(panSrc === 'local'){
+    if(!p) p = localRoot || cfgLocalDir || '';
+    localRoot = localRootOf(p);      // 手填了范围外的目录 = 换整理范围
+    $('panPath').value = p;
+  }
   const d = await api('/api/pan_browse',
-                      {path: p, src: panSrc, root: p});
+                      {path: p, src: panSrc,
+                       root: (panSrc === 'local') ? localRoot : p});
   if(!d.ok){ setMsg('panMsg', d.msg, false); return; }
   if(!d.path && !d.drives){ $('panPath').value = d.path; }
   else $('panPath').value = d.path;
   if(panSrc === 'local'){
     $('panLocalHint').dataset.root = d.sandbox || '';
+    localRoot = d.sandbox || localRoot;      // 以后端认定的根为准
+    const sp = $('panLocalScope');
+    if(sp) sp.textContent = localRoot || '（未定）';
   }else{
     $('panHint').textContent = `沙盒根目录：${d.sandbox}　·　当前：${d.path}`;
   }
@@ -2430,10 +2470,16 @@ async function panPlan(refresh){
   const recursive = $('panRecursive').checked;
   // src 决定这一趟扫的是网盘还是本地磁盘；root 只在本地时用（没填就退回配置
   // 里的上传目录）。它俩都进指纹，换一边必定重扫
-  let body = {path, recursive, src: panSrc, root: path};
-  if(panSrc === 'local' && !path){
-    setMsg('panMsg', '请先填写要整理的本地文件夹（如 D:\\书籍）', false); return;
+  // root 是整理范围（本地专用）：始终用 localRoot，而不是当前目录——用当前目录
+  // 的话，浏览进子目录后归档到上一级就会被判成越界
+  let root = path;
+  if(panSrc === 'local'){
+    if(!path){
+      setMsg('panMsg', '请先填写要整理的本地文件夹（如 D:\\书籍）', false); return;
+    }
+    root = localRootOf(path);
   }
+  let body = {path, recursive, src: panSrc, root};
 
   if(panTab_ === 'rename'){
     const m = $('rnMode').value;
@@ -2477,6 +2523,15 @@ async function panPlan(refresh){
     if(m === 'organize'){
       const dest = $('ogDest').value.trim();
       if(!dest){ setMsg('panMsg', '请填写归档目标目录', false); return; }
+      // 本地：归档目录必须在整理范围里。**现在**就说清楚，别等到点执行时
+      // 甩给用户一串「第 N 条目标越界」——那句话谁也看不出该改哪个框
+      if(panSrc === 'local' && !underRoot(dest, root)){
+        const up = commonPrefix(dest, root) || root;
+        setMsg('panMsg', `归档目录在整理范围之外：整理范围 ${root}，归档目录 ${dest}。`
+          + `要么把归档目录改成 ${root}\\归档（推荐），要么把「操作目录」改成 ${up} `
+          + `后再生成一次。`, false);
+        return;
+      }
       body = {...body, kind: 'organize', by: $('ogBy').value, dest, ondup: panDup};
     }else if(m === 'merge'){
       // recursive 恒为 true：配对序号副本要看整棵子树，后端也会强制递归
@@ -2711,7 +2766,10 @@ async function panApply(){
     // 还白占一层目录）。切到空文件夹时那个勾选框是藏起来的，藏起来不代表没勾
     d = await api('/api/pan_apply',
                   {ops: panOps, ondup: panDup, preview_id: pvCurrent, total: panTotal,
-                   src: panSrc, root: $('panPath').value.trim(),
+                   // root 同样是整理范围（不是当前目录）：执行时的越界校验按它判
+                   src: panSrc,
+                   root: (panSrc === 'local') ? (localRoot || $('panPath').value.trim())
+                                              : $('panPath').value.trim(),
                    backup_delete: dlTarget() === 'file' && dlBackupOn()});
   } finally {
     // 收起前补画一次最终进度：最后一批的完成回调常常来不及被 300ms 的轮询画出来，
