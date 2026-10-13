@@ -157,6 +157,42 @@ try:
            "选「含中文」时换成另一套说明", js("$('dlCjkNote').textContent")[:40])
         js("$('dlCjk').value='any';dlSyncHint()")
 
+        print("【5e】★ 清理空文件夹已挪到「批量删除」页签，两套输入互斥")
+        js("panTab('delete')")
+        ck(js("!!$('dlTarget')") is True, "删除面板里有「删什么」下拉", None)
+        vis = lambda sel: js(f"!document.querySelector('{sel}').closest('.field')"
+                             f".classList.contains('hidden')")
+        ck(js("$('dlTarget').value") == "file", "默认删文件", js("$('dlTarget').value"))
+        ck(js("!document.querySelector('#dlExts').closest('.field')"
+              ".classList.contains('hidden')") is True,
+           "默认显示文件筛选那一套", None)
+        ck(js("document.querySelector('#edSkip').closest('.field')"
+              ".classList.contains('hidden')") is True,
+           "空文件夹的「跳过名字含」收着", None)
+        js("$('dlTarget').value='empty';dlModeChange()")
+        ck(js("document.querySelector('#dlExts').closest('.field')"
+              ".classList.contains('hidden')") is True,
+           "★ 切到空文件夹 ⇒ 文件筛选全部收起", None)
+        ck(js("!document.querySelector('#edSkip').closest('.field')"
+              ".classList.contains('hidden')") is True,
+           "★ 空文件夹的「跳过名字含」露出来", None)
+        ck(js("document.querySelector('#dlBackup').closest('.row')"
+              ".classList.contains('hidden')") is True,
+           "★ 备份勾选也跟着收起（空文件夹永远直接删）", None)
+        ck(js("$('panRecursive').disabled") is True,
+           "★ 递归开关被锁死（不递归判断不了子树是否为空）", None)
+        ck(js("$('dupBox').classList.contains('hidden')") is True,
+           "删除类方式不显示重名策略", None)
+        ck("打不开" in js("$('dlEmptyNote').textContent")
+           or "不会被当成空" in js("$('dlEmptyNote').textContent"),
+           "★ 说明里写明「无法确认就不删」",
+           js("$('dlEmptyNote').textContent")[:60])
+        js("$('dlTarget').value='file';dlModeChange()")
+        ck(js("!document.querySelector('#dlExts').closest('.field')"
+              ".classList.contains('hidden')") is True,
+           "切回删文件 ⇒ 筛选条件回来", None)
+        ck(js("$('panRecursive').disabled") is False, "递归锁解开", None)
+
         print("【6】切回改名页签：改名的显隐状态跟着恢复")
         js("panTab('rename')")
         ck(js("$('rnCsvBox').classList.contains('hidden')") is True,

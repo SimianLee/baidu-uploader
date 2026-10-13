@@ -188,7 +188,7 @@
   label.chkchip input{position:absolute;width:1px;height:1px;opacity:0;margin:0;pointer-events:none}
   label.chkchip.on{background:#1b2231;color:#e6ebf7;font-weight:500}
 
-  /* 被功能强制锁定的开关（空文件夹必须递归，见 panTab）：
+  /* 被功能强制锁定的开关（合并重复、空文件夹必须递归，见 panLockRecursive）：
      保持点亮的样子但整体压暗，鼠标提示「此项已固定」，而不是假装可点 */
   .dupseg.locked{opacity:.55;cursor:not-allowed}
   .dupseg.locked > label.chkchip{cursor:not-allowed}
@@ -810,8 +810,9 @@
           <div class="hint hidden" id="rnCsvStat" style="color:#7fa0ff"></div>
         </div>
 
-        <!-- 整理：归类移动 / 合并重复目录 / 清理空文件夹 三种方式共用一个页签，
-             它们本来就是同一件事的后半程：先归类 → 再合并残留副本 → 最后清掉空壳 -->
+        <!-- 整理：归类移动 / 合并重复 两种方式共用一个页签，它们本来就是同一件
+             事的前后两半：先归类 → 再合并残留副本。清掉空壳那一步归「批量删除」，
+             跟「删文件」摆在一起（都是删，只是删的东西不一样） -->
         <div class="panel" id="paneOrganize">
           <div class="row">
             <div class="field sm" style="flex:0 0 210px">
@@ -819,7 +820,6 @@
               <select id="ogMode" onchange="ogModeChange()">
                 <option value="organize">归类移动（搬进归档目录）</option>
                 <option value="merge">合并重复 → txt(1) 合回 txt / a(1).pdf 合回 a.pdf</option>
-                <option value="empty">清理空文件夹</option>
               </select>
             </div>
             <div class="field sm og-org" style="flex:0 0 150px">
@@ -833,10 +833,6 @@
             <div class="field og-org">
               <label>归档到</label>
               <input id="ogDest" placeholder="/apps/baidu_uploader/归档">
-            </div>
-            <div class="field sm og-empty hidden">
-              <label>跳过名字含（逗号分隔）</label>
-              <input id="edSkip" value="_覆盖备份" placeholder="命中的目录及其子目录都不动">
             </div>
             <div class="field sm og-merge hidden" style="flex:0 0 260px">
               <label>处理哪一层重复</label>
@@ -861,15 +857,24 @@
 
         <!-- 「按表改名」已并入上面「批量改名」页签的一种模式（后面那个选项） -->
 
-        <!-- 删除 -->
+        <!-- 删除：删文件（按条件筛）和删空文件夹都在这个页签里，用「删什么」切换。
+             空文件夹原先挂在「整理归档」页签，但它跟整理那两件事（归类、合并）没有
+             先后关系，反而是「又一种删」，跟批量删除摆在一起更好找 -->
         <div class="panel" id="paneDelete">
           <div class="row">
-            <div class="field sm"><label>后缀(逗号分隔)</label><input id="dlExts" placeholder="tmp, part, bak"></div>
-            <div class="field sm"><label>文件名含(逗号分隔)</label><input id="dlKw" placeholder="临时, 副本"></div>
-            <div class="field sm"><label>正则</label><input id="dlRegex" placeholder="可选"></div>
-            <div class="field sm"><label>大于(MB)</label><input id="dlMin" type="number" placeholder="0"></div>
-            <div class="field sm"><label>小于(MB)</label><input id="dlMax" type="number" placeholder="0"></div>
-            <div class="field sm" style="flex:0 0 210px">
+            <div class="field sm" style="flex:0 0 220px">
+              <label>删什么</label>
+              <select id="dlTarget" onchange="dlModeChange()">
+                <option value="file">文件（按右边的条件筛）</option>
+                <option value="empty">空文件夹（整棵子树没文件）</option>
+              </select>
+            </div>
+            <div class="field sm dl-file"><label>后缀(逗号分隔)</label><input id="dlExts" placeholder="tmp, part, bak"></div>
+            <div class="field sm dl-file"><label>文件名含(逗号分隔)</label><input id="dlKw" placeholder="临时, 副本"></div>
+            <div class="field sm dl-file"><label>正则</label><input id="dlRegex" placeholder="可选"></div>
+            <div class="field sm dl-file"><label>大于(MB)</label><input id="dlMin" type="number" placeholder="0"></div>
+            <div class="field sm dl-file"><label>小于(MB)</label><input id="dlMax" type="number" placeholder="0"></div>
+            <div class="field sm dl-file" style="flex:0 0 210px">
               <label>中文名</label>
               <select id="dlCjk" onchange="dlSyncHint()">
                 <option value="any">不限制</option>
@@ -877,8 +882,12 @@
                 <option value="yes">只删名字含中文的</option>
               </select>
             </div>
+            <div class="field sm dl-empty hidden">
+              <label>跳过名字含（逗号分隔）</label>
+              <input id="edSkip" value="_覆盖备份" placeholder="命中的目录及其子目录都不动">
+            </div>
           </div>
-          <div class="row">
+          <div class="row dl-file">
             <label class="chk" style="margin-top:2px">
               <input type="checkbox" id="dlBackup" onchange="dlSyncHint()">
               删除前先移到备份区（<code id="dlBackupPath">_覆盖备份</code>，可找回）
@@ -888,12 +897,11 @@
             ⚠ <b>默认直接删除，不可恢复</b>，也不产生任何备份文件。
             勾上「删除前先移到备份区」能找回，但<b>网盘空间不会释放</b>，备份区要定期手动清。
             空文件夹永远直接删。执行前会列出完整清单，需要你再确认一次。
-            <span id="dlCjkNote"></span>
+            <span id="dlCjkNote"></span><span id="dlEmptyNote"></span>
           </div>
         </div>
 
         
-        <!-- 空文件夹 → 已并入「整理归档」页签的「清理空文件夹」方式 -->
 
         <!-- 预览与执行 -->
         <div class="row" style="margin-top:10px">
@@ -1491,7 +1499,7 @@ async function pollNow(){
 }
 
 /* =======================================================================
-   网盘整理 / 批量改名 / 整理归档 / 合并重复 / 批量删除 / 空文件夹
+   网盘整理：批量改名 / 整理归档（归类移动 · 合并重复）/ 批量删除（删文件 · 空文件夹）
    全部只操作百度应用沙盒目录，越界在后端 validate_plan 里拦截
    ======================================================================= */
 let panTab_ = 'rename';       // 当前功能页
@@ -1575,17 +1583,17 @@ function panTab(k){
   // 回到改名页签时按当前模式重排一遍显隐：上次可能停在「按表格改名」，
   // 那时第二行的那些参数是藏起来的
   if(typeof panModeChange === 'function') panModeChange();
-  if(k === 'delete') dlSyncHint();     // 备份区路径/提示按当前沙盒刷新一遍
+  // 删文件 / 删空文件夹两套输入只留一套，顺带刷新备份区路径和提示文案
+  if(k === 'delete' && typeof dlModeChange === 'function') dlModeChange();
   panResetPlan();
 }
 
 /* 整理方式切换：只显示当前方式需要的输入框，并更新说明文案。
-   递归锁和「重名跳过/覆盖」的显隐也跟着走——「清理空文件夹」是删，
-   无所谓重名；而它和「合并重复」都必须看到整棵子树 */
+   递归锁和「重名跳过/覆盖」的显隐也跟着走——合并重复必须看到整棵子树，
+   而它的「只处理文件层」那档用不上重名策略 */
 function ogModeChange(){
   const m = ogMode();
   document.querySelectorAll('.og-org').forEach(e => e.classList.toggle('hidden', m !== 'organize'));
-  document.querySelectorAll('.og-empty').forEach(e => e.classList.toggle('hidden', m !== 'empty'));
   document.querySelectorAll('.og-merge').forEach(e => e.classList.toggle('hidden', m !== 'merge'));
   $('ogHint').innerHTML = ({
     organize: '文件会移动到「归档目录/分类名/」下。撞到网盘已有的同名文件时：'
@@ -1593,12 +1601,31 @@ function ogModeChange(){
       + '<b>重名删除</b>＝把网盘上那个旧文件<b>直接删掉</b>（不可恢复、不备份），'
       + '这次的文件不编号直接上位。',
     merge: ogMergeHint(),
-    empty: '判定：一个目录<b>连同它的所有子目录</b>里一个文件都没有，才算空。'
-      + '预览只列<b>最外层</b>的空目录——删掉它，嵌套在里面的空目录会一并消失。'
-      + '当前正在浏览的这层目录本身不会被删（免得删掉你正站着的地方）。'
-      + '因为要看整棵子树，这个方式<b>总是递归扫描</b>，并会锁定「含子目录」开关。',
   })[m] || '';
-  ogLockRecursive();
+  panLockRecursive();
+  syncDupBox();
+}
+
+/* 批量删除：删文件（按条件筛）与删空文件夹是两套输入，一次只留一套。
+   空文件夹那套还必须递归——不递归只能得出「这层没东西＝空」的错结论 */
+function dlTarget(){
+  /* 不在批量删除页签时返回空串（那时这两个下拉的值没有意义） */
+  return panTab_ === 'delete' ? $('dlTarget').value : '';
+}
+function dlModeChange(){
+  const t = dlTarget();
+  document.querySelectorAll('.dl-file').forEach(e =>
+    e.classList.toggle('hidden', t !== 'file'));
+  document.querySelectorAll('.dl-empty').forEach(e =>
+    e.classList.toggle('hidden', t !== 'empty'));
+  $('dlEmptyNote').innerHTML = (t === 'empty')
+    ? '<br>空文件夹：一个目录<b>连同它的所有子目录</b>里一个文件都没有才算空，'
+      + '预览只列<b>最外层</b>的空目录（删掉它，嵌在里面的空目录一并消失）。'
+      + '当前正在浏览的这层目录本身不会被删。打不开的目录<b>不会被当成空</b>——'
+      + '无法确认就不删。因为要看整棵子树，这个方式<b>总是递归扫描</b>。'
+    : '';
+  dlSyncHint();
+  panLockRecursive();
   syncDupBox();
 }
 
@@ -1630,7 +1657,7 @@ function ogMergeHint(){
     + '<b>全部搬回主目录</b>＝都搬过去，撞名的按重名策略编号或删旧。'
     + '副本里主目录<b>没有</b>的文件，两种方式都一样会搬回去——去重不是清空。<br>'
     + '副本里的<b>子目录</b>不动；搬空的副本目录也不在这里删——'
-    + '合完切到上面的「清理空文件夹」收拾更安全。';
+    + '合完到「批量删除」页签切到「空文件夹」收拾更安全。';
   const fileTxt = '把 <b>书(1).epub</b>、<b>书(2).epub</b>… 这类重复文件合回 <b>书.epub</b>'
     + '（同一位父目录下名字只差一个 <code>(n)</code> 的算一组；<code>书(1).epub</code> 的'
     + '主名是 <code>书.epub</code>，括号要塞回后缀之前）。<br>'
@@ -1652,10 +1679,10 @@ function ogMergeHint(){
     + '两层一次做完，重复<b>不会</b>被处理两遍（目录层安排过的子树，文件层会绕开）。' + tail;
 }
 
-/* 合并重复 / 清理空文件夹都得看到整棵子树。不递归只会得出「这一层里没东西＝空」
+/* 合并重复、清理空文件夹都得看到整棵子树。不递归只会得出「这一层里没东西＝空」
    的错误结论，所以锁死开关并写明理由，而不是让用户关掉它拿到一个错的答案 */
-function ogLockRecursive(){
-  const need = (ogMode() === 'merge' || ogMode() === 'empty');
+function panLockRecursive(){
+  const need = (ogMode() === 'merge' || dlTarget() === 'empty');
   const rc = $('panRecursive');
   const recBox = $('recBox');
   if(need){
@@ -1675,15 +1702,14 @@ function ogLockRecursive(){
 }
 
 /* 重名策略只对「会往网盘里写名字」的操作有意义：改名、归类移动、合并重复的
-   目录层。清理空文件夹是删，跟重名无关；合并重复的**文件层**也用不上——
-   正名去的名字本来就是空出来的，「删重复那份」又由旁边的下拉直接决定，
+   目录层。批量删除页签两种都是纯删，跟重名无关；合并重复的**文件层**也用不上
+   ——正名去的名字本来就是空出来的，「删重复那份」又由旁边的下拉直接决定，
    摆着反而让人以为它会影响结果 */
 function syncDupBox(){
   const mergeNoDup = panTab_ === 'organize' && ogMode() === 'merge'
     && $('ogMergeTarget').value === 'file';
   $('dupBox').classList.toggle('hidden',
-    !(panTab_ === 'rename' || (panTab_ === 'organize' && ogMode() !== 'empty'))
-    || mergeNoDup);
+    !(panTab_ === 'rename' || panTab_ === 'organize') || mergeNoDup);
 }
 
 function panResetPlan(){
@@ -1716,7 +1742,7 @@ function panModeChange(){
   show('rnCsvStat',   m === 'csv' && !!$('rnCsvStat').textContent);
   show('rnExtBox',    m !== 'csv');
   $('rnHint').classList.toggle('hidden', m === 'csv');   // 说明换成表格那一块的
-  // 表格模式不扫网盘，「含子目录」在这没有意义。它不会被 ogLockRecursive 抢回去：
+  // 表格模式不扫网盘，「含子目录」在这没有意义。它不会被 panLockRecursive 抢回去：
   // panTab 先跑 ogModeChange（那时已不在整理页签，会解锁），再跑这里
   $('recBox').classList.toggle('hidden', m === 'csv');
   $('rnHint').textContent = {
@@ -1838,7 +1864,7 @@ function mergeTail(d){
     if(d.adopted) s += ` · ${d.adopted} 组缺主目录，已让序号最小的那个当家`;
     // 撞名数不在这里重复说：末尾的 dupTxt 会连同「跳过/删除」一起讲清楚
     if(d.with_subdirs) s += ` · ⚠ ${d.with_subdirs} 个副本里还有子目录（保守起见没动）`;
-    if(d.moved) s += ' · 搬空后切到「清理空文件夹」清掉空壳';
+    if(d.moved) s += ' · 搬空后到「批量删除」切「空文件夹」清掉空壳';
     seg.push(s);
   }
   if(d.fgroups != null){
@@ -2384,16 +2410,23 @@ async function panPlan(refresh){
       body = {...body, kind: 'merge_dirs', recursive: true, ondup: panDup,
               target: $('ogMergeTarget').value, how: $('ogMergeHow').value};
     }else{
-      // recursive 恒为 true：后端也会强制递归，这里显式写出来免得两头不一致
-      body = {...body, kind: 'empty_dir', recursive: true, skip: $('edSkip').value};
+      // recursive 恒为 true：配对序号副本要看整棵子树，后端也会强制递归
+      body = {...body, kind: 'merge_dirs', recursive: true, ondup: panDup,
+              target: $('ogMergeTarget').value, how: $('ogMergeHow').value};
     }
   }else if(panTab_ === 'delete'){
-    // cjk：中文名筛选（any 不限制 / no 只要没有中文的 / yes 只要含中文的）。
-    // 它跟后缀一样会改变命中清单，filters 整包进指纹，所以换一档必定重算预览
-    body = {...body, kind: 'delete', filters: {
-      exts: $('dlExts').value, keywords: $('dlKw').value,
-      regex: $('dlRegex').value, min_mb: +$('dlMin').value || 0, max_mb: +$('dlMax').value || 0,
-      cjk: $('dlCjk').value}};
+    if(dlTarget() === 'empty'){
+      // 空文件夹（原先挂在整理归档页签）。recursive 恒为 true：后端也会强制递归，
+      // 这里显式写出来免得两头不一致
+      body = {...body, kind: 'empty_dir', recursive: true, skip: $('edSkip').value};
+    }else{
+      // cjk：中文名筛选（any 不限制 / no 只要没有中文的 / yes 只要含中文的）。
+      // 它跟后缀一样会改变命中清单，filters 整包进指纹，所以换一档必定重算预览
+      body = {...body, kind: 'delete', filters: {
+        exts: $('dlExts').value, keywords: $('dlKw').value,
+        regex: $('dlRegex').value, min_mb: +$('dlMin').value || 0, max_mb: +$('dlMax').value || 0,
+        cjk: $('dlCjk').value}};
+    }
   }else{
     // 各功能页签都处理完了还走到这里，说明前端状态乱了：别往下跑，老实报出来
     setMsg('panMsg', '请先选择功能页签', false); return;
@@ -2543,7 +2576,9 @@ async function panApply(){
   const mixedPlan = delN > 0 && (mvN > 0 || panOps.some(o => o.op === 'rename'));
   // 「名字没有中文」挑出来的是一堆乱码/哈希名，但英文原版书、纯数字名也长这样，
   // 真删之前把这句话摆出来：清单里看见「Steve Jobs.epub」时还来得及取消
-  const cjkTip = (isDel && $('dlCjk') && $('dlCjk').value === 'no')
+  // 加上 dlTarget()==='file'：空文件夹那份清单跟中文名筛选没关系，不该带这句
+  const cjkTip = (isDel && dlTarget() === 'file' && $('dlCjk')
+                  && $('dlCjk').value === 'no')
     ? `\n\n注意：这批是按「名字里没有中文」挑出来的，英文原版书名、纯数字名`
       + `也在这个范围里——先翻一眼清单再确定。`
     : '';
@@ -2593,9 +2628,11 @@ async function panApply(){
     // 列表里能看出来，而且它不会再被复用（网盘已经变了）
     // total 是扫描出来的真实总数：后端拿它跟手里的清单对数，发现「清单被截过
     // 又没有完整计划」时好如实告诉用户这次只跑了前 N 条
+    // 「先移到备份区」只对删文件生效：空文件夹永远直接删（挪进去只是一堆空壳，
+    // 还白占一层目录）。切到空文件夹时那个勾选框是藏起来的，藏起来不代表没勾
     d = await api('/api/pan_apply',
                   {ops: panOps, ondup: panDup, preview_id: pvCurrent, total: panTotal,
-                   backup_delete: dlBackupOn()});
+                   backup_delete: dlTarget() === 'file' && dlBackupOn()});
   } finally {
     // 收起前补画一次最终进度：最后一批的完成回调常常来不及被 300ms 的轮询画出来，
     // 直接收起会让进度条停在 76% 这种位置，看着像没跑完
