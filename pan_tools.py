@@ -1639,7 +1639,8 @@ def build_merge_plan(entries, ondup: str = "skip", how: str = "move",
     return ops + fops, dict(merged, target=target, how=str(how))
 
 
-def build_empty_dir_plan(entries, root: str, skip: str = "", unreadable=None):
+def build_empty_dir_plan(entries, root: str, skip: str = "", unreadable=None,
+                         expand: bool = False):
     """找出能删掉的空目录 → 返回 (ops, info)
 
     entries: PanFiles.list_dir(root, recursive=True) 的**原始**结果——目录和文件都要。
@@ -1652,6 +1653,16 @@ def build_empty_dir_plan(entries, root: str, skip: str = "", unreadable=None):
              这些目录里有没有文件是无从得知的，必须当成「非空」保护起来，
              否则「不知道有什么」会被当成「什么都没有」而删掉——那是用户的真数据。
              （实测百度会返回这种东西：父目录里有它，拿它的 path 去列回 -9。）
+    expand:   是否把嵌套的空目录**逐层列出来**（本地整理必须开，见下）。
+
+    ops 默认是「最外层」空目录——删掉它，嵌在里面的空目录跟着消失（网盘的
+    delete 接口是级联删，一次把整棵子树带走）。这么做的两个理由：预览不啰嗦，
+    也免得后几条报 -9「文件不存在」的假失败。
+
+    ★ expand=True（本地）：一层层全列出来，按**深度倒序**（深层在前）。
+    因为本地的删除是 `os.rmdir`，它要求目录当下必须**真的是空的**——只给外层
+    的话 `A/B`、`A/C` 还在，`os.rmdir(A)` 直接失败，套了几层就一个都删不掉。
+    自下而上倒序删就没这个问题：轮到父目录时，它的子目录已经都没了。
 
     判定规则：某目录（含所有层级的子目录）里一个文件都没有 ⇒ 空。
     被 skip 命中的目录自己不算，**它的祖先也一律不算**——否则删掉那个祖先会把
@@ -1727,10 +1738,13 @@ def build_empty_dir_plan(entries, root: str, skip: str = "", unreadable=None):
     cand_set = set(cand)
     roots = [d for d in cand if d.rsplit("/", 1)[0] not in cand_set]
     roots.sort(key=lambda x: -x.count("/"))    # 深层在前，稳妥
+    # 本地要一层层自己删，所以把嵌套的也列出来，自下而上排好
+    chosen = sorted(cand, key=lambda x: -x.count("/")) if expand else roots
 
     ops = [{"op": "delete", "path": d, "name": d.rsplit("/", 1)[-1], "isdir": True}
-           for d in roots]
+           for d in chosen]
     info = {"empty_total": len(cand), "nested": len(cand) - len(roots),
+            "listed": len(ops),
             "dirs_scanned": len(dirs), "files_scanned": files_scanned,
             "protected": len(prot)}
     return ops, info

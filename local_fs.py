@@ -190,32 +190,88 @@ class LocalFiles:
         return ok, fails
 
     # --------------------------------------------------------------- 删除
+    def _rmdir_tree(self, p: str):
+        r"""整棵子树里一个文件都没有 ⇒ 自下而上删干净。
+
+        给「计划里只有外层那一条」兜的底：正常流程的空文件夹计划会把嵌套的每层
+        都列出来（expand=True），删到父目录时子目录已经没了；但**旧预览**、手工
+        清单里可能只有外层那条，那时 rmdir 会因为「里面还有 N 项」整批失败。
+
+        住手条件一律从严（只要有一丝看不清，就不删）：
+          · 子树里出现任何一个**文件** → 不删（非空目录本来就不该由这个功能删）
+          · 子是**联接/符号链接**（junction）→ 不删：它可能指向别的盘，删链接没意义
+          · 任何一层 **scandir 读不开** → 不删
+          · 中途 rmdir 失败 → 立刻停，已经删掉的那几层如实算成功
+        """
+        _REPARSE = 0x0400
+        order, stack = [], [p]
+        while stack:
+            d = stack.pop()
+            try:
+                with os.scandir(winpath.long_path(d)) as it:
+                    ents = list(it)
+            except OSError as e:
+                return False, f"目录读不开，没删：{e}"
+            order.append(d)
+            for e in ents:
+                sub = join(d, e.name)
+                try:
+                    isdir = winpath.entry_is_dir(e, winpath.Path(sub))
+                except OSError:
+                    isdir = False
+                if not isdir:
+                    return False, f"里面还有文件 {e.name}，没敢删"
+                try:
+                    attr = os.lstat(winpath.long_path(sub)).st_file_attributes
+                except OSError:
+                    return False, f"子目录 {e.name} 看不清，没敢删"
+                if attr & _REPARSE:
+                    return False, f"里面有目录联接 {e.name}，没敢删（可能指向别的地方）"
+                stack.append(sub)
+        for d in reversed(order):       # 自下而上：先干叶子，父目录自然变空
+            try:
+                os.rmdir(winpath.long_path(d))
+            except OSError as e:
+                return False, f"删除失败：{e}"
+        return True, ""
+
     def delete_batch(self, paths, on_progress=None):
         """删文件 / 删**空**目录。
 
-        目录一律只 rmdir：非空就不删。空文件夹那份计划挑出来的本来就是空目录，
-        万一它其实有东西（比如扫描之后又有人往里放了文件），宁可失败也绝不
-        rmtree —— 那等于把说好不碰的文件连根拔掉。
+        目录不是简单 rmdir 就完事：空文件夹之间常常互相套着（A 里只有 B、C 两个
+        空目录），这时候挨个 rmdir 会因为「里面还有 N 项」整批失败。所以：
+          ① 本批内的目录按**深度倒序**处理，先干深的，轮到父目录时它已经空了；
+          ② 万一还是非空（旧预览里只有外层那条），走 _rmdir_tree：确认整棵子树
+             一个文件都没有才自上而下删，里面有文件就一条不动。
+        绝不 rmtree —— 那等于把说好不碰的文件连根拔掉。
         """
         ok, fails, done = 0, [], 0
-        for raw in paths:
+        todo = list(paths or [])
+        dirs, others = [], []
+        for raw in todo:
+            (dirs if winpath.is_dir_any(posix(raw)) else others).append(raw)
+        dirs.sort(key=lambda x: -posix(x).count("/"))    # 深层在前
+        for raw in dirs + others:
             p = posix(raw)
             try:
                 if winpath.is_dir_any(p):
+                    left = None
                     try:
                         with os.scandir(winpath.long_path(p)) as it:
                             left = [x.name for x in it]
                     except OSError as e:
                         fails.append({"path": p, "msg": f"目录读不开，没删：{e}"})
-                        left = None
-                    if left is None:
-                        pass
-                    elif left:
-                        fails.append({"path": p,
-                                      "msg": f"目录里还有 {len(left)} 项，没敢删"})
-                    else:
+                        done += 1
+                        continue
+                    if not left:
                         os.rmdir(winpath.long_path(p))
                         ok += 1
+                    else:
+                        good, msg = self._rmdir_tree(p)
+                        if good:
+                            ok += 1
+                        else:
+                            fails.append({"path": p, "msg": msg})
                 elif winpath.exists_any(p):
                     os.remove(winpath.long_path(p))
                     ok += 1

@@ -1294,7 +1294,10 @@ class Handler(BaseHTTPRequestHandler):
                 ops, einfo = pan_tools.build_empty_dir_plan(
                     entries, p,
                     skip=str(body.get("skip") or pan_tools.BACKUP_DIR_NAME),
-                    unreadable=[f["path"] for f in failures])
+                    unreadable=[f["path"] for f in failures],
+                    # 本地必须**逐层展开**：删本地目录是 os.rmdir，要求它当下真的
+                    # 是空的；只给最外层那条时，里面还套着空子目录 ⇒ 一条也删不掉
+                    expand=(src == "local"))
                 info = {"scanned": len(files), **einfo}
                 label = "空文件夹"
             else:

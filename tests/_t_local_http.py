@@ -234,7 +234,27 @@ def main():
         ck(d["ok"] and d.get("total") == 1,
            "★ 整理范围定在上一级 → 归档到上一级就合法了", d.get("msg"))
 
-        print("\n【7】src 不同 = 另一份预览，不许互相顶替")
+        print("\n【7】★ 清理空文件夹：本地套娃必须一层层删干净")
+        rs = str(root).replace("\\", "/")
+        for d in ("套娃/A/B/C", "套娃/A/D"):
+            (root / d).mkdir(parents=True, exist_ok=True)
+        d = api("/api/pan_plan", {"src": "local", "path": str(root),
+                                  "kind": "empty_dir", "root": str(root)})
+        ck(d["ok"], "生成空文件夹计划成功", d.get("msg"))
+        rel = [str(o["path"]).replace(rs, "") for o in d.get("ops") or []]
+        ck(any(x.endswith("/套娃/A/B/C") for x in rel),
+           "★ 最深的那一层也在清单里（不是只有外层一条）", rel)
+        ck(sum(1 for x in rel if x.startswith("/套娃")) >= 4,
+           "★ 套娃的每一层都列出来了", rel)
+        r = api("/api/pan_apply", {"src": "local", "ops": d["ops"],
+                                   "preview_id": d["preview_id"],
+                                   "total": d["total"], "ondup": "skip"})
+        ck(r["ok"] and not (r.get("stat") or {}).get("fails"),
+           "★ 执行没有失败项", (r.get("stat") or {}).get("fails"))
+        ck(not (root / "套娃").exists(), "★ 套娃整棵树从磁盘上消失了", None)
+        ck((root / "归档" / "txt").exists(), "★ 存着文件的归档目录一个没动", None)
+
+        print("\n【8】src 不同 = 另一份预览，不许互相顶替")
         f_loc = ps.fingerprint("rename", {"path": "X:/x", "src": "local"}, "X:/x")
         f_rem = ps.fingerprint("rename", {"path": "X:/x", "src": "remote"}, "X:/x")
         ck(f_loc != f_rem, "★ 同一条路径，local 与 remote 指纹不同",
