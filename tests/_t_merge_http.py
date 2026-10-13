@@ -133,7 +133,7 @@ def main():
         webui.CONFIG.write_text(json.dumps(
             {"app_key": "k", "secret_key": "s", "local_dir": str(tmp),
              "remote_dir": PAN.sandbox}), encoding="utf-8")
-        webui.Handler._pan = lambda self: (PAN, PAN.sandbox)
+        webui.Handler._pan = lambda self, *a, **k: (PAN, PAN.sandbox)
         srv = ThreadingHTTPServer(("127.0.0.1", PORT), webui.Handler)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
 

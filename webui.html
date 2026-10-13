@@ -694,10 +694,21 @@
       <!-- ============ 卡片 4：网盘整理 / 改名 / 删除 ============ -->
       <div class="card">
         <h2><span class="idx">4</span>网盘整理 · 批量改名 · 批量删除
-          <small>只操作沙盒目录内，越界自动拦截</small></h2>
+          <small>网盘沙盒或本地文件夹，越界自动拦截</small></h2>
 
-        <div class="row">
-          <div class="field">
+        <!-- 整理对象：网盘 / 本地。下面改名、整理归档、批量删除三套功能两边通用，
+             因为后端对本地目录实现了同一套「列目录 / 改名 / 移动 / 删除」接口 -->
+        <div class="row" style="margin-top:2px">
+          <div class="field sm" style="flex:0 0 auto">
+            <label>整理对象</label>
+            <div class="dupseg" style="margin:0">
+              <button type="button" class="segbtn on" id="srcRemote"
+                      onclick="setPanSrc('remote')">百度网盘</button>
+              <button type="button" class="segbtn" id="srcLocal"
+                      onclick="setPanSrc('local')">本地文件夹</button>
+            </div>
+          </div>
+          <div class="field" style="flex:1 1 260px">
             <label>操作目录</label>
             <input id="panPath" placeholder="/apps/baidu_uploader" spellcheck="false">
           </div>
@@ -711,6 +722,12 @@
         </div>
         <div class="hint" id="panHint" style="margin-top:-6px">
           百度开放平台限制：接口只能操作应用沙盒目录，整盘整理需借助 alist。
+        </div>
+        <div class="hint hidden" id="panLocalHint" style="margin-top:-6px;color:#ffb26b">
+          ⚠ 整理的是<b>本机磁盘上的真文件</b>：<b>删除不进回收站、不可恢复</b>，
+          改名/移动会立刻生效。执行前一定先看预览清单；
+          上传任务在跑时<b>不允许</b>整理本地目录（两边按路径对不上号）。
+          想留后路就在「批量删除」里勾「删除前先移到备份区」。
         </div>
         <pre class="term headroom empty" id="panList" data-empty="点「浏览」列出该目录下的子目录与文件"></pre>
 
@@ -1160,6 +1177,10 @@ async function loadConfig(){
   if(!$('panPath').value) $('panPath').value = rd;
   if(!$('ogDest').value) $('ogDest').value = rd + '/归档';
   $('panHint').textContent = `沙盒根目录：${rd}　·　当前：${$('panPath').value}`;
+  remoteRoot = rd;                 // 切回「百度网盘」时要能把它填回去
+  // 本地上传目录记下来：切到「本地文件夹」时拿它当默认整理目录（后端也以它为
+  // 兜底根），省得每次手敲 D:\xxx
+  cfgLocalDir = String(c.local_dir || '').replace(/[\\/]+$/, '');
   setMsg('cfgMsg', '', null);
   refreshTokenChip();
 }
@@ -1499,15 +1520,48 @@ async function pollNow(){
 }
 
 /* =======================================================================
-   网盘整理：批量改名 / 整理归档（归类移动 · 合并重复）/ 批量删除（删文件 · 空文件夹）
-   全部只操作百度应用沙盒目录，越界在后端 validate_plan 里拦截
+   文件整理：批量改名 / 整理归档（归类移动 · 合并重复）/ 批量删除（删文件 · 空文件夹）
+   整理对象二选一：**百度网盘**（只操作应用沙盒）或**本地文件夹**（Win10 磁盘目录）。
+   三套功能两边通用：后端对本地目录实现了同一套列目录/改名/移动/删除接口。
+   越界一律在后端 validate_plan 里拦掉——网盘不许出沙盒，本地不许出根目录
    ======================================================================= */
 let panTab_ = 'rename';       // 当前功能页
 let panOps  = [];             // 当前已生成的待执行操作
 let panTotal = 0;             // 服务端算出的总条数（预览可能被截断）
-let panSandbox = '';          // 网盘沙盒根，拼备份区路径时要用到
+let panSandbox = '';          // 根目录（网盘沙盒 / 本地文件夹），拼备份区路径时要用到
+let panSrc = 'remote';        // 整理对象：remote=百度网盘 / local=本地文件夹
+let cfgLocalDir = '';         // 配置里的本地上传目录，切到 local 时当默认值
+let remoteRoot = '';          // 网盘沙盒根（切回「百度网盘」时把目录填回去）
 
-/* 备份区路径：全项目统一在 <沙盒>/_覆盖备份 下，跟当前整理哪个目录无关 */
+/* 整理对象切换：换的是「谁去执行那些改名/移动/删除」，不是另一套功能 */
+function setPanSrc(v){
+  const next = (v === 'local') ? 'local' : 'remote';
+  const first = (next !== panSrc);
+  panSrc = next;
+  $('srcRemote').classList.toggle('on', next === 'remote');
+  $('srcLocal').classList.toggle('on', next === 'local');
+  $('panHint').classList.toggle('hidden', next !== 'remote');
+  $('panLocalHint').classList.toggle('hidden', next !== 'local');
+  $('panPath').placeholder = (next === 'local') ? 'D:\\书籍（本地文件夹）'
+                                                : '/apps/baidu_uploader';
+  if(first){
+    // 目录跟着换：网盘那边是 /apps/...，本地这边是 D:\...，串着用只会报越界
+    const cur = $('panPath').value.trim();
+    if(next === 'local'){
+      if(!cur || cur.startsWith('/')) $('panPath').value = cfgLocalDir || '';
+      if($('ogDest').value.trim().startsWith('/'))
+        $('ogDest').value = ($('panPath').value.trim() || 'D:\\') + '\\归档';
+    }else{
+      if(cur && !cur.startsWith('/')) $('panPath').value = remoteRoot || '';
+    }
+    panSandbox = '';                 // 根变了，备份区路径得重新算
+    panResetPlan();                  // 手里的预览是按另一边算出来的，必须作废
+  }
+  dlSyncHint();
+}
+
+/* 备份区路径：全项目统一在 <根>/_覆盖备份 下（网盘沙盒或本地根目录），
+   跟当前整理哪个子目录无关 */
 function backupPathText(){
   return (panSandbox ? panSandbox + '/' : '') + '_覆盖备份';
 }
@@ -1892,11 +1946,19 @@ function mergeTail(d){
 async function panBrowse(){
   const p = $('panPath').value.trim();
   setMsg('panMsg', '正在列目录…', null);
-  const d = await api('/api/pan_browse', {path: p});
+  // src/root 一并带过去：本地浏览列的是磁盘目录，没填路径时后端给盘符列表
+  const d = await api('/api/pan_browse',
+                      {path: p, src: panSrc, root: p});
   if(!d.ok){ setMsg('panMsg', d.msg, false); return; }
-  $('panPath').value = d.path;
-  $('panHint').textContent = `沙盒根目录：${d.sandbox}　·　当前：${d.path}`;
+  if(!d.path && !d.drives){ $('panPath').value = d.path; }
+  else $('panPath').value = d.path;
+  if(panSrc === 'local'){
+    $('panLocalHint').dataset.root = d.sandbox || '';
+  }else{
+    $('panHint').textContent = `沙盒根目录：${d.sandbox}　·　当前：${d.path}`;
+  }
   panSandbox = d.sandbox || '';      // 备份区路径要拿它来拼
+  if(panSrc === 'remote') remoteRoot = d.sandbox || remoteRoot;
   dlSyncHint();
   const dirs = d.dirs.map(x => `<div><span class="arrow">📁</span> ${esc(x.name)}/</div>`).join('');
   const files = d.files.map(x => `<div>　${esc(x.name)}　<span style="color:#4d566c">${(x.size/1024).toFixed(1)} KB</span></div>`).join('');
@@ -1908,12 +1970,18 @@ async function panBrowse(){
 }
 
 function panUp(){
-  const cur = $('panPath').value.trim();
-  const sandbox = ($('panHint').textContent.match(/沙盒根目录：(\S+)/) || [])[1];
+  const cur = $('panPath').value.trim().replace(/\\/g, '/');
+  const sandbox = panSandbox || (($('panHint').textContent.match(/沙盒根目录：(\S+)/) || [])[1] || '');
   if(!cur) return;
-  if(sandbox && cur === sandbox){ setMsg('panMsg', '已经是沙盒根目录了', null); return; }
+  const same = (a, b) => a && b && a.toLowerCase() === b.toLowerCase();
+  if(same(cur, sandbox)){
+    setMsg('panMsg', (panSrc === 'local') ? '已经是本地根目录了' : '已经是沙盒根目录了',
+           null); return;
+  }
+  // 本地路径可能是 `D:\书籍\子`，先统一成 `/` 再往上退一级
   const up = cur.replace(/\/+$/,'').split('/').slice(0,-1).join('/');
-  $('panPath').value = (sandbox && !up.startsWith(sandbox)) ? sandbox : up;
+  $('panPath').value = (sandbox && !up.toLowerCase().startsWith(sandbox.toLowerCase()))
+    ? sandbox : up;
   panBrowse();
 }
 
@@ -2360,7 +2428,12 @@ async function pvExportCsv(){
 async function panPlan(refresh){
   const path = $('panPath').value.trim();
   const recursive = $('panRecursive').checked;
-  let body = {path, recursive};
+  // src 决定这一趟扫的是网盘还是本地磁盘；root 只在本地时用（没填就退回配置
+  // 里的上传目录）。它俩都进指纹，换一边必定重扫
+  let body = {path, recursive, src: panSrc, root: path};
+  if(panSrc === 'local' && !path){
+    setMsg('panMsg', '请先填写要整理的本地文件夹（如 D:\\书籍）', false); return;
+  }
 
   if(panTab_ === 'rename'){
     const m = $('rnMode').value;
@@ -2582,6 +2655,12 @@ async function panApply(){
     ? `\n\n注意：这批是按「名字里没有中文」挑出来的，英文原版书名、纯数字名`
       + `也在这个范围里——先翻一眼清单再确定。`
     : '';
+  // 整理本地目录时说清楚对象：那是磁盘上的真文件，删了不进回收站
+  //（confirm 不认标签，别在这里用 <b>）
+  const localTip = (panSrc === 'local')
+    ? `\n\n⚠ 这是本机磁盘上的 ${n2} 项：删除不进回收站、不可恢复，`
+      + `改名/移动立即生效。`
+    : '';
   const tip = onlyEmptyDirs
     ? `即将删除 ${n2} 个空文件夹（内部不含任何文件），删除后不可恢复。确定继续吗？`
     : mixedPlan
@@ -2613,7 +2692,7 @@ async function panApply(){
     ? `\n\n⚠ 这份预览已经执行过一次了：清单里的大多数路径可能已经不存在，`
       + `再执行一遍多半只会得到一堆失败。确定还要继续吗？`
     : '';
-  if(!confirm(tip + cjkTip + batchTip + oldTip + doneTip)) return;
+  if(!confirm(tip + localTip + cjkTip + batchTip + oldTip + doneTip)) return;
 
   $('btnPanApply').disabled = true;
   $('btnPanPlan').disabled = true;      // 执行期间不许再生成预览：两边同时操作网盘只会互相干扰
@@ -2632,6 +2711,7 @@ async function panApply(){
     // 还白占一层目录）。切到空文件夹时那个勾选框是藏起来的，藏起来不代表没勾
     d = await api('/api/pan_apply',
                   {ops: panOps, ondup: panDup, preview_id: pvCurrent, total: panTotal,
+                   src: panSrc, root: $('panPath').value.trim(),
                    backup_delete: dlTarget() === 'file' && dlBackupOn()});
   } finally {
     // 收起前补画一次最终进度：最后一批的完成回调常常来不及被 300ms 的轮询画出来，

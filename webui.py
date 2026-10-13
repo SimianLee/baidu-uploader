@@ -665,10 +665,21 @@ class Handler(BaseHTTPRequestHandler):
         rec = preview_store.load_preview(PROJ, str(body.get("id") or ""))
         if not rec:
             return self._json({"ok": False, "msg": "找不到这份预览文件（可能已被清理）"})
-        try:
-            _, sandbox = self._pan()
-        except Exception as e:
-            return self._json({"ok": False, "msg": str(e)})
+        # 校验用的根目录分两种：
+        #   · 网盘 —— 一律用**当前** remote_dir。换过沙盒之后的老预览必须被
+        #     拦下，这正是这道闸门的用处（拿旧清单去新沙盒执行等于乱删）。
+        #   · 本地 —— 没有「当前根」这回事（每次整理哪个目录是现选的），用这份
+        #     预览自己存的那条根；拿网盘的沙盒去比会把整批判成越界。
+        sandbox = ""
+        if str((rec.get("payload") or {}).get("src") or "remote").strip().lower() == "local":
+            sb = str(rec.get("sandbox") or "").strip()
+            if sb and not pan_tools.is_remote_root(sb):
+                sandbox = sb
+        if not sandbox:
+            try:
+                _, sandbox = self._pan()
+            except Exception as e:
+                return self._json({"ok": False, "msg": str(e)})
         good, errs = pan_tools.validate_plan({"ops": rec.get("ops") or []}, sandbox)
         if not good and errs:
             return self._json({"ok": False,
@@ -1013,26 +1024,64 @@ class Handler(BaseHTTPRequestHandler):
                            "sample": done[:40]})
 
     # ---------------------------------------------------------------
-    def _pan(self):
-        """构造网盘操作对象（每次请求都重新读 token/config，保证拿到最新值）"""
+    def _pan(self, src="remote", root=None):
+        """构造操作对象（每次请求都重新读 token/config，保证拿到最新值）
+
+        src=remote → 百度网盘沙盒；src=local → 本地文件夹（Win10 磁盘目录）。
+        两条路返回的东西接口一致（list_dir/list_files/mkdir/rename_batch/
+        move_batch/delete_batch），后面的计划构建与执行因此完全不用分支。
+        """
+        cfg = json.loads(CONFIG.read_text(encoding="utf-8-sig")) if CONFIG.exists() else {}
+        if str(src).lower() == "local":
+            import local_fs
+            r = str(root or cfg.get("local_dir") or "").strip()
+            if not r:
+                raise RuntimeError("请先填写要整理的本地文件夹（如 D:\\书籍）")
+            p = local_fs.LocalFiles(r)
+            return p, p.sandbox
         import pan_tools
         tk = json.loads(TOKEN.read_text(encoding="utf-8-sig")) if TOKEN.exists() else {}
         if not tk.get("access_token"):
             raise RuntimeError("还没有授权，请先在上方完成百度账号授权")
-        cfg = json.loads(CONFIG.read_text(encoding="utf-8-sig")) if CONFIG.exists() else {}
         sandbox = str(cfg.get("remote_dir") or "/apps/baidu_uploader").rstrip("/")
         return pan_tools.PanFiles(tk["access_token"], sandbox), sandbox
 
     def _handle_pan(self, path, body):
         import pan_tools
+        # 整理对象：remote=百度网盘沙盒 / local=本地文件夹。同一套计划与执行，
+        # 只是换了个会 rename/move/delete 的东西
+        src = str(body.get("src") or "remote").strip().lower()
+        if src not in ("remote", "local"):
+            src = "remote"
         try:
-            pan, sandbox = self._pan()
+            pan, sandbox = self._pan(src, body.get("root"))
         except Exception as e:
             return self._json({"ok": False, "msg": str(e)})
 
         # 浏览目录：返回子目录 + 该层文件（限制条数，防止 8 万文件卡死页面）
         if path == "/api/pan_browse":
             p = str(body.get("path") or sandbox).strip() or sandbox
+            if src == "local":
+                # 本地没填路径时给出盘符列表当最顶层，省得让人手敲 C: D:
+                if not str(body.get("path") or "").strip():
+                    import local_fs
+                    drives = local_fs.list_drives()
+                    return self._json({"ok": True, "path": "", "sandbox": sandbox,
+                                       "dirs": [{"path": d, "name": d} for d in drives],
+                                       "files": [], "file_total": 0,
+                                       "truncated": False, "drives": True})
+                p = pan.check_path(p)
+                if not pan_tools.inside_root(p, sandbox):
+                    p = sandbox
+                items = pan.list_dir(p, recursive=False)
+                dirs = sorted([{"path": i["path"], "name": i["name"]}
+                               for i in items if i["isdir"]], key=lambda x: x["name"])
+                fs = sorted([i for i in items if not i["isdir"]],
+                            key=lambda x: x["name"])
+                return self._json({"ok": True, "path": p, "sandbox": sandbox,
+                                   "dirs": dirs, "files": fs[:500],
+                                   "file_total": len(fs),
+                                   "truncated": len(fs) > 500})
             if p != sandbox and not p.startswith(sandbox + "/"):
                 p = sandbox
             try:
@@ -1051,12 +1100,21 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/pan_plan":
             kind = str(body.get("kind") or "")
             p = str(body.get("path") or sandbox).strip() or sandbox
+            if src == "local":
+                # 本地路径先统一成正斜杠：`D:\书籍` 和 `D:/书籍` 必须是同一条，
+                # 否则清单里的路径跟扫描出来的对不上，越界校验也会误判
+                p = pan.check_path(p)
+                if not pan_tools.inside_root(p, sandbox):
+                    return self._json({"ok": False, "msg":
+                        f"目录不在本地根 {sandbox} 内：{p}"})
             recursive = bool(body.get("recursive", False))
             refresh = bool(body.get("refresh"))     # 「重新生成」= 忽略缓存，强制重扫
 
             # 把「影响结果的全部输入」归一化：它既是判断「同参数」的指纹依据（决定能
             # 不能复用旧预览），也随预览文件一起存下来，事后能看清这份计划是拿什么算的
-            payload = {"path": p, "recursive": recursive}
+            # src 必须进指纹：同一条路径在网盘和本地是两码事，不带上它，
+            # 从本地切回网盘（或反过来）会拿另一边的旧预览顶上
+            payload = {"path": p, "recursive": recursive, "src": src}
             #   · exts：改名页签的「只处理这些后缀」
             #   · ondup：整理/合并的「重名跳过 / 重名删除」——它**改变计划本身**
             #     （跳过给后来的自动编号，删除不编号直接搬），所以必须进指纹
@@ -1139,6 +1197,8 @@ class Handler(BaseHTTPRequestHandler):
                 dest = str(body.get("dest") or "").strip()
                 if not dest:
                     return self._json({"ok": False, "msg": "请填写归档目标目录"})
+                if src == "local":
+                    dest = pan.check_path(dest)     # `D:\书籍\归档` → `D:/书籍/归档`
                 by = str(body.get("by") or "category")
                 # 重名策略在**生成计划时**就要用：跳过=给后来的自动编号，
                 # 删除=不编号，执行时把网盘上那个旧文件直接删掉
@@ -1245,6 +1305,12 @@ class Handler(BaseHTTPRequestHandler):
 
         # 执行计划
         if path == "/api/pan_apply":
+            # 整理**本地**目录时上传必须停掉：上传脚本按路径记录「已传到哪」，
+            # 这边把文件改名/搬走/删掉，它下一秒就对不上号（跟上传前改名同一个坑）
+            if src == "local" and is_running():
+                return self._json({"ok": False, "msg":
+                    "上传任务正在运行，请先停止再整理本地文件夹——会把文件改名/搬走/删掉，"
+                    "上传按路径记录进度，两边同时动手必然对不上号"})
             ops = body.get("ops")
             preview_id = str(body.get("preview_id") or "")
             # 一次跑完：预览只往前端传了前 2000 条（十万条全传回去没意义，还慢），

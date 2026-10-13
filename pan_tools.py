@@ -31,6 +31,7 @@ pan_tools.py —— 百度网盘（应用沙盒）文件操作库
 依赖：requests；Token 复用 upload_baidu.py 的 BaiduAuth（token.json）。
 """
 
+import os
 import re
 import time
 import unicodedata
@@ -1739,31 +1740,87 @@ def build_empty_dir_plan(entries, root: str, skip: str = "", unreadable=None):
 # 计划校验（载入预览 / 执行前统一过一遍：拦越界与非法操作）
 # ===========================================================================
 
+def is_remote_root(root: str) -> bool:
+    """这条根路径是网盘的吗？
+
+    网盘路径一律形如 `/apps/xxx`（以 / 开头）；本地是 `D:/书籍` 这种。
+    校验、补前导斜杠、大小写比较全都得先分清是哪种——本地用网盘那套
+    「不以 / 开头就补上」的规则会造出 `/D:/书籍/a.txt` 这种鬼路径。
+    """
+    return str(root or "").strip().replace("\\", "/").startswith("/")
+
+
+def plan_path(p: str, root: str) -> str:
+    """计划里的路径归一：统一成正斜杠；网盘路径缺前导 / 时补上"""
+    s = str(p or "").strip().replace("\\", "/")
+    if is_remote_root(root) and not s.startswith("/"):
+        s = "/" + s
+    return s
+
+
+def norm_root(root: str) -> str:
+    """根路径归一：统一正斜杠、去末尾斜杠（盘符根 D:/ 与网盘根 / 例外）"""
+    s = str(root or "").strip().replace("\\", "/")
+    if s == "/":
+        return s
+    drive_root = len(s) == 3 and s[1:3] == ":/"
+    return s if drive_root else s.rstrip("/")
+
+
+def _fold(s: str) -> str:
+    """本地比较用的折叠形式：小写 + 正斜杠。
+
+    坑：Windows 的 `os.path.normcase` 除了转小写，还会把 `/` 换成 `\\`。
+    直接拿它的结果去拼 `lr + "/"` 比较，永远匹配不上——整个计划会被判成
+    越界。所以折完必须把分隔符再转回正斜杠。
+    """
+    return os.path.normcase(s).replace("\\", "/")
+
+
+def inside_root(p: str, root: str) -> bool:
+    """p 是否落在 root 内（或就是 root 本身）
+
+    本地按**大小写不敏感**比：NTFS 上更常见的是用户填 `d:\\书` 而清单里是
+    `D:/书`，按大小写敏感比会把整批操作判成越界（等于整个功能报废）。
+    """
+    r = norm_root(root)
+    if not r:
+        return False
+    p = plan_path(p, r)
+    if is_remote_root(r):
+        if r == "/":
+            return p.startswith("/")
+        return p == r or p.startswith(r + "/")
+    lp, lr = _fold(p), _fold(r)
+    # 盘符根（D:/）本身带斜杠，不能再补一个
+    return lp.startswith(lr) if r.endswith("/") else (lp == lr or lp.startswith(lr + "/"))
+
+
 def validate_plan(plan: dict, sandbox: str):
-    """校验计划，返回 (ops, errors)"""
+    """校验计划，返回 (ops, errors)
+
+    sandbox 既可以是网盘沙盒（`/apps/xxx`），也可以是本地根目录（`D:/书籍`）
+    ——本地整理复用同一套计划与执行流程，越界检查两边一样都必须做。
+    """
     ops = plan.get("ops") if isinstance(plan, dict) else plan
     if not isinstance(ops, list):
         return [], ["计划格式不对：需要 {\"ops\": [...]} 或直接的数组"]
     good, errs = [], []
-    sb = sandbox.rstrip("/")
+    sb = norm_root(sandbox)
     for i, o in enumerate(ops, 1):
         if not isinstance(o, dict):
             errs.append(f"第 {i} 条不是对象"); continue
         op = (o.get("op") or "").lower()
-        path = (o.get("path") or "").strip()
-        if not path.startswith("/"):
-            path = "/" + path
-        if path != sb and not path.startswith(sb + "/"):
-            errs.append(f"第 {i} 条越界（不在沙盒 {sb} 内）：{path}"); continue
+        path = plan_path(o.get("path"), sb)
+        if not inside_root(path, sb):
+            errs.append(f"第 {i} 条越界（不在根目录 {sb} 内）：{path}"); continue
         if op == "rename":
             if not o.get("newname"):
                 errs.append(f"第 {i} 条 rename 缺 newname"); continue
             good.append({"op": "rename", "path": path, "newname": o["newname"]})
         elif op == "move":
-            dest = (o.get("dest") or "").strip()
-            if not dest.startswith("/"):
-                dest = "/" + dest
-            if dest != sb and not dest.startswith(sb + "/"):
+            dest = plan_path(o.get("dest"), sb)
+            if not inside_root(dest, sb):
                 errs.append(f"第 {i} 条目标越界：{dest}"); continue
             it = {"op": "move", "path": path, "dest": dest.rstrip("/")}
             # newname（搬过去的同时改名）必须保住——完整计划执行前都要过这道
