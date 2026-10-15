@@ -184,6 +184,34 @@ try:
         ck(js("panOps.length") == 1,
            "★ 归档目录挪回范围内就能正常生成", js("$('panMsg').textContent"))
 
+        print("\n【4c】★ 手改操作目录：整理范围跟着换，生成与执行必须按同一个根")
+        # 用户场景原样复刻：切到本地时目录默认是配置里那个（子目录），他手改成
+        # 另一个目录后生成预览——生成和执行若各按各的根，整批会报「越界」
+        up = tmp / "未整理"
+        (up / "海子诗集").mkdir(parents=True, exist_ok=True)
+        (up / "海子诗集" / "00.txt").write_bytes(b"x" * 60)
+        js("panTab('organize'); $('ogMode').value='organize'; ogModeChange();")
+        js(f"""$('panPath').value = {json.dumps(str(up))};
+               $('ogDest').value = {json.dumps(str(up / '归档'))};
+               $('panRecursive').checked = true;""")
+        js("panPlan()")
+        time.sleep(1.6)
+        ck(js("localRoot").replace("\\", "/").lower()
+           == str(up).replace("\\", "/").lower(),
+           "★ 整理范围换到了手填的目录（不再是配置里那个默认值）", js("localRoot"))
+        ck(js("$('panLocalScope').textContent").replace("\\", "/").lower()
+           == str(up).replace("\\", "/").lower(),
+           "★ 界面上的整理范围同步更新了", js("$('panLocalScope').textContent"))
+        ck(js("panOps.length") == 1, "★ 归档计划生成成功（没被判成越界）",
+           js("$('panMsg').textContent"))
+        js("panApply()")
+        time.sleep(2.2)
+        ck((up / "归档").is_dir() and not (up / "海子诗集" / "00.txt").exists(),
+           "★ 文件真的从磁盘上搬进了归档目录",
+           [str(p.relative_to(up)) for p in up.rglob("*")][:6])
+        ck("移动" in js("$('panMsg').textContent"),
+           "结果提示里报了移动", js("$('panMsg').textContent")[:80])
+
         print("\n【5】★ 切回网盘：手里的本地预览必须作废")
         js("setPanSrc('remote')")
         ck(js("panOps.length") == 0,

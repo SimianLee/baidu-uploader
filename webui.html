@@ -710,7 +710,8 @@
           </div>
           <div class="field" style="flex:1 1 260px">
             <label>操作目录</label>
-            <input id="panPath" placeholder="/apps/baidu_uploader" spellcheck="false">
+            <input id="panPath" placeholder="/apps/baidu_uploader" spellcheck="false"
+                   oninput="if(panSrc === 'local') syncLocalRoot(this.value, false)">
           </div>
           <div class="field" style="flex:0 0 auto;min-width:0">
             <label>&nbsp;</label>
@@ -1548,6 +1549,19 @@ function localRootOf(cur){
   if(!localRoot) return cur;                 // 还没定过根：填什么就是什么
   return underRoot(cur, localRoot) ? localRoot : cur;   // 手填了别的范围 → 换根
 }
+/* ★ 定根的唯一入口：算出整理范围、写回、并显示出来。
+   生成预览 / 浏览 / 执行三处必须走同一个口径，否则会出现「按 A 算出来的清单、
+   拿 B 去判越界」——整批被判死，而且报错里那句「不在根目录 X 内」看着像路径
+   写错了，其实是两边各说各话。本地的根不像网盘沙盒那样是配置里固定的，它是
+   用户现填的，所以必须显式同步一次。
+   write=false 时只更新界面显示（输入框还在打字，中间态不能当真）。 */
+function syncLocalRoot(p, write){
+  const r = localRootOf(p);
+  if(write !== false) localRoot = r;
+  const sp = $('panLocalScope');
+  if(sp) sp.textContent = r || '（未定）';
+  return r;
+}
 /* 两条路径的公共上级：归档目录落在整理范围之外时，用它给用户一个能直接点的建议 */
 function commonPrefix(a, b){
   const A = String(a || '').replace(/\\/g, '/').split('/');
@@ -1980,7 +1994,7 @@ async function panBrowse(){
   //   收窄，归档到上一级（…/Downloads/书籍 → …/Downloads/已整理）就会被判成越界
   if(panSrc === 'local'){
     if(!p) p = localRoot || cfgLocalDir || '';
-    localRoot = localRootOf(p);      // 手填了范围外的目录 = 换整理范围
+    syncLocalRoot(p);                // 手填了范围外的目录 = 换整理范围
     $('panPath').value = p;
   }
   const d = await api('/api/pan_browse',
@@ -1991,7 +2005,9 @@ async function panBrowse(){
   else $('panPath').value = d.path;
   if(panSrc === 'local'){
     $('panLocalHint').dataset.root = d.sandbox || '';
-    localRoot = d.sandbox || localRoot;      // 以后端认定的根为准
+    // 以后端认定的根为准，并同步到界面：这三行以前漏在浏览分支里，导致生成
+    // 预览时换了根、界面上还写着旧的那条
+    if(d.sandbox) localRoot = d.sandbox;
     const sp = $('panLocalScope');
     if(sp) sp.textContent = localRoot || '（未定）';
   }else{
@@ -2477,7 +2493,10 @@ async function panPlan(refresh){
     if(!path){
       setMsg('panMsg', '请先填写要整理的本地文件夹（如 D:\\书籍）', false); return;
     }
-    root = localRootOf(path);
+    // ★ 算出整理范围必须**写回**：以前只在局部变量里换根，执行那一步读的还是
+    //   旧根——「按 C:/…/未整理 算出来的清单，拿 C:/…/未整理/归档 去判」，
+    //   于是每一条都报「越界（不在根目录 …/归档 内）」，看着像路径填错了
+    root = syncLocalRoot(path);
   }
   let body = {path, recursive, src: panSrc, root};
 

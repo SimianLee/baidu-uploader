@@ -64,6 +64,23 @@ def _common_prefix(a: str, b: str) -> str:
     return "/".join(out)
 
 
+def _paths_prefix(paths) -> str:
+    """一批路径的公共上级目录（大小写不敏感）
+
+    越界报错里那句「不在根目录 X 内」只说了根，没说清单到底在哪儿，用户对着它
+    猜不出该改哪个框。把清单的公共上级算出来一起报，路就指明了。
+    """
+    items = [str(x or "").replace("\\", "/") for x in (paths or []) if x]
+    if not items:
+        return ""
+    def _up(s):
+        return s.rsplit("/", 1)[0] if "/" in s else s
+    pre = _up(items[0])
+    for x in items[1:]:
+        pre = _common_prefix(pre, _up(x))
+    return pre
+
+
 def _dup_policy(body) -> str:
     """取出「重名跳过 / 重名删除」，归一成 pan_tools 认的 skip / delete。
 
@@ -1338,6 +1355,15 @@ class Handler(BaseHTTPRequestHandler):
                     "上传按路径记录进度，两边同时动手必然对不上号"})
             ops = body.get("ops")
             preview_id = str(body.get("preview_id") or "")
+            # 本地整理：越界校验按**这份预览生成时的那根**判，而不是前端这回报上
+            # 来的。本地的根是用户现填的（不像网盘沙盒写在配置里），生成预览之后
+            # 又手改「操作目录」是常事；拿新根去判旧清单，会把整批都判成越界，
+            # 每条甩一句「不在根目录 X 内」——看着像路径填错了，其实是两边各说各话
+            if src == "local" and preview_id:
+                _rec = preview_store.load_preview(PROJ, preview_id)
+                _sb = str((_rec or {}).get("sandbox") or "").strip()
+                if _sb and not pan_tools.is_remote_root(_sb):
+                    sandbox = _sb
             # 一次跑完：预览只往前端传了前 2000 条（十万条全传回去没意义，还慢），
             # 真正要执行的是生成预览时另存的那份**完整**计划（plans/<id>.json）。
             # 十万条手动点「重新生成 → 执行」是不现实的；而每轮重新扫描一遍网盘
@@ -1367,7 +1393,15 @@ class Handler(BaseHTTPRequestHandler):
                 all_good.append(g)
                 errs += e
             if not any(all_good):
-                return self._json({"ok": False, "msg": "计划校验不通过：" + "；".join(errs[:3])})
+                msg = "计划校验不通过：" + "；".join(errs[:3])
+                if src == "local":
+                    # 报出清单实际在哪儿，让人一眼看出「整理范围」跟这份预览对不上
+                    up = _paths_prefix([o.get("path") for o in ops if isinstance(o, dict)])
+                    if up and not pan_tools.inside_root(sandbox, up):
+                        msg += (f"。清单里的文件都在 {up} 下，而这次是按 {sandbox} "
+                                f"判的——整理范围和这份预览不是同一个根。把「操作目录」"
+                                f"改成 {up} 后重新生成一次预览再执行")
+                return self._json({"ok": False, "msg": msg})
             # 上传任务是否在跑：不拦着执行，但必须让用户知道风险。
             # 两个进程握的是同一个 access_token，一起猛敲百度会整批整批地回假错误
             _upload_busy = is_running()

@@ -254,7 +254,45 @@ def main():
         ck(not (root / "套娃").exists(), "★ 套娃整棵树从磁盘上消失了", None)
         ck((root / "归档" / "txt").exists(), "★ 存着文件的归档目录一个没动", None)
 
-        print("\n【8】src 不同 = 另一份预览，不许互相顶替")
+        print("\n【8】★ 整理范围定在上级、默认目录却是子目录（两边各说各话）")
+        # 真实场景：配置里的本地目录是 …/未整理/归档，切到「本地文件夹」时操作目录
+        # 就默认是它；用户手改成 …/未整理 后生成预览——生成时换了根，执行那一步
+        # 读的要是旧根，整批都会被判「不在根目录 …/归档 内」
+        up2 = tmp / "未整理"
+        for n in ("00.txt", "01.txt", "02.txt"):
+            touch(up2 / "海子诗集" / n, 50)
+        d = api("/api/pan_plan", {"src": "local", "path": str(up2),
+                                  "recursive": True, "kind": "organize", "by": "ext",
+                                  "dest": str(up2 / "归档"), "root": str(up2)})
+        ck(d["ok"] and d.get("total") == 3, "★ 按上级目录生成归档计划 3 条",
+           d.get("total") or d.get("msg"))
+        rec2 = ps.load_preview(tmp, d["preview_id"]) or {}
+        ck(rec2.get("sandbox") == str(up2).replace("\\", "/"),
+           "★ 预览里存的是生成时那个根（未整理）", rec2.get("sandbox"))
+        # 执行时前端把「整理范围」报成了子目录（根漂移）→ 按预览存的根判，不该判死
+        r = api("/api/pan_apply", {"src": "local", "ops": d["ops"],
+                                   "preview_id": d["preview_id"],
+                                   "total": d["total"], "ondup": "skip",
+                                   "root": str(up2 / "归档")})
+        ck(r["ok"], "★ 根漂移也不会把整批判成越界", r.get("msg"))
+        ck((r.get("stat") or {}).get("move") == 3, "★ 3 个文件真的搬进归档了",
+           (r.get("stat") or {}).get("move"))
+        ck((up2 / "归档" / "txt").is_dir(), "归档/txt 建在磁盘上了",
+           sorted(os.listdir(up2 / "归档")) if (up2 / "归档").exists() else None)
+        # 没有预览可对照时（老清单），越界仍要拦，且报错得指出该改哪个目录
+        touch(up2 / "海子诗集" / "10.txt", 50)
+        bad = api("/api/pan_apply", {"src": "local",
+                                     "ops": [{"op": "move",
+                                              "path": str(up2 / "海子诗集" / "10.txt"),
+                                              "dest": str(up2 / "归档/txt/10.txt")}],
+                                     "total": 1, "ondup": "skip",
+                                     "root": str(up2 / "归档")})
+        m = bad.get("msg") or ""
+        ck(bad["ok"] is False and "不在根目录" in m, "★ 根确实对不上时仍然拦下", m)
+        ck("清单里的文件都在" in m and str(up2).replace("\\", "/") in m,
+           "★ 报错指出清单实际在哪个目录下（明路）", m)
+
+        print("\n【9】src 不同 = 另一份预览，不许互相顶替")
         f_loc = ps.fingerprint("rename", {"path": "X:/x", "src": "local"}, "X:/x")
         f_rem = ps.fingerprint("rename", {"path": "X:/x", "src": "remote"}, "X:/x")
         ck(f_loc != f_rem, "★ 同一条路径，local 与 remote 指纹不同",
