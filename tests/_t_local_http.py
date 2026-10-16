@@ -12,6 +12,7 @@ r"""本地整理走完整 HTTP 链路：从页面发请求到磁盘上真的改�
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import threading
@@ -297,6 +298,26 @@ def main():
         f_rem = ps.fingerprint("rename", {"path": "X:/x", "src": "remote"}, "X:/x")
         ck(f_loc != f_rem, "★ 同一条路径，local 与 remote 指纹不同",
            (f_loc[:12], f_rem[:12]))
+
+        print("\n【10】★ 本地删只读文件：不再甩一句「拒绝访问」就卡住整批")
+        # NTFS 上只读文件 os.remove 直接报 [WinError 5]，跟「没权限/被占用」一个
+        # 模样。这里走完整链路：生成计划 → 执行 → 结果里如实告知动了只读属性
+        rof = root / "只读.txt"
+        touch(rof, 30)
+        os.chmod(str(rof), stat.S_IREAD)
+        d = api("/api/pan_plan", {"src": "local", "path": str(root), "root": str(root),
+                                  "kind": "delete", "filters": {"exts": "txt"}})
+        ck(d["ok"] and any(o["path"].endswith("只读.txt") for o in d["ops"]),
+           "只读文件进了删除清单", d.get("msg"))
+        r = api("/api/pan_apply", {"src": "local", "ops": d["ops"],
+                                   "preview_id": d["preview_id"],
+                                   "total": d["total"], "ondup": "skip"})
+        ck(r["ok"] and not (r.get("stat") or {}).get("fails"),
+           "★ 执行没有失败项（不会被只读卡住）", (r.get("stat") or {}).get("fails"))
+        ck(not rof.exists(), "★ 只读文件真的从磁盘上删掉了", None)
+        ck("只读属性" in (r.get("msg") or ""),
+           "★ 结果里如实说出去掉了只读属性（动了文件属性不能悄悄干）",
+           r.get("msg"))
 
         webui.PROJ, webui.CONFIG, webui.PROGRESS = saved[0], saved[1], saved[2]
         webui.PIDFILE, webui.LOGFILE = saved[3], saved[4]

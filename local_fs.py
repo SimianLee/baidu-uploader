@@ -22,11 +22,16 @@ name/isdir/size/mtime）」和「rename / move / delete 三种动作」。网盘
 """
 import os
 import shutil
+import stat
 
 import winpath
 
 # 每处理多少条汇报一次进度。逐条回调在十万条量级下会把时间全花在回调上
 _REPORT_EVERY = 50
+
+# NTFS 文件属性位：只读。它跟「权限」是两码事——只读文件删不掉，os.remove 直接
+# 甩 [WinError 5] 拒绝访问，跟没权限、被占用长得一模一样
+_ATTR_READONLY = 0x0001
 
 
 def posix(p) -> str:
@@ -63,6 +68,8 @@ class LocalFiles:
         # 本地就是用户选的那个文件夹（含子目录），出界一律拒绝
         self.sandbox = posix(root)
         self.last_stop_reason = ""
+        # 这一趟为了删掉而去掉了多少个文件的只读属性（执行完报给用户知道）
+        self.readonly_cleared = 0
 
     # --------------------------------------------------------------- 扫描
     def _scan(self, path, recursive, on_progress=None, should_stop=None,
@@ -235,6 +242,36 @@ class LocalFiles:
                 return False, f"删除失败：{e}"
         return True, ""
 
+    def _unlink(self, p: str):
+        """删一个文件。成功返回 None，失败返回给人看的一句话
+
+        ★ 只读文件必须先摘掉只读属性：NTFS 上 os.remove 对只读文件直接甩
+        [WinError 5]「拒绝访问」，而它跟「没权限」「被别的程序占着」长得一模
+        一样——不处理的话用户只看到一句拒绝访问，压根想不到是文件带只读属性
+        （实测：下载工具/解压出来的文件里有一批就带这个属性，23 万个里撞到
+        两千多个）。用户让删，等于连「只读」这道保险一起撤了，所以直接摘。
+
+        摘了仍然删不掉就把属性**恢复回去**：宁可留着原样，也不白改人家的文件。
+        """
+        lp = winpath.long_path(p)
+        try:
+            os.remove(lp)
+            return None
+        except OSError as e:
+            if getattr(e, "winerror", None) not in (5, 13):
+                return del_fail_msg(p, e)
+            if not is_readonly(p):
+                return del_fail_msg(p, e)
+            if not _set_readonly(p, False):
+                return del_fail_msg(p, e)
+            try:
+                os.remove(lp)
+                self.readonly_cleared += 1
+                return None
+            except OSError as e2:
+                _set_readonly(p, True)
+                return del_fail_msg(p, e2)
+
     def delete_batch(self, paths, on_progress=None):
         """删文件 / 删**空**目录。
 
@@ -273,18 +310,54 @@ class LocalFiles:
                         else:
                             fails.append({"path": p, "msg": msg})
                 elif winpath.exists_any(p):
-                    os.remove(winpath.long_path(p))
-                    ok += 1
+                    msg = self._unlink(p)
+                    if msg:
+                        fails.append({"path": p, "msg": msg})
+                    else:
+                        ok += 1
                 else:
                     fails.append({"path": p, "msg": "文件不存在（可能已经被删过）"})
             except OSError as e:
-                fails.append({"path": p, "msg": f"删除失败：{e}"})
+                fails.append({"path": p, "msg": del_fail_msg(p, e)})
             done += 1
             if on_progress and done % _REPORT_EVERY == 0:
                 on_progress(_REPORT_EVERY, 0)
         if on_progress and done % _REPORT_EVERY:
             on_progress(done % _REPORT_EVERY, 0)
         return ok, fails
+
+
+def file_attrs(p: str) -> int:
+    """文件属性位。取不到（不存在 / 读不了）返回 -1"""
+    try:
+        return os.stat(winpath.long_path(posix(p))).st_file_attributes
+    except (OSError, AttributeError):
+        return -1
+
+
+def is_readonly(p: str) -> bool:
+    return bool(file_attrs(p) & _ATTR_READONLY)
+
+
+def _set_readonly(p: str, on: bool) -> bool:
+    """加/去只读属性。Windows 的 os.chmod 只认读写位，够用"""
+    try:
+        os.chmod(winpath.long_path(posix(p)),
+                 stat.S_IREAD if on else (stat.S_IREAD | stat.S_IWRITE))
+        return True
+    except OSError:
+        return False
+
+
+def del_fail_msg(p: str, e) -> str:
+    """把 Windows 那几句没头没尾的错翻成人话，并说清下一步该怎么办"""
+    we = getattr(e, "winerror", None)
+    if we == 32:
+        return (f"文件正被别的程序打开着，删不掉：{e}——关掉看图/编辑/播放器再试")
+    if we in (5, 13):
+        return (f"拒绝访问，删不掉：{e}——已试过去掉只读属性；还不行多半是被别的"
+                f"程序锁着（杀毒/索引/网盘客户端都可能占着）")
+    return f"删除失败：{e}"
 
 
 def list_drives():

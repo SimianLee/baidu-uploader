@@ -1472,6 +1472,11 @@ class Handler(BaseHTTPRequestHandler):
                        f"删除 {stat['delete']}，失败 {len(stat['fails'])}")
             if stat.get("dup_deleted"):
                 msg += f"；重名删掉旧文件 {stat['dup_deleted']} 个（不可恢复）"
+            # 本地：只读文件在 NTFS 上删不掉（[WinError 5] 拒绝访问），为了让删除
+            # 生效会先摘掉只读属性——这改动得如实告诉用户，不能悄悄做
+            ro = getattr(pan, "readonly_cleared", 0)
+            if ro:
+                msg += f"；顺手去掉了 {ro} 个文件的只读属性（NTFS 上只读文件删不掉）"
             if stat.get("backup") and stat["backup"] != del_moved:
                 msg += f"；备份 {stat['backup'] - del_moved} 个（备份区 {bk}）"
             if del_moved:
