@@ -22,6 +22,8 @@ rem
 rem  安全：
 rem    推送前会检查 config.json / token.json / libs 是否被 git 跟踪，
 rem    命中则立即中止 —— 这两个文件含 SecretKey 和授权 Token，绝不能入库。
+rem    （2026-10-21 起代码收进 core\，它们是 core\config.json / core\token.json /
+rem     core\libs\；本脚本的匹配是按子串找，路径变了照样拦得住）
 rem
 rem  说明：
 rem    - 脚本幂等：重复运行没副作用，远程地址与脚本不一致时自动纠正

@@ -903,7 +903,10 @@ def handle_uploaded(uploaded, mode, done_dir):
 # ---------------- 主流程 ----------------
 def build_argparser():
     ap = argparse.ArgumentParser(description="百度网盘分批上传工具（非会员友好）")
-    ap.add_argument("--config", default="config.json", help="配置文件路径，默认 config.json")
+    # 默认值锚在**脚本自己旁边**，不跟随当前目录：否则从别处运行（或代码被收进
+    # core/ 之后在仓库根目录执行）会找不到 config.json，然后连带 data/ 也找错地方
+    ap.add_argument("--config", default=str(Path(__file__).resolve().parent / "config.json"),
+                    help="配置文件路径，默认与本脚本同目录的 config.json")
     ap.add_argument("--login", action="store_true", help="首次使用：扫码授权登录（设备码模式，5分钟内有效）")
     ap.add_argument("--login-code", dest="login_code", nargs="?", const="", default=None,
                     metavar="CODE", help="授权码模式登录（备用，不限时）：不带参数会打印授权网址并提示输入授权码")
