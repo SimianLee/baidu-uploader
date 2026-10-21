@@ -53,10 +53,13 @@ try:
         # 先把窗口里的 JS 错误兜住
         js("window.__e=[];window.onerror=(m)=>{window.__e.push(String(m))}")
 
-        print("【1】页签：只剩三个")
+        print("【1】页签：改名/归档/删除/导出导入 四个")
         tabs = js("[...document.querySelectorAll('.tabs .tab')].map(e=>e.textContent.trim())")
         ck("按表改名" not in tabs, "★ 不再有独立的「按表改名」页签", tabs)
-        ck(tabs == ["批量改名", "整理归档", "批量删除"], "三个页签顺序正确", tabs)
+        ck(tabs == ["批量改名", "整理归档", "批量删除", "导出 / 按表格操作"],
+           "四个页签顺序正确（导出/导入排在最后）", tabs)
+        ck(len(tabs) == js("[...document.querySelectorAll('.tabs')].pop().children.length"),
+           "没有藏起来的第五个页签", tabs)
 
         print("【2】改名模式下拉里有「按表格改名」")
         opts = js("[...$('rnMode').options].map(o=>o.textContent.trim())")

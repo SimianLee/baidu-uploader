@@ -738,6 +738,7 @@
           <button class="tab on" id="tabRename" onclick="panTab('rename')">批量改名</button>
           <button class="tab" id="tabOrganize" onclick="panTab('organize')">整理归档</button>
           <button class="tab" id="tabDelete" onclick="panTab('delete')">批量删除</button>
+          <button class="tab" id="tabSheet" onclick="panTab('sheet')">导出 / 按表格操作</button>
         </div>
 
         <!-- 改名 -->
@@ -918,6 +919,58 @@
             勾上「删除前先移到备份区」能找回，但<b>网盘空间不会释放</b>，备份区要定期手动清。
             空文件夹永远直接删。执行前会列出完整清单，需要你再确认一次。
             <span id="dlCjkNote"></span><span id="dlEmptyNote"></span>
+          </div>
+        </div>
+
+        <!-- 导出文件清单 / 按表格操作（改名 + 删除）
+             两件事是配套的：导出的清单里就带着「操作」「新文件名」两个空列，
+             在 Excel 里填好再选回来，不必手抄几千行路径 -->
+        <div class="panel" id="paneSheet">
+          <div class="row">
+            <div class="field sm" style="flex:0 0 auto;min-width:0">
+              <label>&nbsp;</label>
+              <div class="btnbar" style="align-items:flex-end">
+                <button class="btn ghost" onclick="panListExport()">导出文件清单</button>
+              </div>
+            </div>
+            <div class="field sm" style="flex:0 0 auto">
+              <label>&nbsp;</label>
+              <label class="chk" title="不勾就只列这一层的文件">
+                <input type="checkbox" id="shRecursive" checked>
+                <span>含子目录</span>
+              </label>
+            </div>
+          </div>
+          <div class="hint" id="shExportHint">
+            把「操作目录」里的文件列成一张表导出：<b>文件名、后缀、完整路径、大小、修改时间</b>，
+            Excel 直接打开（带 BOM 不乱码）。表里<b>预留了「操作」和「新文件名」两列</b>——
+            填好保存后从下面选回来，就能批量改名 / 删除。<br>
+            目录很多时导出要先扫一遍，时间取决于文件数量（右上角进度条可见）。
+          </div>
+
+          <div class="row" style="margin-top:6px">
+            <div class="field sm" style="flex:1 1 320px">
+              <label>选择操作表格</label>
+              <input type="file" id="sheetFile" accept=".csv,.txt" onchange="sheetPick(this.files[0])">
+            </div>
+            <div class="field sm" style="flex:0 0 auto">
+              <label>&nbsp;</label>
+              <div class="btnbar" style="align-items:flex-end">
+                <button class="btn ghost sm" onclick="sheetSample()">下载模板</button>
+              </div>
+            </div>
+          </div>
+          <div class="hint hidden" id="shStat" style="color:#7fa0ff"></div>
+          <div class="hint" id="shHint">
+            表格认这几列（中英文都行，顺序随意，多余的列忽略）：<br>
+            <b>操作</b> —— 填 <code>改名</code>（或 rename）/<code>删除</code>（或 delete）。
+            <b>留空</b>的行：写了新文件名就当改名，都没写就跳过这一行。<br>
+            <b>原路径</b> —— 文件的完整路径。<b>新文件名</b> —— 只要名字，不要带路径和斜杠。<br>
+            认不出「操作」写的是什么、写了改名却没给新名、名字里带斜杠、路径跑出整理范围的，
+            <b>生成预览时就会一条条拦下来报给你</b>，不会闷头执行。<br>
+            ⚠ <b>「删除」真的会删</b>：网盘删除不进回收站，本地删除也不进回收站，都不可恢复。
+            表格里的删除<b>只按文件处理</b>——要删目录请用「批量删除」，那里会先确认它是不是空的。<br>
+            这个模式<b>不扫盘</b>：名字和去留全凭表里写的，所以「含子目录」「查找/模板」那些参数在这里都没意义。
           </div>
         </div>
 
@@ -1669,7 +1722,8 @@ function ogMode(){
 function panTab(k){
   panTab_ = k;
   [['rename','tabRename','paneRename'], ['organize','tabOrganize','paneOrganize'],
-   ['delete','tabDelete','paneDelete']].forEach(([key, tab, pane]) => {
+   ['delete','tabDelete','paneDelete'], ['sheet','tabSheet','paneSheet']].forEach(
+    ([key, tab, pane]) => {
     $(tab).classList.toggle('on', key === k);
     $(pane).classList.toggle('on', key === k);
   });
@@ -2240,6 +2294,25 @@ function csvAfterPlan(d){
   return (errs.length ? ` ⚠ ${errs.length} 条被拦截：${errs[0].slice(0, 60)}` : '');
 }
 
+/* 读一个文本文件：先按 UTF-8 读，出现一堆替换字符说明它其实是 GBK（Excel 另存
+   的 CSV 十有八九是这样），退回 gb18030 再读一次。两种表格入口共用这套读法 */
+function readTextFile(f, cb){
+  const rd = new FileReader();
+  rd.onload = () => {
+    const txt = String(rd.result || '');
+    if((txt.match(/\uFFFD/g) || []).length > 2){
+      const rd2 = new FileReader();
+      rd2.onload  = () => cb(String(rd2.result || ''));
+      rd2.onerror = () => cb('', true);
+      rd2.readAsText(f, 'gb18030');
+      return;
+    }
+    cb(txt);
+  };
+  rd.onerror = () => cb('', true);
+  rd.readAsText(f, 'utf-8');
+}
+
 /* 模板：列名写清楚，后端 `csv_cols` 才能稳稳认出来 */
 function csvSample(){
   const rows = [
@@ -2247,8 +2320,90 @@ function csvSample(){
     ['1', '/apps/baidu_uploader/小说/《三体》第一部.txt', '三体 第1部.txt'],
     ['2', '/apps/baidu_uploader/小说/银河英雄传说(上).txt', '银河英雄传说 上部.txt'],
   ];
-  const csv = '\ufeff' + rows.map(r => r.join(',')).join('\r\n') + '\r\n';
+  const csv = rows.map(r => r.join(',')).join('\r\n') + '\r\n';
   downloadText('按表改名_模板.csv', csv);
+}
+
+/* ---------- 导出清单 / 按表格操作（改名 + 删除） ----------
+   这两件事是配套的：导出的清单里就带着「操作」「新文件名」两个空列，在 Excel
+   里填好存盘、再从下面选回来，不必手抄几千行路径 */
+let sheetText = '';
+
+function sheetPick(f){
+  sheetText = '';
+  const stat = $('shStat');
+  if(!f){ stat.textContent = ''; stat.classList.add('hidden'); return; }
+  readTextFile(f, (txt, err) => {
+    if(err){
+      stat.textContent = '这个文件读不出来';
+      stat.classList.remove('hidden');
+      return;
+    }
+    sheetText = txt;
+    const lines = txt.split(/\r?\n/).filter(l => l.trim()).length;
+    stat.textContent = `已选 ${f.name}：${lines} 行，点下面的「生成预览」看会被怎么操作`;
+    stat.classList.remove('hidden');
+    setMsg('panMsg', '', null);
+  });
+}
+
+function sheetSample(){
+  const rows = [
+    ['操作', '原路径', '新文件名'],
+    ['改名', '/apps/baidu_uploader/小说/《三体》第一部.txt', '三体 第1部.txt'],
+    // 删除行不用写新文件名
+    ['删除', '/apps/baidu_uploader/小说/一串乱码的文件名.txt', ''],
+    // 「操作」留空 + 写了新名 = 改名；两列都空的行直接跳过
+    ['', '/apps/baidu_uploader/小说/银河英雄传说(上).txt', '银河英雄传说 上部.txt'],
+    ['', '/apps/baidu_uploader/小说/这个文件保持原样.txt', ''],
+  ];
+  downloadText('按表操作_模板.csv', rows.map(r => r.join(',')).join('\r\n') + '\r\n');
+}
+
+/* 表格 → 预览。跟 pan_plan 的返回同形，所以预览渲染、执行按钮、
+   预览文件下拉全部照原样复用 */
+function sheetAfterPlan(d){
+  const stat = $('shStat');
+  const errs = d.errors || [];
+  const total = d.total || 0;
+  stat.textContent = total
+    ? `已生成预览：改名 ${d.renames || 0} 条 / 删除 ${d.deletes || 0} 条`
+      + (d.plan_saved ? '（完整计划已存，可一次执行全部）' : '')
+    : '';
+  stat.classList.toggle('hidden', !total);
+  return (errs.length ? ` ⚠ ${errs.length} 条被拦截：${errs[0].slice(0, 60)}` : '');
+}
+
+/* 导出当前目录的文件清单。目录一多就要扫一阵，所以照例把进度摊给轮询 */
+async function panListExport(){
+  const p = $('panPath').value.trim();
+  if(panSrc === 'local' && !p){
+    setMsg('panMsg', '请先填写要导出的本地文件夹（如 D:\\书籍）', false);
+    return;
+  }
+  setMsg('panMsg', '正在扫描，请稍候…', null);
+  showScan(true); startScanPoll();
+  let d;
+  try{
+    d = await api('/api/pan_list_export',
+                  {path: p, recursive: $('shRecursive').checked, src: panSrc,
+                   root: panSrc === 'local' ? (localRoot || p) : p});
+  }finally{
+    const fin = await api('/api/pan_scan_progress');
+    if(fin && fin.ok) scanPaint(fin);
+    stopScanPoll(); showScan(false);
+  }
+  if(!d || !d.ok){
+    setMsg('panMsg', (d && d.msg) || '导出失败：连不上后台服务',
+           d && d.cancelled ? null : false);
+    return;
+  }
+  downloadText(d.filename || '文件清单.csv', d.text || '');
+  setMsg('panMsg', `已导出 ${d.count} 个文件 → ${d.filename}`
+    + (d.unreadable
+       ? `；⚠ 有 ${d.unreadable} 个子目录读不开，这份清单不完整`
+       : '；表里的「操作」「新文件名」两列填好后再从下面选回来就能执行'),
+    !d.unreadable);
 }
 
 /* 下载一段文本。统一加 BOM：Excel 认它是 UTF-8，不然中文全是乱码。
@@ -2561,6 +2716,13 @@ async function panPlan(refresh){
       body = {...body, kind: 'merge_dirs', recursive: true, ondup: panDup,
               target: $('ogMergeTarget').value, how: $('ogMergeHow').value};
     }
+  }else if(panTab_ === 'sheet'){
+    // 表格既是清单也是计划：改名和删除写在同一张表里，「操作」列决定
+    if(!sheetText.trim()){
+      setMsg('panMsg', '请先选一张表格；没有的话先点上面的「导出文件清单」或「下载模板」', false);
+      return;
+    }
+    body = {...body, kind: 'sheet_ops', csv: sheetText, ondup: panDup};
   }else if(panTab_ === 'delete'){
     if(dlTarget() === 'empty'){
       // 空文件夹（原先挂在整理归档页签）。recursive 恒为 true：后端也会强制递归，
@@ -2605,6 +2767,7 @@ async function panPlan(refresh){
   const isEmptyTab = planKind === 'empty_dir';
   const isMergeTab = planKind === 'merge_dirs';
   const isCsvTab   = planKind === 'rename_csv';   // 按表改名：不扫网盘，行数≠扫描数
+  const isSheetTab = planKind === 'sheet_ops';    // 按表格操作：改名 + 删除混合
   // 重名策略说人话：「跳过」不是不搬，是给后来的编个号谁都不丢；
   // 「删除」才会把网盘上那个旧文件删掉（不可恢复）
   const dupTxt = isDupDelete()
@@ -2638,6 +2801,22 @@ async function panPlan(refresh){
     // 合并重复可能两层一起出结果，目录层和文件层各自报自己的数——只报一个总数
     // 会让人以为另一层没轮到（这正是这次要补的：以前只有目录层那一串）
     ? (mergeTail(d) || '没有发现可合并的重复（详见上面的方框说明）')
+      + (panTotal > panOps.length
+          ? ((d.plan_saved || d.plan_ready)
+             ? ` · 列表显示前 ${panOps.length} 条，点「执行」会按完整计划分 `
+               + `${Math.ceil(panTotal / 2000)} 批全部跑完`
+             : ` · ⚠ 完整计划没存下来，本次只能执行前 ${panOps.length} 条，`
+               + `重新生成一次即可全跑完`)
+          : '')
+    : isSheetTab
+    // 混合表格：改名几条、删除几条分开报——删的部分不可恢复，必须让人在
+    // 点执行之前就看清数量，而不是混在「N 条操作」里一笔带过
+    ? `表格 ${d.scanned || 0} 行 → 改名 ${d.renames || 0} / `
+      + `⚠ 删除 ${d.deletes || 0}（不可恢复）`
+      + (d.skipped ? `（${d.skipped} 行空着没写操作）` : '')
+      + (isDupDelete()
+         ? ` · ⚠ 重名删除：${d.overwrite || 0} 个会删掉已有的同名文件`
+         : (d.auto ? ` · ${d.auto} 个撞名已自动编号 (2)(3)` : ''))
       + (panTotal > panOps.length
           ? ((d.plan_saved || d.plan_ready)
              ? ` · 列表显示前 ${panOps.length} 条，点「执行」会按完整计划分 `
@@ -2686,7 +2865,7 @@ async function panPlan(refresh){
     ? `♻ 复用了 ${pvAge(d.preview_age)}生成的同参数预览，没有重新扫描网盘`
     : (d.preview_ts ? `已存为预览文件 ${String(d.preview_ts).slice(11)}` : '');
   // 表格模式把自己的状态行刷新一遍（行数统计写在页签里，别占着结果区）
-  const csvErr = isCsvTab ? csvAfterPlan(d) : '';
+  const csvErr = isCsvTab ? csvAfterPlan(d) : (isSheetTab ? sheetAfterPlan(d) : '');
   renderPanPreview(panOps, tail + (srcTxt ? ` · ${srcTxt}` : '') + csvErr);
   pvPaintStats(pvStatsFrom(d, panTotal));
   $('btnPanApply').disabled = !panOps.length;

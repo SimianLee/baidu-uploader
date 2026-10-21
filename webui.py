@@ -9,6 +9,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -49,6 +50,26 @@ RENAME_MODE_LABELS = {"replace": "查找替换", "affix": "加前后缀", "seria
 ORGANIZE_LABELS = {"category": "按大类", "ext": "按后缀", "date": "按修改月份"}
 # 导出 CSV 时「操作」列写人话，别让人对着 rename/move/delete 猜
 OP_TEXT = {"rename": "改名", "move": "移动", "delete": "删除"}
+
+
+def _safe_name(s: str) -> str:
+    """把一段路径压成能进文件名的东西（Windows 文件名不允许 : / \\ * ? " < > |）"""
+    out = re.sub(r'[:\\/*?"<>|\s]+', "_", str(s or "")).strip("_.")
+    return (out or "根目录")[:40]
+
+
+def _fmt_mtime(v) -> str:
+    """网盘给的 mtime 是秒级时间戳，显示成「2026-10-21 15:04」。认不出来就空着"""
+    try:
+        n = int(v or 0)
+        if n <= 0:
+            return ""
+        # 毫秒级（13 位）也接：万一哪天接口改口径，不至于显示成 1970 年
+        if n > 10 ** 11:
+            n //= 1000
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(n))
+    except Exception:
+        return ""
 
 
 def _common_prefix(a: str, b: str) -> str:
@@ -604,7 +625,8 @@ class Handler(BaseHTTPRequestHandler):
             # 「按表改名」没有 token 也能先生成预览：名字是表格里写好的，
             # 执行才需要授权。所以它必须在下面那条要求授权的分支之前分流
             return self._pan_plan_csv(body)
-        if path in ("/api/pan_browse", "/api/pan_plan", "/api/pan_apply"):
+        if path in ("/api/pan_browse", "/api/pan_plan", "/api/pan_apply",
+                    "/api/pan_list_export"):
             return self._handle_pan(path, body)
 
         # 扫描进度：前端在「生成预览」期间轮询。
@@ -795,6 +817,285 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True, "text": buf.getvalue(), "count": len(ops),
                            "source": src, "id": pid,
                            "filename": f"预览_{pid}.csv"})
+
+    # ---------------------------------------------------------------
+    # 导出文件清单 / 按表格操作（改名 + 删除）
+    # ---------------------------------------------------------------
+    LIST_COLS = ["序号", "操作", "原路径", "文件名", "后缀", "新文件名", "所在目录",
+                 "大小(字节)", "修改时间"]
+
+    def _pan_list_export(self, pan, sandbox, src, body):
+        """把目录里的文件列成一张 CSV：文件名、后缀、路径、大小、修改时间
+
+        它同时是「按表格操作」的坯子——**操作**和**新文件名**两列留空发下去，
+        在 Excel 里填好再导回来就能改名/删除，不必手工抄几千行路径（导出的表和
+        导入认的格式是同一份，见 _parse_sheet_csv）。
+        """
+        import csv as _csv
+        import io as _io
+        import pan_tools
+        p = str(body.get("path") or sandbox).strip() or sandbox
+        recursive = bool(body.get("recursive", True))
+        if src == "local":
+            p = pan.check_path(p)
+            if not pan_tools.inside_root(p, sandbox):
+                return self._json({"ok": False, "msg":
+                                   f"目录不在本地整理范围 {sandbox} 内：{p}"})
+        elif p != sandbox and not p.startswith(sandbox + "/"):
+            p = sandbox        # 越界的入口统一收回根目录，别把整盘都列给它
+
+        failures = []
+        scan_begin()
+        cancelled = False
+        try:
+            files = pan.list_files(p, recursive=recursive, on_progress=scan_tick,
+                                   should_stop=scan_should_stop, failures=failures)
+        except pan_tools.ScanCancelled as e:
+            cancelled = True
+            return self._json({"ok": False, "cancelled": True, "msg":
+                               f"已停止扫描（已遍历 {e.dirs} 个目录 / "
+                               f"找到 {e.files} 个文件），没有导出"})
+        except Exception as e:
+            m = str(e) if isinstance(e, pan_tools.PanError) else f"扫描失败：{e}"
+            return self._json({"ok": False, "msg": m})
+        finally:
+            scan_end(cancelled=cancelled)
+
+        buf = _io.StringIO(newline="")
+        w = _csv.writer(buf)
+        w.writerow(self.LIST_COLS)
+        for i, f in enumerate(files, 1):
+            path = str(f.get("path") or "")
+            name = path.rsplit("/", 1)[-1]
+            # 后缀不带点，跟「按后缀整理」那一串口径一致：txt 而不是 .txt
+            ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            w.writerow([i, "", path, name, ext, "", path.rsplit("/", 1)[0],
+                        f.get("size") or 0, _fmt_mtime(f.get("mtime"))])
+        return self._json({"ok": True, "text": buf.getvalue(), "count": len(files),
+                           "path": p, "unreadable": len(failures),
+                           "filename": f"文件清单_{_safe_name(p)}.csv"})
+
+    # 「操作」列认这些写法（先整串比，再退一步做包含匹配，容得下「把这行删掉」
+    # 这类随手写）；留空的行按有没有写新名来推断——写了就是改名，都没写就是不用管
+    SHEET_OP = {"改名": "rename", "重命名": "rename", "改名成": "rename",
+                "rename": "rename", "r": "rename",
+                "删除": "delete", "删掉": "delete", "删": "delete", "删去": "delete",
+                "delete": "delete", "del": "delete", "d": "delete"}
+    OP_HEADS = ("操作", "动作", "做什么", "op", "action")
+    # 认路径列 / 认新名列 / 认「这第一行是表头」。中英文都收：Excel 里改表的人
+    # 不一定照模板写，多认几种写法就少一次「认不出表格结构」的报错
+    PATH_HEADS = ("原路径", "完整路径", "路径", "原文件名", "文件名", "原名",
+                  "旧名", "原名称", "path", "filepath", "file")
+    NEW_HEADS = ("新文件名", "目标文件名", "新名", "目标名", "改名后", "改为",
+                 "新名称", "newname", "new_name", "target")
+    HEAD_NAMES = set(PATH_HEADS + NEW_HEADS + OP_HEADS + ("序号", "后缀", "大小(字节)"))
+
+    @classmethod
+    def _sheet_op(cls, v: str) -> str:
+        """把「操作」列那一格翻成 rename / delete；空串=没写；?=看不懂"""
+        s = str(v or "").strip().lower()
+        if not s:
+            return ""
+        if s in cls.SHEET_OP:
+            return cls.SHEET_OP[s]
+        for k, val in cls.SHEET_OP.items():
+            if k in s:
+                return val
+        return "?"
+
+    @classmethod
+    def _sheet_cols(cls, headers):
+        """认出「操作 / 原路径 / 新文件名」三列的下标，返回 ((path_i, new_i), op_i)
+
+        new_i 可能是 None：删除专用的表格只需要「操作 + 原路径」两列，没有新名那一列。
+        """
+        h = [(x or "").strip().lstrip("﻿").lower() for x in headers]
+
+        def _find(names, skip=()):
+            for want in names:
+                if want in h and h.index(want) not in skip:
+                    return h.index(want)
+            return None
+
+        op_i = _find(cls.OP_HEADS)
+        old_i = _find(cls.PATH_HEADS, skip=(op_i,))
+        new_i = _find(cls.NEW_HEADS, skip=(op_i, old_i))
+        if old_i is not None and new_i is not None:
+            return (old_i, new_i), op_i
+        # 只认出一半（典型是「操作 + 原路径」的删除专用表，没有新名那一列）：
+        # 剩下的那一列补上周口 空 ——宁可少一列，也不能像老 _csv_cols 那样硬认
+        # 「两列表就是 1=原 2=新」，把「删除」两个字当成路径去拼
+        if old_i is not None or new_i is not None:
+            known = {i for i in (old_i, new_i, op_i) if i is not None}
+            rest = [i for i in range(len(h)) if i not in known]
+            if old_i is None:
+                old_i = rest[0] if rest else None
+            elif new_i is None:
+                new_i = rest[0] if rest else None
+            return (old_i, new_i), op_i
+        # 一个表头都不认识 → 当位置表：操作列之外的依次是路径、新名
+        idx = [i for i in range(len(h)) if i != op_i]
+        return (idx[0] if idx else None,
+                idx[1] if len(idx) > 1 else None), op_i
+
+    @classmethod
+    def _parse_sheet_csv(cls, text, sandbox):
+        """把表格解析成**改名 + 删除**混合的计划
+
+        表格格式（表头认中英文，顺序随意）：
+            操作,原路径,新文件名
+            改名,/apps/x/书/a.txt,新名字.txt
+            删除,/apps/x/书/b.txt,
+        向后兼容：没有「操作」列时就是老的两列表格（路径 + 新名），整张按改名处理，
+        跟「按表格改名」那个入口的结果一模一样——以前导出的表格照样能用。
+
+        风险一律拦在门口：认不出的操作、要改名却没写新名、新名里带斜杠、路径出界。
+        """
+        import csv as _csv
+        import io as _io
+        import pan_tools
+
+        rows = [r for r in _csv.reader(_io.StringIO(text.lstrip("﻿")))
+                if any((c or "").strip() for c in r)]
+        if not rows:
+            return {"ops": [], "errs": ["表格里没有数据行"], "skipped": 0,
+                    "rows": 0, "parsed": 0, "renames": 0, "deletes": 0}
+        hdr = rows[0]
+        (old_i, new_i), op_i = cls._sheet_cols(hdr)
+        hl = [(c or "").strip().lstrip("﻿").lower() for c in hdr]
+        head_named = (op_i is not None or old_i is not None) and \
+            any(x in set(hl) for x in cls.HEAD_NAMES)
+        if old_i is None:
+            return {"ops": [], "skipped": 0, "rows": len(rows), "parsed": 0,
+                    "renames": 0, "deletes": 0,
+                    "errs": ["认不出表格结构：至少要「操作」和「原路径」两列"]}
+        body_rows = rows[1:] if head_named else rows
+
+        ops, errs, skipped = [], [], 0
+        n_ren = n_del = 0
+        for n, r in enumerate(body_rows, 1):
+            need = max([i for i in (old_i, new_i, op_i) if i is not None] + [0])
+            if need >= len(r):
+                errs.append(f"第 {n} 行：列数不够（只有 {len(r)} 列）")
+                continue
+            path = (r[old_i] or "").strip().replace("\\", "/")
+            newname = (r[new_i] or "").strip() if new_i is not None else ""
+            todo = cls._sheet_op(r[op_i]) if op_i is not None else ""
+            if not path:
+                skipped += 1
+                continue
+            # 路径补全只在网盘口径下做（本地是 D:/书/a.txt，硬加前导 / 就废了）
+            if pan_tools.is_remote_root(sandbox):
+                path = "/" + path.lstrip("/")
+            if todo == "?":
+                errs.append(f"第 {n} 行：认不出「操作」写的是什么意思"
+                            f"（{str(r[op_i])[:20]}）——只能填 改名 或 删除")
+                continue
+            if not todo:
+                # 没写操作：给了新名就是改名，啥都没写就是这行不用动
+                if not newname:
+                    skipped += 1
+                    continue
+                todo = "rename"
+            if todo == "delete":
+                # 表格里的删除只按**文件**处理：想删目录请用「批量删除」，那里会先
+                # 确认它是不是真的空的。这里没扫盘，看不出它是文件还是目录
+                ops.append({"op": "delete", "path": path,
+                            "name": path.rsplit("/", 1)[-1], "isdir": False})
+                n_del += 1
+                continue
+            if not newname:
+                errs.append(f"第 {n} 行：写了「改名」却没填新文件名")
+                continue
+            if "/" in newname or "\\" in newname or newname in (".", ".."):
+                errs.append(f"第 {n} 行：新文件名不能含斜杠（{newname[:30]}）")
+                continue
+            if path.rsplit("/", 1)[-1] == newname:
+                skipped += 1                 # 新旧同名：不值得凑一条操作
+                continue
+            ops.append({"op": "rename", "path": path,
+                        "name": path.rsplit("/", 1)[-1], "newname": newname})
+            n_ren += 1
+
+        # 越界 / 非法一律拦下。表格是外部输入，比自家生成的操作更不可信
+        good, verrs = pan_tools.validate_plan({"ops": ops}, sandbox)
+        errs.extend(verrs)
+        return {"ops": good, "errs": errs, "skipped": skipped, "rows": len(body_rows),
+                "parsed": len(ops), "renames": n_ren, "deletes": n_del}
+
+    def _pan_sheet_plan(self, sandbox, src, body):
+        """按表格批量操作（改名 + 删除）
+
+        rename_csv 的超集：多认一列「操作」，写「删除」的那行执行时**真的删掉**。
+        同样不扫盘——名字和去留都是表里写好的，所以几百个点一次全到位。
+        管道与 rename_csv 完全一致（指纹复用 → 预览落盘 → 完整计划另存）。
+        """
+        import hashlib as _hashlib
+        import pan_tools
+        text = str(body.get("csv") or "")
+        if not text.strip():
+            return self._json({"ok": False, "msg": "表格是空的"})
+        dup_policy = _dup_policy(body)
+        payload = {"csv_sha1": _hashlib.sha1(text.encode("utf-8")).hexdigest()[:16],
+                   "rows": text.count("\n"), "ondup": dup_policy, "src": src}
+        kind = "sheet_ops"
+        if not bool(body.get("refresh")):
+            old = preview_store.find_recent(
+                PROJ, preview_store.fingerprint(kind, payload, sandbox))
+            if old:
+                return self._json(self._preview_resp(old, reused=True))
+
+        parsed = self._parse_sheet_csv(text, sandbox)
+        errs = parsed["errs"]
+        good = parsed["ops"]
+        skipped = parsed["skipped"]
+        # 表格里两行撞成同一个名字：按重名策略编号（只对改名那部分算，删除不掺和）
+        ren = [o for o in good if o["op"] == "rename"]
+        auto = 0
+        if ren:
+            view = [{"dir": o["path"].rsplit("/", 1)[0],
+                     "name": o["path"].rsplit("/", 1)[-1],
+                     "newname": o["newname"], "_op": o} for o in ren]
+            used = {}
+            for v in view:
+                used.setdefault(v["dir"], set()).add(v["name"].lower())
+            auto = pan_tools.dedupe_newnames(view, used, dup_policy)
+            for v in view:
+                v["_op"]["name"] = v["name"]
+                v["_op"]["newname"] = v["newname"]
+                if v.get("overwrite"):
+                    v["_op"]["overwrite"] = True
+        n_ren, n_del = len(ren), len(good) - len(ren)
+        if not good:
+            return self._json(
+                {"ok": False, "skipped": skipped, "rows": parsed["rows"],
+                 "msg": (errs[0][:100] if errs else
+                         f"没解析出任何要执行的操作：{skipped} 行写了 "
+                         f"「保留」或干脆是空行"),
+                 "errors": errs[:10]})
+
+        full = len(good)
+        dup_mark = " · 重名删除" if pan_tools.dup_kind(dup_policy) == "delete" else ""
+        label = (f"按表操作 · 改名 {n_ren} / 删除 {n_del}{dup_mark}")
+        rec = preview_store.save_preview(
+            PROJ, kind, good[:2000],
+            {"total": full, "scanned": parsed["rows"], "skipped": skipped, "csv": 2,
+             "auto": auto, "renames": n_ren, "deletes": n_del, "src": src},
+            payload, sandbox=sandbox, path="", label=label)
+        resp = {"ok": True, "ops": good[:2000], "total": full,
+                "scanned": parsed["rows"], "skipped": skipped, "csv": 2, "auto": auto,
+                "renames": n_ren, "deletes": n_del, "reused": False,
+                "plan_saved": False, "errors": errs[:10]}
+        if rec:
+            resp["plan_saved"] = preview_store.save_full_plan(
+                PROJ, rec["id"], good, kind, payload, label)
+            resp.update(preview_id=rec["id"], preview_ts=rec["ts"], preview_age=0)
+        if errs:
+            blocked = max(0, parsed["parsed"] - full)
+            resp["msg"] = (f"解析出 {full} 条操作（改名 {n_ren} / 删除 {n_del}）"
+                           + (f"，拦截 {blocked} 条非法/越界的" if blocked else "")
+                           + f"：{errs[0][:70]}")
+        return self._json(resp)
 
     # ---------------------------------------------------------------
     # 按 CSV 表格改名
@@ -1126,6 +1427,10 @@ class Handler(BaseHTTPRequestHandler):
                                "file_total": len(files),
                                "truncated": len(files) > 500})
 
+        # 导出文件清单（名字 + 后缀 + 路径…）
+        if path == "/api/pan_list_export":
+            return self._pan_list_export(pan, sandbox, src, body)
+
         # 生成计划（预览，不执行）
         if path == "/api/pan_plan":
             kind = str(body.get("kind") or "")
@@ -1139,6 +1444,10 @@ class Handler(BaseHTTPRequestHandler):
                         f"目录不在本地根 {sandbox} 内：{p}"})
             recursive = bool(body.get("recursive", False))
             refresh = bool(body.get("refresh"))     # 「重新生成」= 忽略缓存，强制重扫
+            # 按表格操作（改名 + 删除）：名字和去留都是表里写好的，**不扫盘**——
+            # 它跟下面那些 kind 不一样，没有「扫出清单再套规则」这一步，表格本身就是计划
+            if kind == "sheet_ops":
+                return self._pan_sheet_plan(sandbox, src, body)
 
             # 把「影响结果的全部输入」归一化：它既是判断「同参数」的指纹依据（决定能
             # 不能复用旧预览），也随预览文件一起存下来，事后能看清这份计划是拿什么算的
