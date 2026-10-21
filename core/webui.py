@@ -18,12 +18,21 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+PROJ = Path(__file__).resolve().parent
+
+# 依赖自举：libs 要在 import requests **之前**挂上。依赖是装在项目自己的 libs/ 里
+# 的（不进系统 site-packages），以前靠 open_panel.bat 设 PYTHONPATH——双击 bat 没
+# 问题，直接 `python webui.py`（或 IDE 里点运行）就会 No module named 'requests'。
+_LIBS = PROJ / "libs"
+if _LIBS.is_dir() and str(_LIBS) not in sys.path:
+    sys.path.insert(0, str(_LIBS))
+if str(PROJ) not in sys.path:
+    sys.path.insert(0, str(PROJ))       # 同目录模块 preview_store / proclock
+
 import requests
 
 import preview_store                # 计划预览的本地存盘（同目录模块）
 import proclock                     # 上传进程锁的判活/读写（同目录模块）
-
-PROJ = Path(__file__).resolve().parent
 PY = sys.executable                      # 用当前解释器跑上传子进程
 CONFIG = PROJ / "config.json"
 TOKEN = PROJ / "token.json"

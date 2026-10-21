@@ -32,6 +32,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+# import requests 前的自举：依赖装在本项目的 libs/ 里（pip install -r requirements.txt
+# -t libs 那种装法），不进系统 site-packages。以前靠 bat 设 PYTHONPATH 才能找到，
+# 现在脚本自己把 libs 挂上——从哪个目录调用、有没有设环境变量，都能跑。
+_LIBS = Path(__file__).resolve().parent / "libs"
+if _LIBS.is_dir() and str(_LIBS) not in sys.path:
+    sys.path.insert(0, str(_LIBS))
+
 import requests
 
 try:

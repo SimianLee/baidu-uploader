@@ -7,7 +7,6 @@ Win10 命令行 + 网页可视化面板：把本地目录的文件**分批**上�
 ```
 baidu_uploader/
 ├─ open_panel.bat          ★ 双击打开控制面板
-├─ start_upload.bat        ★ 双击直接命令行全量上传
 ├─ push-all.bat            ★ 双击提交并推送到远端（带密钥泄漏自检）
 ├─ README.md               本说明（从这里开始看）
 ├─ push-logs/              push-all.bat 的推送日志
@@ -328,7 +327,8 @@ python core\verify_remote.py --sample 50              :: 差异样本多显示�
 - **频控退避**：遇 errno=31034 自动退避 30s/60s 重试
 - **推荐参数**（海量小文件）：`batch_size: 500, workers: 8, batch_pause_sec: 5, file_interval_sec: 0`
 - **单线程 vs 并发**：串行约 8 天（9.9 万文件），8 并发实测降到 5~7 小时
-- **长时间任务**：双击 `start_upload.bat` 开跑，关闭窗口即暂停，再次双击断点续传；蓝屏/断网/重启都不丢进度
+- **长时间任务**：在面板里点「开始上传」开跑，关面板不影响它；中途 Ctrl+C 或意外中断，
+  再跑一次自动断点续传；蓝屏/断网/重启都不丢进度（命令行同理，见第十一节）
 
 ## 十、网页控制面板（推荐入口）
 
@@ -674,11 +674,16 @@ python -X utf8 core\organize_all.py --path "/apps/baidu_uploader/某某小说合
 - 面板只监听本机 127.0.0.1，外部无法访问
 - **关闭面板/页面不影响正在进行的上传**，上传是独立后台进程
 - 面板临时实例（如由 AI 会话代起的）超时会退出，日常用 `open_panel.bat` 自己起即可
-- 不想用面板的话，命令行方式照旧：`start_upload.bat` 或 `python core\upload_baidu.py`
+- 不想用面板的话，命令行方式照旧：`python core\upload_baidu.py`
 
 ## 十一、命令行入口
 
-`start_upload.bat`：双击即按 `config.json` 全量上传；跑完停在窗口等确认。
+面板之外还想跑命令行的话，直接用 `upload_baidu.py`（脚本会自己带上 `core\libs\` 里的
+依赖，不用再设 `PYTHONPATH`；配置与断点记录也按脚本位置算，从哪个目录调用都对）：
+
+```bat
+python core\upload_baidu.py      :: 按 core\config.json 全量上传，中断后再跑自动续传
+```
 
 常用参数：
 
@@ -713,7 +718,7 @@ git status
 ```
 .gitignore  README.md
 core/webui.py  core/webui.html  core/upload_baidu.py  core/requirements.txt
-core/config.example.json  open_panel.bat  start_upload.bat
+core/config.example.json  open_panel.bat
 ```
 
 > 万一之前误提交过密钥：`立刻去开放平台重置 SecretKey`，再按 git 历史清理流程处理（单纯删文件不足以抹掉历史记录）。
