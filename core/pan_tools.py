@@ -33,6 +33,7 @@ pan_tools.py —— 百度网盘（应用沙盒）文件操作库
 
 import os
 import re
+import threading
 import time
 import unicodedata
 from pathlib import PurePosixPath
@@ -78,6 +79,38 @@ BATCH_LIMIT = 100
 # 31034 的 20s 退避重试兜底）。
 LIST_WORKERS = 4
 
+# 列目录翻页时，单页失败的重试次数。大目录（十万条以上）要翻几百页，百度会
+# 偶发 errno=1/4/-9，重试一两次通常就成了。没有这层重试，一次抖动就会让
+# 整个目录从结果里消失（见 _get_page 的说明）。
+PAGE_RETRY = 3
+
+# 哪些 errno 值得重试：
+#   1/4        → 服务端偶发抖动（深翻页时实测会遇到），重试大概率成功
+#   111/31034/31061/31066 → 频控或连接级，等一会儿再试通常就放行
+#
+# 关键：**-9 / -7 绝不能进这张表**。它们是确定性错误（条目不存在 / 无权限），
+# 重试一万次也一样。而网盘里这种脏条目并不罕见——父目录列表里有它（isdir=1），
+# 拿它自己的 path 去列却稳定回 -9。老版本遇到它直接跳过，代价为零；一旦让它
+# 走退避重试，一个包含几百个坏目录的扫描就会被拖到小时级。
+PAGE_ERRNO_RETRY = {1, 4, 111, 31034, 31061, 31066}
+
+# 同一个目录**连续翻页之间**的最小间隔（秒）。
+#
+# 这是「大目录整目录消失」的根治措施。一个 40 万条的目录要连发 400 次请求；实测
+# 在这种连发下百度会开始回 errno=1 / 31034（频控），而老逻辑一旦遇到失败页，就
+# 把这个目录此前翻到的全部条目作废 —— 于是每次扫描都稳定丢掉最大的那个目录
+# （/归档/txt，约 40 万条），界面却照常报「已导出 113852 个文件」。
+#
+# 注意**不要**做成全局闸门：所有线程共用一个水位会让并发扫描退化成串行（实测并发
+# 9.18s vs 串行 9.20s，加速完全消失）。这里只压「单目录连翻」的节奏，不同目录
+# 之间照旧并行 —— 单目录 400 页只多花约 20 秒。
+LIST_PAGE_GAP = 0.05
+
+# 单次扫描里，翻页退避的**总**时间预算（秒）。
+# 一道保险：即便上面那张 errno 表判断失误（或百度换了错误码），整次扫描最多也
+# 只多等这么久，而不会退化成「每个坏目录各等十几秒」的灾难。
+PAGE_BACKOFF_BUDGET = 20.0
+
 # 整批报错的条目要复核几遍、每遍之间等多久。百度的目录索引有延迟：刚搬完
 # 立刻列目录，源处可能还挂着旧名字，第一遍核对会把「已经搬走了」误判成
 # 「没生效」（实测 1612 条全被误判）。所以隔几秒再核一遍，连续两遍都判
@@ -120,6 +153,8 @@ class PanFiles:
         self.timeout = timeout
         # 最近一次批量提交为什么提前停了（连接失效时填），供调用方如实告知用户
         self.last_stop_reason = ""
+        # 本次扫描剩余的退避预算，list_dir 入口处重置（见 _get_page）
+        self._backoff_left = PAGE_BACKOFF_BUDGET
 
     # ---------- 安全校验 ----------
     def check_path(self, path: str) -> str:
@@ -199,25 +234,57 @@ class PanFiles:
         """
         root = self.check_path(path)
         w = LIST_WORKERS if workers is None else workers
+        # 每次扫描都重新给一份退避预算，别让上一次的坏目录把这次的额度耗光
+        self._backoff_left = PAGE_BACKOFF_BUDGET
         if not recursive or w <= 1:
             return self._list_seq(root, recursive, limit, on_progress,
                                   should_stop, failures)
         return self._list_conc(root, w, limit, on_progress,
                                should_stop, failures)
 
-    def _list_one(self, d, limit, should_stop):
-        """列单个目录（含翻页）。返回 (rows, 子目录列表, errno)。
-        errno != 0 时 rows/subs 为空；should_stop 命中时抛 ScanCancelled。"""
-        rows, subs = [], []
-        start = 0
-        while True:
+    def _get_page(self, d, start, limit, should_stop):
+        """列一页，对「可重试」的 errno 做退避重试（返回 (r, errno)）。
+
+        为什么需要单独一层重试：万条级的大目录要翻几百页，百度会在深翻页时
+        **间歇性**回 errno=1（未知错误）/ 4 / -9，同一页再问一次往往是正常的。
+        老版本直接在 _list_one 里 `return [], [], e`，于是一整页抖动就把这个目录
+        此前翻到的几十万条全部作废 —— 实测 /归档/txt（约 40 万条）整目录就这么
+        从清单里消失了，且界面上没有任何提示。
+        退避用 2/4/8 秒，够躲开频控，又不至于让一次抖动拖太久。
+        """
+        delay = 0          # 第一次重试**不等待**：偶发抖动往往再问一次就好
+        r, e = {}, 0
+        for i in range(PAGE_RETRY + 1):
             if should_stop and should_stop():
                 raise ScanCancelled(0, 0)
             r = self._get(LIST_URL, {"dir": d, "start": start,
                                      "limit": limit, "order": "name"})
             e = r.get("errno", 0)
+            if e == 0 or e not in PAGE_ERRNO_RETRY or i >= PAGE_RETRY:
+                return r, e
+            if delay > 0 and self._backoff_left > 0:
+                wait = min(delay, self._backoff_left)
+                time.sleep(wait)
+                self._backoff_left -= wait
+            delay = 2 if delay == 0 else delay * 2
+        return r, e
+
+    def _list_one(self, d, limit, should_stop):
+        """列单个目录（含翻页）。返回 (rows, 子目录列表, errno)。
+
+        errno != 0 时 rows 里是**中断前已经列到的条目**（可能为空）。
+        这一条很重要：大目录翻到第 200 页抖一下，不应该把前 199 页的成果扔掉；
+        调用方可以据此判断「这份结果是半截的」并如实告诉用户，而不是给个假的全集。
+        should_stop 命中时抛 ScanCancelled。
+        """
+        rows, subs = [], []
+        start = 0
+        while True:
+            if should_stop and should_stop():
+                raise ScanCancelled(0, 0)
+            r, e = self._get_page(d, start, limit, should_stop)
             if e != 0:
-                return [], [], e
+                return rows, subs, e
             items = r.get("list", [])
             for it in items:
                 rec = {
@@ -233,6 +300,11 @@ class PanFiles:
             if len(items) < limit:
                 return rows, subs, 0
             start += limit
+            # 连翻几百页会把百度打频控（errno=1 / 31034），一旦被限流，失败那页
+            # 的整批数据就作废了。这里只放缓单目录的翻页节奏，不同目录之间
+            # 仍然并行（不做全局闸门，否则并发等于白做）。
+            if LIST_PAGE_GAP and start:
+                time.sleep(LIST_PAGE_GAP)
 
     def _list_seq(self, root, recursive, limit, on_progress,
                   should_stop, failures):
@@ -247,8 +319,16 @@ class PanFiles:
                 if (failures is not None and d != root
                         and e not in _FATAL_LIST_ERRNOS):
                     if len(failures) < 500:     # 兜个上限，别让响应体爆炸
-                        failures.append({"path": d, "errno": e,
-                                         "msg": errno_text(e)})
+                        rec = {"path": d, "errno": e, "msg": errno_text(e)}
+                        # 中断前翻到的那些页是完整的、可信的，不该跟着一起丢。
+                        # 但要如实记一笔 partial，让调用方告诉用户「这份不全」。
+                        if rows:
+                            rec["partial"] = len(rows)
+                            out.extend(rows)
+                            stack.extend(subs)
+                            files_seen += sum(1 for r in rows
+                                              if not r["isdir"])
+                        failures.append(rec)
                     dirs_done += 1
                     if on_progress:
                         try:
@@ -318,6 +398,30 @@ class PanFiles:
                             if first_err[0] is None:
                                 first_err[0] = ScanCancelled(dirs_done[0],
                                                              files_seen[0])
+                            cv.notify_all()
+                        return
+                    except Exception as ex:
+                        # 曾经的静默数据丢失点：_list_one → _get 抛 PanError
+                        # （网络异常重试耗尽）时，这里只接 ScanCancelled，
+                        # 于是异常冲出 worker、线程当场死掉 —— 它手上那个目录
+                        # 就这样无声无息地从结果里蒸发，其他线程照常跑完，
+                        # 界面还报「成功」。大目录要发几百次请求，撞上一次抖动
+                        # 的概率远高于小目录，所以中招的总是最大的那个。
+                        # 现在按容错模式分流：能容错就记一笔跳过，不能就让整次失败。
+                        if failures is not None and d != root:
+                            with cv:
+                                if len(failures) < 500:
+                                    failures.append({
+                                        "path": d, "errno": None,
+                                        "msg": f"读取中断：{ex}"})
+                                dirs_done[0] += 1
+                                cv.notify_all()
+                            return
+                        with cv:
+                            if first_err[0] is None:
+                                first_err[0] = PanError(
+                                    f"扫描目录时出错：{d}：{ex}")
+                            todo.clear()
                             cv.notify_all()
                         return
                     if e != 0:
