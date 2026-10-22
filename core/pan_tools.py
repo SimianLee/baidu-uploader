@@ -111,6 +111,20 @@ LIST_PAGE_GAP = 0.05
 # 只多等这么久，而不会退化成「每个坏目录各等十几秒」的灾难。
 PAGE_BACKOFF_BUDGET = 20.0
 
+# 深翻页被限流时的「跳过 + 补扫」参数。
+#
+# /归档/txt 有 40 万条（403 页），实测百度在深翻页处会**间歇性**回 errno=1：
+# 同一页隔几秒再问又正常（order=name/time/size 都试过，2~5 秒就回来了），
+# 但连着翻的时候八成页会失败。老逻辑遇到失败页就 `return`，于是整目录翻到
+# 302000 抖一下，前面 30 万条全部作废 —— 清单就这么从 51.7 万掉到 41.6 万，
+# 界面上还一个字都不提。
+#
+# 现在改成：失败页先记下来跳过，继续往下翻；整目录翻完后再回来补扫这些页。
+# 抖动是间歇性的，隔一轮再问往往就成了。
+PAGE_MISS_ROUNDS = 3        # 补扫轮数（每轮之间静置一下，让频控缓过来）
+PAGE_MISS_WAIT = 5.0        # 每轮补扫前的静置秒数
+PAGE_MISS_MAX = 3000        # 单目录最多容忍多少页没读到（兜底防跑飞）
+
 # 整批报错的条目要复核几遍、每遍之间等多久。百度的目录索引有延迟：刚搬完
 # 立刻列目录，源处可能还挂着旧名字，第一遍核对会把「已经搬走了」误判成
 # 「没生效」（实测 1612 条全被误判）。所以隔几秒再核一遍，连续两遍都判
@@ -205,7 +219,7 @@ class PanFiles:
     # ---------- 列目录 ----------
     def list_dir(self, path: str, recursive: bool = False, limit: int = 1000,
                  on_progress=None, should_stop=None, failures=None,
-                 workers=None):
+                 workers=None, missed=None):
         """列出目录内容；recursive=True 时递归全部子目录。
         返回 [{path, name, size, isdir, mtime}]
 
@@ -226,6 +240,11 @@ class PanFiles:
                   调用方拿到的是同一个 list 对象（可变），不需要接返回值。
                   注意：**起点目录**列不开时无论是否容错都照样抛错——那说明路径或
                   沙盒配置本身有问题，必须让用户当场看见，而不是给个空结果。
+                  （「列不开」指一条都没列到；只缺几页时记 partial 并照常返回数据。）
+
+        missed: 传一个 list 进来就收集**补扫后仍然没读到的页偏移**（按 start 计）。
+                深翻页的限流是间歇性的，_list_one 内部已经会补扫 3 轮；真有补不上的，
+                上层可以拿着这些偏移量隔一段时间再单独补，而不是把整个目录重扫一遍。
 
         workers: 递归扫描的并发线程数（默认 LIST_WORKERS=4）。列目录是纯只读，
                   2T 网盘几千个目录串行列要好几分钟，是「生成预览慢」的主因；
@@ -238,9 +257,9 @@ class PanFiles:
         self._backoff_left = PAGE_BACKOFF_BUDGET
         if not recursive or w <= 1:
             return self._list_seq(root, recursive, limit, on_progress,
-                                  should_stop, failures)
+                                  should_stop, failures, missed)
         return self._list_conc(root, w, limit, on_progress,
-                               should_stop, failures)
+                               should_stop, failures, missed)
 
     def _get_page(self, d, start, limit, should_stop):
         """列一页，对「可重试」的 errno 做退避重试（返回 (r, errno)）。
@@ -269,36 +288,57 @@ class PanFiles:
             delay = 2 if delay == 0 else delay * 2
         return r, e
 
-    def _list_one(self, d, limit, should_stop):
+    def _take(self, items, rows, subs):
+        """把一页的原始条目解析进 rows/subs（补扫和正扫共用这一段）"""
+        for it in items:
+            rec = {
+                "path": it.get("path", ""),
+                "name": it.get("server_filename", ""),
+                "size": it.get("size", 0) or 0,
+                "isdir": bool(it.get("isdir")),
+                "mtime": it.get("server_mtime") or it.get("local_mtime") or 0,
+            }
+            rows.append(rec)
+            if rec["isdir"]:
+                subs.append(rec["path"])
+
+    def _list_one(self, d, limit, should_stop, missed=None):
         """列单个目录（含翻页）。返回 (rows, 子目录列表, errno)。
 
-        errno != 0 时 rows 里是**中断前已经列到的条目**（可能为空）。
+        errno != 0 时 rows 里是**已经列到的条目**（缺若干页，可能为空）。
         这一条很重要：大目录翻到第 200 页抖一下，不应该把前 199 页的成果扔掉；
         调用方可以据此判断「这份结果是半截的」并如实告诉用户，而不是给个假的全集。
+
+        深翻页的抖动是**间歇性**的（/归档/txt 实测：连翻时八成页 errno=1，
+        隔几秒单独再问同一页却 2 秒就回来了）。所以这里不中断：失败的页记进
+        pending 先跳过、继续往下翻，整目录翻完后再回来补扫若干轮。
+        missed 传入一个 list 时，最后仍然没补上的页会写进去（便于上层重试）。
         should_stop 命中时抛 ScanCancelled。
         """
         rows, subs = [], []
         start = 0
+        pending = []        # 抖动失败的页偏移，最后统一补
+        last_err = 0
         while True:
             if should_stop and should_stop():
                 raise ScanCancelled(0, 0)
             r, e = self._get_page(d, start, limit, should_stop)
             if e != 0:
-                return rows, subs, e
+                # 单页抖动 ≠ 目录不可用。老版本在这里 `return rows, subs, e`，
+                # 于是 /归档/txt 翻到 302000 抖一下，前面 30 万条全作废。
+                pending.append(start)
+                last_err = e
+                if len(pending) >= PAGE_MISS_MAX:
+                    break
+                start += limit
+                # 失败也要守节奏：连着撞墙时若不加间隔，等于对着限流猛冲
+                if LIST_PAGE_GAP:
+                    time.sleep(LIST_PAGE_GAP)
+                continue
             items = r.get("list", [])
-            for it in items:
-                rec = {
-                    "path": it.get("path", ""),
-                    "name": it.get("server_filename", ""),
-                    "size": it.get("size", 0) or 0,
-                    "isdir": bool(it.get("isdir")),
-                    "mtime": it.get("server_mtime") or it.get("local_mtime") or 0,
-                }
-                rows.append(rec)
-                if rec["isdir"]:
-                    subs.append(rec["path"])
+            self._take(items, rows, subs)
             if len(items) < limit:
-                return rows, subs, 0
+                break               # 到最后一页了（中间可能还夹着失败页）
             start += limit
             # 连翻几百页会把百度打频控（errno=1 / 31034），一旦被限流，失败那页
             # 的整批数据就作废了。这里只放缓单目录的翻页节奏，不同目录之间
@@ -306,29 +346,67 @@ class PanFiles:
             if LIST_PAGE_GAP and start:
                 time.sleep(LIST_PAGE_GAP)
 
+        # 统一补扫失败页：抖动是间歇性的，停一停再问往往就成了。
+        # 每轮之间不压 LIST_PAGE_GAP，改用一个更长的静置，让频控真正缓过来。
+        for _ in range(PAGE_MISS_ROUNDS):
+            if not pending:
+                break
+            if should_stop and should_stop():
+                raise ScanCancelled(0, 0)
+            if PAGE_MISS_WAIT > 0:
+                time.sleep(PAGE_MISS_WAIT)
+            still = []
+            for s in pending:
+                if should_stop and should_stop():
+                    raise ScanCancelled(0, 0)
+                r, e = self._get_page(d, s, limit, should_stop)
+                if e != 0:
+                    still.append(s)
+                    continue
+                self._take(r.get("list", []), rows, subs)
+                if LIST_PAGE_GAP:
+                    time.sleep(LIST_PAGE_GAP)
+            pending = still
+            if pending:
+                last_err = last_err or 1
+
+        if pending:
+            if missed is not None:
+                missed.extend(pending)
+            return rows, subs, last_err or 1
+        return rows, subs, 0
+
     def _list_seq(self, root, recursive, limit, on_progress,
-                  should_stop, failures):
+                  should_stop, failures, missed=None):
         """串行递归扫描（workers<=1 / 非递归时用），行为与老版本一致"""
         out, stack, dirs_done, files_seen = [], [root], 0, 0
         while stack:
             d = stack.pop()
-            rows, subs, e = self._list_one(d, limit, should_stop)
+            rows, subs, e = self._list_one(d, limit, should_stop, missed)
             if e != 0:
                 # 这几种是全局性的（授权坏了 / 被限流），跳过没有任何意义：
                 # 后面每个目录都会同样失败，此时静默跳过只会给出一个假结果
-                if (failures is not None and d != root
-                        and e not in _FATAL_LIST_ERRNOS):
+                # —— 所以只要没列到东西（或 errno 是致命的），一律抛出去。
+                #
+                # 但**已经列到一部分**就不一样了：深翻页抖几页，前面几十万条
+                # 是完整可信的。老版本对 root 直接 raise PanError，于是
+                # /归档/txt 的 30 万条就这么从清单里蒸发。现在改成记一笔
+                # partial、把到手的数据交给调用方，由它决定是当全集用还是重扫。
+                usable = bool(rows) and e not in _FATAL_LIST_ERRNOS
+                if failures is not None and (d != root or usable):
                     if len(failures) < 500:     # 兜个上限，别让响应体爆炸
                         rec = {"path": d, "errno": e, "msg": errno_text(e)}
                         # 中断前翻到的那些页是完整的、可信的，不该跟着一起丢。
                         # 但要如实记一笔 partial，让调用方告诉用户「这份不全」。
                         if rows:
                             rec["partial"] = len(rows)
-                            out.extend(rows)
-                            stack.extend(subs)
-                            files_seen += sum(1 for r in rows
-                                              if not r["isdir"])
+                        rec["missed_pages"] = True
                         failures.append(rec)
+                    if rows:
+                        out.extend(rows)
+                        stack.extend(subs)
+                        files_seen += sum(1 for r in rows
+                                          if not r["isdir"])
                     dirs_done += 1
                     if on_progress:
                         try:
@@ -352,8 +430,23 @@ class PanFiles:
             raise ScanCancelled(dirs_done, files_seen)
         return out
 
+    def list_page(self, path, start, limit=1000, should_stop=None):
+        """只取目录的**某一页**（按 start 偏移），返回 (rows, errno)。
+
+        为什么要有这个：深翻页被限流时，_list_one 会跳过失败页并记下偏移，
+        但内部补扫也可能补不全。有了它，上层可以隔一段时间只补这几页，
+        而不必把一个 40 万条 / 403 页的目录整个重扫一遍（那要半小时）。
+        """
+        d = self.check_path(path)
+        self._backoff_left = PAGE_BACKOFF_BUDGET
+        r, e = self._get_page(d, start, limit, should_stop)
+        rows = []
+        if e == 0:
+            self._take(r.get("list", []), rows, [])
+        return rows, e
+
     def _list_conc(self, root, workers, limit, on_progress,
-                   should_stop, failures):
+                   should_stop, failures, missed=None):
         """并发递归扫描：N 个线程从共享待办栈里抢目录列。
 
         线程安全要点：out/failures 的 append、计数器累加在 GIL 下是原子的；
@@ -392,7 +485,8 @@ class PanFiles:
                     cv.notify_all()
                 try:
                     try:
-                        rows, subs, e = self._list_one(d, limit, should_stop)
+                        rows, subs, e = self._list_one(d, limit, should_stop,
+                                                       missed)
                     except ScanCancelled:
                         with cv:
                             if first_err[0] is None:
@@ -425,11 +519,24 @@ class PanFiles:
                             cv.notify_all()
                         return
                     if e != 0:
-                        if (failures is not None and d != root
-                                and e not in _FATAL_LIST_ERRNOS):
+                        # 同 _list_seq：已经列到一部分就别整目录报废，记 partial
+                        # 并把到手的数据吐出去（root 也一样——最大的那个目录
+                        # 往往就是 root，整目录报废 = 清单少十万条）。
+                        usable = bool(rows) and e not in _FATAL_LIST_ERRNOS
+                        if failures is not None and (d != root or usable):
                             if len(failures) < 500:
-                                failures.append({"path": d, "errno": e,
-                                                 "msg": errno_text(e)})
+                                rec = {"path": d, "errno": e,
+                                       "msg": errno_text(e),
+                                       "missed_pages": True}
+                                if rows:
+                                    rec["partial"] = len(rows)
+                                failures.append(rec)
+                            if rows:
+                                out.extend(rows)
+                                with cv:
+                                    todo.extend(subs)
+                                    files_seen[0] += sum(
+                                        1 for r in rows if not r["isdir"])
                             with cv:
                                 dirs_done[0] += 1
                                 cv.notify_all()

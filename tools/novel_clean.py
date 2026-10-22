@@ -28,6 +28,9 @@ from functools import lru_cache
 csv.field_size_limit(10 ** 9)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# opencc / pypinyin 装在 core/libs 里，这里不显式加路径的话，
+# 「繁转简」会静默失效（_CC = None），繁体书名原样留在库里。
+sys.path.insert(0, os.path.join(os.path.dirname(HERE), "core", "libs"))
 DESKTOP = os.environ.get("DESKTOP_DIR") or r"C:\Users\UserData\Desktop"
 # 默认吃「修好扫描 bug 之后重导的完整清单」（516685 条，含此前丢失的 txt 目录）
 CSV_NAME = os.environ.get("CSV_NAME") or \
@@ -43,12 +46,159 @@ KEEP_FMT = {"epub", "mobi", "azw3", "pdf", "txt", "umd", "docx", "doc", "chm"}
 FMT_RANK = {e: i for i, e in enumerate(
     ["epub", "mobi", "azw3", "pdf", "txt", "umd", "docx", "doc", "chm"])}
 
+# strip_ext 用的「点后面确实是格式」的判定集，比 KEEP_FMT 宽：
+# KEEP_FMT 只列了我们认可电子书格式，用它判会漏掉 azw / prc / djvu / lit…
+# 实测 `苏联真相….azw3` 被砍成了 `.az`（"az" 不在 KEEP_FMT 里 → 退回按
+# 最后一个点切，点正好落在 azw3 中间），文件名直接坏掉。
+# 这里只放「点后出现也一定不是书名一部分」的格式词，宁窄勿宽 ——
+# 放太宽会重演 `博赞.中信出版社` 被当成扩展名切掉的老 bug。
+EXT_TAIL = KEEP_FMT | {
+    "azw", "prc", "djvu", "lit", "fb2", "pdb", "rtf", "lrf", "ceb",
+    "zip", "rar", "7z", "iso", "gz", "tar",
+    "exe", "apk", "msi", "bin", "img",
+}
+
+# 改名后的最终形态：`作者《书名》.epub`。作者未知时只写 `《书名》.epub`，
+# 不留「未知」这类占位 —— 用户明确要求「没有作者就只写书名」。
+# 想切回不带作者的老格式，把下面这行改成 "{title}" 即可。
+AUTHOR_FMT = "{author}《{title}》"
+AUTHOR_OF = {}          # 书名 → 作者，由 load_authors() 灌进来
+_AUTHOR_KEYS = []       # 作者库的键，按长度降序（见 _norm_author_key）
+
+
+def _norm_author_key(k):
+    """把作者库的键和「书名候选」归一到同一个形状再比
+
+    这一步不写会静默失效，而且失效得极其隐蔽：作者库是拿 `clean_name`
+    的输出当键生成的，那会儿名字已经带了书名号（`《茶意绵绵》`）、
+    还做过繁转简；而查表的时候手里只有还没套格式的裸书名（`茶意绵绵`）。
+    `dict.get` 拿带书名号的键去查裸名，永远查不到，于是 4 万条作者
+    一条都用不上，文件名看起来「没报错、只是没作者」。
+
+    除书名号外还得统一这几样，否则繁体原版、带空格的副本、卷号残留
+    会各算一本，同一个书名查三次只中一次：
+      · 繁转简       —— 作者库建好之后又跑了一遍 t2s
+      · 去空白/间隔号 —— `苏 轼`、`星新一·短篇`
+      · 去卷号尾     —— `《书名》-上部` 要能命中 `《书名》`
+    """
+    if not k:
+        return ""
+    m = re.fullmatch(r"[^《》]{0,12}《(.+)》", k)
+    if m:
+        k = m.group(1)
+    k = to_simplified(k)
+    k = re.sub(r"[\s\u3000·・\-—_]+", "", k)
+    return k
+
+
+def load_authors(path):
+    """读作者库（tools/authors.py 生成）。缺文件时退化成「只写书名」。"""
+    global AUTHOR_OF, _AUTHOR_KEYS
+    import json
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except Exception:
+        AUTHOR_OF = {}
+        _AUTHOR_KEYS = []
+        return 0
+    table = {}
+    for t, v in raw.items():
+        a = (v.get("author") or "").strip()
+        if not a:
+            continue
+        nk = _norm_author_key(t)
+        if not nk:
+            continue
+        # 同一个归一键出现两个作者时别猜，留空 —— 宁可没作者，
+        # 也不能把 A 的作者挂到 B 的书上（那是纯错误，比缺更糟）。
+        if nk in table and table[nk] != a:
+            table[nk] = ""
+            continue
+        table[nk] = a
+    AUTHOR_OF = {k: v for k, v in table.items() if v}
+    _AUTHOR_KEYS = sorted(AUTHOR_OF, key=len, reverse=True)
+    return len(AUTHOR_OF)
+
+
+def lookup_author(title):
+    """书名 → 作者。先精确、再吃尾巴上的卷号（`书名-上部`）"""
+    if not AUTHOR_OF:
+        return ""
+    nk = _norm_author_key(title)
+    if not nk:
+        return ""
+    hit = AUTHOR_OF.get(nk)
+    if hit:
+        return hit
+    # 卷号/季号在 clean_name 里是被剥掉的，理论上不会走到这；
+    # 但 allow_bare、pick_bare 这些兜底路径偶尔会把「-上部」留在标题里。
+    for k in _AUTHOR_KEYS:
+        if len(k) >= 2 and nk.startswith(k) and \
+                nk[len(k):] in ("上部", "下部", "上", "下", "中部"):
+            return AUTHOR_OF[k]
+    return ""
+
+
+def strip_author_prefix(base):
+    """把 `寄秋《茶意绵绵》` 还原成 `茶意绵绵`，只用于去重比较"""
+    m = re.fullmatch(r"[^《》]{0,12}《(.+)》", base)
+    return m.group(1) if m else base
+
+
+# 「作者」位置上一定不是人名的词：分类标签 / 版本说明 / 丛书名。
+# 作者库是从文件名里反推的，偶尔会把书名号前面的标签当成作者 ——
+# `[玄幻]征神领域` 推出「玄幻」、`名著洛丽塔` 推出「名著」、`古龙全集《上》`
+# 推出「古龙全集」。直接写进文件名就成了 `玄幻《征神领域》`，比不带作者更糟。
+FAKE_AUTHOR = {
+    "名著", "经典", "世界名著", "中外名著", "外国名著", "中国名著", "名著导读",
+    "玄幻", "武侠", "言情", "都市", "穿越", "科幻", "恐怖", "灵异", "历史",
+    "军事", "网游", "仙侠", "修真", "青春", "校园", "古言", "现言", "耽美",
+    "同人", "原创", "精品", "推荐", "完本", "全集", "合集", "全本", "连载",
+    "小说", "长篇小说", "短篇小说", "中篇小说", "微小说", "网络小说",
+    "外国文学", "中国文学", "世界文学", "古典文学", "现代文学", "当代文学",
+    "文学", "散文", "诗歌", "随笔", "杂文", "剧本", "影视", "评书",
+    "中文版", "全译本", "改写版", "缩写版", "青少版", "彩图版", "插图本",
+    "作者", "编著", "主编", "编译", "佚名", "未知", "不详", "无名氏",
+}
+FAKE_AUTHOR_TAIL = ("系列", "丛书", "文集", "选集", "全集", "合集", "书系",
+                    "名著", "经典", "文库", "典藏", "书库", "专题", "版")
+
+
+def author_ok(a):
+    """这个「作者」能不能写进文件名"""
+    a = (a or "").strip()
+    if not a:
+        return False
+    if a in FAKE_AUTHOR or a.endswith(FAKE_AUTHOR_TAIL):
+        return False
+    if len(CJK.findall(a)) == 0 or len(a) >= 8:
+        return False
+    return True
+
+
+def fmt_name(title):
+    """书名 → 最终文件名主干（不含后缀）。put into AUTHOR_FMT"""
+    a = lookup_author(title)
+    if a and author_ok(a):
+        return AUTHOR_FMT.format(author=a, title=title)
+    return AUTHOR_FMT.format(author="", title=title)
+
+
 # ------------------------------------------------------------ 语言判定
 try:
     import opencc
     _CC = opencc.OpenCC("t2s")
 except Exception:                                     # pragma: no cover
     _CC = None
+try:
+    # 拼音数据：文件名的私用区字符（U+E000–U+F8FF）多为共享站点把书名全文
+    # 用「拼音首字母 + 私用区字形」混淆过，如「zw1」后面的字形。拿去重还原则
+    # 靠它。拿不到数据时整条还原逻辑自动跳过，不影响其他规则。
+    from pypinyin import pinyin
+    _PY = pinyin
+except Exception:                                     # pragma: no cover
+    _PY = None
 
 CJK = re.compile(r"[\u4e00-\u9fff]")
 KANA = re.compile(r"[\u3040-\u30ff]")
@@ -103,7 +253,10 @@ def lang_of(text):
 
 
 # 数字后面跟这些字，说明数字是书名的一部分（30天 / 60个瞬间 / 5分钟）
-MEASURE = set("天年月日个分秒周小本部队卷章节篇条种次位名人岁块元万亿千百十套只间句字页例味道")
+# 「栋」是 17栋男生宿舍、「号」是 13号院、「层」是 7层楼 —— 量词/单位都在这里，
+# 漏一个就有一条书名被啃掉开头的数字。
+MEASURE = set("天年月日个分秒周小本部队卷章节篇条种次位名人岁块元万亿千百十"
+              "套只间句字页例味道栋号层间届届期季批轮辆艘架台张幅匹头尾棵株")
 
 # 「X学」结尾的豁免：这些真不是学科专著
 XUE_EXCEPT = ["大学", "小学", "中学", "上学", "放学", "同学", "留学",
@@ -120,6 +273,11 @@ FAMILIES = {
             r"\s*\d*$",
             r"^第\s*[0-9一二三四五六七八九十百]{1,4}\s*[章节讲篇]\s*[0-9A-Za-z]*$",
             r"^第\s*[0-9一二三四五六七八九十百]{1,4}\s*[卷部册集]\s*[A-Za-z]?$",
+            # `第01集（上）`：只有卷号没有书名，还带个上下部尾巴。
+            # 上一条以 `$` 收尾，被「（上）」挡住没删掉 —— 它是切碎的残渣，
+            # 认不出是什么书，留着还会带着阿拉伯数字留在库里。
+            r"^第\s*[0-9一二三四五六七八九十百]{1,4}\s*[卷部册集]"
+            r"\s*[（(]?\s*[上下中]\s*[）)]?\s*[\u4e00-\u9fff]{0,2}$",
             r"^contents\s+of",
             r"^\d{1,4}$",
             r"^第?\d{2,4}[-—–_]\d{2,4}\s*(卷|部|集|册|话|話)$",
@@ -246,6 +404,13 @@ FAMILIES = {
             "季刊", "合订本", "增刊", "杂志", "年第", "第01期", "第1期",
             "第2期", "第3期", "第4期", "第5期", "第6期", "第7期", "第8期",
             "第9期", "第10期", "第11期", "第12期", "全年精选", "合刊",
+            # 杂志刊名本身：一整批 `读者 (77…88)`、`意林 2012第13期`、
+            # `电脑报 (101)` 全在这里。它们是期刊，不是小说，而且同一刊名
+            # 几百期会被「序号→季」规则拼成「读者-第100季」这种荒唐名字。
+            "读者", "意林", "电脑报", "特别文摘", "幽默大师", "看天下",
+            "Vista看天下", "青年文摘", "格言", "故事会", "微型小说选刊",
+            "读者文摘", "家庭医生", "中国国家地理", "博物", "科幻世界",
+            "大众软件", "电脑爱好者", "微型计算机", "电脑迷",
         ],
         "soft": [],
     },
@@ -385,6 +550,9 @@ GARBAGE_NAMES = {
     "未命名", "无标题", "封面", "扉页", "版权页", "前言", "序言", "序",
     "后记", "附录", "索引", "致谢", "读后感", "书评", "推荐语", "导读",
     "版权", "声明", "免责声明", "readme", "README", "index", "首页",
+    # 版本说明：`扫描版`/`文字版`/`精校版 + (2)(3)…` 整组都是同一个文件的
+    # 重复副本，名字里没有任何书名信息，留着只会占位
+    "扫描版", "文字版", "精校版", "精排版", "完整版", "全本", "合集",
 }
 
 PUB_TAIL = re.compile(
@@ -401,19 +569,46 @@ COMPOUND = ("欧阳", "上官", "司马", "诸葛", "东方", "独孤", "南宫"
             "皇甫", "尉迟", "公孙", "慕容", "长孙", "宇文", "司徒", "轩辕")
 
 # 只按「强分隔符」切段：中文标点（，、。）算书名内部字符，不切
-SEG_SPLIT = re.compile(r"[\s\-—–_·・:：|｜/\\]+")
-BRACKET = re.compile(r"[（(【\[][^（)（】\])]{0,30}[)）】\]]")
-BAD_CHARS = re.compile(r"[\[\]【】()（）<>《》\"'“”‘’]")
+SEG_SPLIT = re.compile(r"[\s\-—–―－_·・:：|｜/\\]+")
+# ｛｝〔〕也得算括号：`｛后文网收集整理｝ (2).pdf` 这种全角花括号没被剥掉时，
+# 书名取不出来，整条只能原样留下（连副本序号 (2) 一起）。
+BRACKET = re.compile(
+    r"[（(【\[｛〔][^（)（】\])｝〕]{0,30}[)）】\]｝〕]")
+BAD_CHARS = re.compile(r"[\[\]【】()（）<>《》\"'“”‘’｛｝〔〕]")
+
+# 「丛书名-分册名」用的分隔符：不带空格时才认定为系列关系。
+# 空格分隔的多半是 `书名 副标题`，不在此列。
+SERIES_SEP = re.compile(r"[-_·/\\]")
+# 长横线是丛书分隔号，几乎不会出现在书名内部，可以直接当拼接信号。
+# 各种横线都得认，别只写「—」：
+#   U+2012 ‒ / U+2013 – / U+2014 — / U+2015 ― / U+FE58 ﹘ / U+FF0D －
+# 普通短横 - 不算 —— `寄秋-茶意绵绵`、`雪中悍刀行-烽火戏诸侯` 都是
+# 「作者-作品」，拼起来等于把作者名写进书名。
+EM_DASH_JOIN = re.compile(r"[\u2012-\u2015\u2E3A\u2E3B\uFE58\uFE63\uFF0D]")
+# 书名号把原文挤成 `前缀《书名》`：前缀存在时，书名号里的一定是分册名
+BOOKMARK_SPLIT = re.compile(r"[^\s《》][^《》]{0,40}《[^》]{1,40}》")
 
 # ------------------------------------------------------------ 语言/工具
 CJK_CH = r"一-鿿"
+# 中文数字字符类。零/百/千必须在：`第一百零一节` 少了「零」就匹配不上
+CN_NUM_CH = r"0-9零〇一二三四五六七八九十百千两"
 
 
 def strip_ext(name, ext):
     low = name.lower()
+    # 先按 CSV 里的「后缀」列精确砍 —— 这是最可靠的，别让下面的猜测抢先。
+    # 之前少了这一段，`苏联真相….azw3` 走到 rpartition 时 `azw3` 只认后两位
+    # `az`，于是被砍成 `苏联真相…-…-上册.az`，文件名整个坏掉。
     if ext and low.endswith("." + ext.lower()):
         return name[: -(len(ext) + 1)]
-    return os.path.splitext(name)[0]
+    # 别让 splitext 乱切：`博赞.中信出版社` 里根本没有扩展名，
+    # splitext 会把「中信出版社」当成后缀砍掉，书名只剩「博赞」，
+    # 于是同一批文件全撞成一个名字，被去重误删。
+    # 只认「点后面确实是电子书/压缩包格式」这一种情况。
+    base, dot, tail = name.rpartition(".")
+    if dot and base and tail.lower() in EXT_TAIL:
+        return base
+    return name
 
 
 def _unescape(s):
@@ -429,17 +624,71 @@ def base_stem(filename, ext):
 FLAT_JUNK = re.compile(r"[\s\d\(\)（）\[\]【】·_\-—–.。，、]+")
 
 
+# 去掉空格/数字/标点后还是这些词的，就是书里的前言目录页，不是小说。
+# 不先压平的话 `目  录 (24)` 会被空格切成「目」「录24」两段，谁也认不出来。
+FLAT_JUNK = re.compile(r"[\s\d\(\)（）\[\]【】·_\-—–.。，、]+")
+
+# 「必看说明」「下载必读」这类：尾部粘着一个说明词。精确匹配抓不住它，
+# 按后缀匹配才罩得住整族。
+GARBAGE_LONG = tuple(g for g in GARBAGE_NAMES if len(g) >= 2)
+
+# 章节切片：`000第一卷-第一章 血凤出世`、`001-第002回，悟彻菩提真妙理`、
+# `忐忑人生 第五十二章 《承诺》`。这是把一本小说拆成几百个 txt 的碎片，
+# 不是书 —— 只要名字里带「第X章/节/回/话」就是拆出来的章节。
+CHAP_HEAD = re.compile(
+    r"^[\s\d\-_.]*第[" + CN_NUM_CH + r"]{1,6}\s*[章節节回话話讲講]")
+VOL_ANY = re.compile(r"第[" + CN_NUM_CH + r"]{1,6}\s*[卷部集册]")
+CHAP_ANY = re.compile(r"第[" + CN_NUM_CH + r"]{1,6}\s*[章節节回话話讲講]")
+
+
+def _is_chapter_slice(stem):
+    if CHAP_HEAD.match(stem) or CHAP_ANY.search(stem):
+        return True
+    if VOL_ANY.search(stem) and CHAP_ANY.search(stem):
+        return True                     # 又有卷号又有章号 → 拆卷拆章的碎片
+    return len(VOL_ANY.findall(stem)) >= 2   # `第一卷-走出神墓 第一卷 远古神墓`
+
+
+def nc_title_or_empty(stem, raw=""):
+    """能不能从这段文件名里榨出一个像样的书名（只是查一下，不改名）
+
+    raw: find_volume 认出来的卷号片段。整段就只是一个卷号（`第13卷`）时，
+    这类名字没有任何书名信息，直接算「榨不出」。
+    """
+    if raw and not CJK.search(stem.replace(raw, "")):
+        return ""
+    s = pick_title(stem)
+    if not s:
+        s = pick_bare(stem)
+    # 把数字转成中文之后再数汉字：`30天学会` 里的「三十」也算书名的一部分
+    s = _DIG_RUN.sub(lambda m: _num_cn_full(int(m.group(0))), s or "")
+    return s if len(CJK.findall(s)) >= 2 else ""
+
+
 def classify(filename, ext):
     """返回 (删吗, 原因)"""
     stem = base_stem(filename, ext)
-    if FLAT_JUNK.sub("", stem) in GARBAGE_NAMES:
+    flat = FLAT_JUNK.sub("", stem)
+    if flat in GARBAGE_NAMES or (len(flat) >= 3 and flat.endswith(GARBAGE_LONG)):
         return True, "无意义名"
+    if _is_chapter_slice(stem):
+        return True, "章节切片"
     if ext.lower() in ("ppt", "pps"):
         return True, "幻灯片/演示稿"
     if filename.startswith("._") or filename.startswith("~$"):
         return True, "苹果垃圾副本"
     if ext.lower() not in KEEP_FMT:
         return True, "非书格式"
+    # 连书名都取不出来、原文里还带着阿拉伯数字/拉丁字母型号的，认不出是什么书：
+    # `74HC138(中文资料)`、`hx711(海芯)` 这种按芯片型号命名的资料，
+    # 留着既没法归类，也会让「名字里不留数字」这条要求落空。
+    # 注意只在这种榨不出汉字的情况下才判死，`30天学会…` 不受影响。
+    if ext.lower() in KEEP_FMT:
+        s2, _ord = split_ordinal(stem)
+        _k, _v, raw2 = find_volume(s2)
+        core = nc_title_or_empty(s2, raw2)
+        if not core and _DIG_RUN.search(stem):
+            return True, "书名不可识别"
     lang = lang_of(stem)
     # 繁体**不删**——留着，改名那一步转成简体（见 to_simplified）
     if lang != "none" and lang != "繁体":
@@ -459,16 +708,40 @@ def classify(filename, ext):
     if re.search(r"[" + CJK_CH + r"]{2,}学$", flat) and \
             not any(x in flat for x in XUE_EXCEPT):
         return True, "学术专著(X学)"
-    # 书名太长的（≥12 字）多半是带副标题的非虚构，算一条「软嫌疑」
-    if len(core) >= 12:
+    # 书名太长的（≥14 字）多半是带副标题的非虚构，算一条「软嫌疑」。
+    # 门槛原来是 12，把 `世界五千年事物由来总集地名分册`（14 字）这类
+    # 「丛书名+分册名」也算了进去 —— 拼起来必然长，不能当非虚构的信号。
+    # 但「丛书名+分册名」拼出来天然长，不能因此算非虚构：
+    # 名字里带 系列/总集/全集/丛书/文集/选集/大全 的，长标题这条不记。
+    SERIES_HEAD = ("系列", "总集", "全集", "丛书", "文集", "选集", "大全",
+                   "别集", "合集", "精编", "读本")
+    if len(core) >= 14 and not any(w in core for w in SERIES_HEAD):
         fam_hit.append("长标题")
     if len(fam_hit) >= 2:
         return True, "多类嫌疑(" + "+".join(fam_hit[:3]) + ")"
+    # 最后一道：非小说形状判定（学术专著 / 电脑教程 / 期刊栏目）。
+    # 放在所有硬规则之后，只处理那些「一个词都没踩中、但整体不像小说」的。
+    # 判据在 tools/nonfiction.py，必须三条同时命中才判死 —— 单靠一个
+    # `研究`/`文集` 会误伤《局外人研究》这种真小说。
+    try:
+        import nonfiction
+        if nonfiction.is_nonfiction(stem)[0]:
+            return True, "非小说形状"
+    except Exception:
+        pass
     return False, ""
 
 
 # ------------------------------------------------------------------ 改名
 def _drop_brackets(s):
+    """剥括号。**尾部**的纯数字括号要留着让 split_ordinal 事后摘
+
+    老逻辑对 `xx (2)` 是「去括号留数字」，本意是保住 `世界科技全景百卷书(91)
+    环境科学` 这种册号，但括号在**末尾**时那是副本序号，不是册号 ——
+    `女帝奇英传 (2)` 于是变成 `女帝奇英传 2`，序号混进书名，
+    split_ordinal 再也认不出来，最后靠「同名不同大小」判成独立一笔。
+    实测 `大师语录` 的 24 个不同演讲被并成「第一季…第二十四季」，全部重名。
+    """
     prev = None
     while prev != s:
         prev = s
@@ -476,7 +749,8 @@ def _drop_brackets(s):
         # （世界科技全景百卷书(91)环境科学）、而不是副本序号。
         # 老逻辑连数字一起删，于是一套书几十册全撞成同一个名字被去重误删。
         # 同名副本的编号是相同的（都是 (1)），留着也照样能去重。
-        s = re.sub(r"[（(【\[]\s*(\d{1,4})\s*[)）\]】]", r"\1", s)
+        # 末位的不动：那是 `书名 (2)` 的副本序号。
+        s = re.sub(r"[（(【\[｛]\s*(\d{1,4})\s*[)）\]】｝](?!\s*$)", r"\1", s)
         s = BRACKET.sub(" ", s)
     return s
 
@@ -492,6 +766,11 @@ COUNTRY = re.compile(
 AUTHOR_VOCAB = set()
 PREFIX_VOCAB = set()      # 常驻前缀（作者/系列名），见 set_author_vocab
 NAME_VOCAB = set()        # 不分位置的「人名表」，见 set_author_vocab
+
+# 「系列头」词表：这类词出现在第一段时，它自己不是书名，底下每集才是。
+# `大师语录` 在 PREFIX_VOCAB 里（24 场演讲共用这个前缀），靠它切开；
+# 这里再补几个同形的固定词，免得词表门槛没够到时漏掉。
+SERIES_HEAD_SET = {"大师语录", "百家讲坛", "开讲啦", "一席", "TED"}
 
 # NAME_VOCAB 的排除表：这些词和作者一样「几乎从不单独出现」，但它们不是人名。
 # 不放进来的话，`莲花-安妮宝贝` 里的书名会被当成作者换掉、`柳残阳 沥血伏龙`
@@ -536,18 +815,25 @@ def set_author_vocab(stems):
     global AUTHOR_VOCAB, PREFIX_VOCAB, NAME_VOCAB
     cnt, head, alone = (collections.Counter(), collections.Counter(),
                         collections.Counter())
+    sib = collections.defaultdict(set)   # 每个词搭档过的「同文件其他段」
     for s in stems:
         segs = [x for x in SEG_SPLIT.split(s) if x and CJK.search(x)]
+        uniq = set(segs)
         for i, x in enumerate(segs):
             cnt[x] += 1
             if i == 0:
                 head[x] += 1
         if len(segs) == 1:
             alone[segs[0]] += 1
+        for x in uniq:
+            sib[x] |= uniq - {x}
     AUTHOR_VOCAB = {
         x for x, c in cnt.items()
         if c >= 3 and head[x] / c <= 0.2
-        and re.fullmatch(r"[" + CJK_CH + r"]{2,4}", x)}
+        and re.fullmatch(r"[" + CJK_CH + r"]{2,4}", x)
+        # 同 NAME_VOCAB：搭档够杂才算作者。《莲花》首段率只有 0.1，
+        # 光看位置会被当成作者，可它一辈子只跟安妮宝贝同框。
+        and len(sib[x]) >= 3}
     # 不分位置的「人名表」：作者名有个很硬的特征 —— 它几乎从不会单独成一个
     # 文件名（`柳残阳.txt` 没人这么存），而真正的书名会（`盗墓笔记.epub`）。
     # 于是「出现 ≥20 次 + 单独出现率 ≤3%」就能把作者/系列名捞出来，
@@ -558,7 +844,11 @@ def set_author_vocab(stems):
         if c >= 20 and alone[x] / c <= 0.03
         and re.fullmatch(r"[" + CJK_CH + r"]{2,4}", x)
         and x not in NAME_STOP and not _looks_cat(x)
-        and not re.fullmatch(r"(上|中|下)(册|部|卷|篇|集)", x)}
+        and not re.fullmatch(r"(上|中|下)(册|部|卷|篇|集)", x)
+        # 还得「搭档够杂」：作者会跟很多不同书名搭档（柳残阳配两百部书），
+        # 书名只跟自己的作者搭档（《沥血伏龙》永远只跟柳残阳同框）。
+        # 少了这条，`柳残阳 沥血伏龙 (N)` 的几十个副本会把书名也送进人名表。
+        and len(sib[x]) >= 3}
     # 常驻前缀：几乎总在第一段，而且几乎从不单独成段 —— 也就是它后面总跟着
     # 别的东西（`柳残阳 沥血伏龙`、`脱脱 金史 本纪第006`）。这种是作者/系列名，
     # 不是书名；认出来才不会把同一作者的几十部作品撞成一个名字。
@@ -614,9 +904,6 @@ UNDER_HEAD = re.compile(r"^\s*[" + CJK_CH + r"]{1,4}_")
 
 # 章回号：`第一章 迎来送往` 里的「第一章」是编号不是书名，丢掉才能取到后面的
 # 章节标题。整段只剩章回号的（`第0030篇`）在「垃圾/无效名」里已经判死了。
-# 「零/百/千」必须在这里：`第一百零一节` 少了「零」就匹配不上
-CN_NUM_CH = r"0-9零〇一二三四五六七八九十百千两"
-
 CHAP_RE = re.compile(
     r"^第\s*[" + CN_NUM_CH + r"]{1,6}\s*"
     r"(?:章|节|節|回|讲|講|篇|集|卷|部|册|部分|话|話)\s*$")
@@ -650,22 +937,99 @@ def _looks_author(seg):
     return len(seg) <= 3 and seg[0] in SURNAMES
 
 
+def _series_join_ok(segs, raw):
+    """`丛书名-分册名` 要不要拼成一个名字（拼接动作在 pick_title 里做）
+
+    三条判据，命中任一条即拼：
+      1. 中间夹着书名号 —— `神探高斯系列《风向》`。书名号是硬信号，被它
+         包住的那段一定是书名，必须拼回去，不能只留丛书名；
+      2. 第一段自己写着「系列」且用短横/下划线分隔 —— `武侠文学系列-刀丛里的诗`。
+         只有丛书名才带这个后缀，真书名不会叫「某某系列」；
+      3. 有长横线分隔 —— `跨世纪知识城——谈地球`、
+         `中国现代文学百家—张恨水`，这是出版界的丛书分隔号。
+         普通短横（`寄秋-茶意绵绵`）是「作者-作品」，不能拼。
+
+    三条都要求：两段各 ≥2 汉字（单字段是朝代/碎片），
+    且第一段不过长（≤20 汉字，否则是整句话被切开）。
+    """
+    if len(segs) != 2:
+        return False
+    a, b = segs[0], segs[1]
+    if len(CJK.findall(a)) > 20 or len(CJK.findall(b)) < 2:
+        return False
+    if BOOKMARK_SPLIT.search(raw):
+        return True
+    if a.endswith("系列") and SERIES_SEP.search(raw):
+        return True
+    if (a.endswith("的系列") and EM_DASH_JOIN.search(raw)
+            and len(CJK.findall(b)) <= 12):
+        # `人与自然的系列——自然与人类文明`：第一段自带「的系列」，
+        # 一定是丛书名，分册名的长度限制可以放宽（但不能无限制，否则
+        # `XX的系列——副标题很长的整句话` 会把一句话当书名）。
+        return True
+    return bool(EM_DASH_JOIN.search(raw))
+
+
+def _tail_vol_join_ok(segs, raw):
+    """末段是「卷号」时把它拼回书名（`东胜神州志 第13集` → `东胜神州志第13集`）
+
+    只认 `第X卷/部/集/册/辑` 或裸 `13集`、`118卷` 这种形状，且必须恰好两段 ——
+    再多一段就是 `书名-作者-站点`，拼进去会把作者名也粘上。
+    """
+    if len(segs) != 2:
+        return False
+    a, b = segs[0].strip(), segs[1].strip()
+    if not CJK.search(a) or len(CJK.findall(a)) < 2:
+        return False
+    if not (1 <= len(b) <= 8):
+        return False
+    if RE_VOL_CN.fullmatch(b):
+        return True
+    # 裸编号（`13集`、`118卷`）：pick_title 会把数字段并进前一段，
+    # 所以走到这里时 b 一定是「第X…」形状，不加这条也不会误伤。
+    return False
+
+
+def _trace(tag, *args):
+    """调试点：`NC_TRACE=1 python tools/novel_clean.py` 时才打印，平时零开销"""
+    if os.environ.get("NC_TRACE"):
+        print("   [%s]" % tag, *args)
+
+
 def pick_title(stem):
+    # 原始 stem 留一份：`《》` 后面会被换成空格，但「书名号夹着的分册名」
+    # 这条判据必须看得到书名号本身（见 _series_join_ok）。
+    raw_stem = stem
     s = stem.strip()
     m = re.fullmatch(r"《(.+?)》", s)
     if m:
         s = m.group(1).strip()
+    # 书名号把原文切成了两段以上时，后面由 _series_join_ok 判定要不要拼：
+    # `神探高斯系列《风向》` 里后一段一定是书名（书名号是硬信号）。
     s = s.replace("《", " ").replace("》", " ")
+    # 全角花括号里的东西一律当噪声剥掉：`｛后文网收集整理｝` 是站点标语，
+    # 不是书名。不先剥掉的话，这整段会被当成书名原样留下（还带着副本序号）。
+    # 六角括号〔〕要反过来 —— 那里面通常就是书名（`〔海角七号〕`），
+    # 只在外面补个空格，内容留着。
+    s = re.sub(r"[｛][^｝]{0,40}[｝]", " ", s)
+    s = re.sub(r"[〔〕]", " ", s)
     s = _drop_brackets(s)
     s = re.sub(r"(?<=[" + CJK_CH + r"])[Vv](?=[" + CJK_CH + r"])", " ", s)
     s = s.replace("+", " ").replace("＋", " ")
     for w in NOISE_WORDS:
         s = s.replace(w, " ")
-    s = PUB_TAIL.sub(" ", s)
+    # 出版社尾巴剥完什么都不剩时（`博赞.中信出版社`），退回去用剥之前的样子：
+    # 名字里有「出版社」不好看，但总比整段丢掉、最后只剩「博赞」强。
+    s2 = PUB_TAIL.sub(" ", s)
+    if not CJK.search(s2):
+        s2 = s
+    s = s2
     s = re.sub(r"[\s\-_·]*(?:作者|著者|译者)?\s*[:：]?\s*[著译编作]\s*$", " ", s)
     segs = [x for x in SEG_SPLIT.split(s) if x]
     # 纯数字的段是编号不是噪声，并回前一段（`上市公司_13`、`卷117`）。
     # 直接丢掉的话，不同编号的文件会撞成同一个名字，被去重大批误删。
+    # `01中篇` 例外：序号 + 篇幅分类，要留在自己那段里当分类名，
+    # 并回前段就变成「武侠文学系列一」，反倒像丛书的第一个分册。
     merged = []
     for x in segs:
         if re.fullmatch(r"\d{1,4}", x) and merged and CJK.search(merged[-1]):
@@ -675,8 +1039,100 @@ def pick_title(stem):
     segs = [x for x in merged if CJK.search(x)]
     if not segs:
         return ""
-    segs = [x for x in segs if not _looks_cat(x)] or segs   # 先甩掉分类标签
-    rest = [x for x in segs if not _looks_author(x)] or segs
+    # 段首的补零分类号 `002刀丛里的诗`：split_seqhead 只削整段最前面那个，
+    # 切段之后每段前面还挂着的编号得单独剥，否则拼出来是「武侠文学系列二刀丛里的诗」。
+    # `01中篇` 这类不能剥 —— 中篇/短篇本身是分类名，编号要留着才认得出来。
+    segs = [x if re.match(r"^0{1,3}\d{1,3}(中篇|短篇|长篇|极短篇)$", x)
+            else (re.sub(r"^0{1,3}\d{1,3}(?=[^\d])", "", x) or x)
+            for x in segs]
+    # `飞狐的故事－孔庆东`：横线/全角连字符分隔的「书名－作者」。
+    # 这一步必须排在所有「拼起来」的规则之前 —— 否则 `书名－作者` 会被
+    # 当成「丛书——分册」拼成一个名字，作者名就永久写进书名里了。
+    # 全角连字符 `－`（U+FF0D）在中文文件名里几乎只当「书名－作者」用，
+    # 后接人名就切掉：`飞狐的故事－孔庆东`。
+    if (len(segs) == 2 and re.search(r"－", raw_stem)
+            and _looks_author(segs[1])
+            and len(CJK.findall(segs[0])) >= 2):
+        segs = [segs[0]]
+
+    # 只有「——分册-作者」这种双横线再跟短横线的形状才切作者：
+    # `我们怎样发现了——地震-艾萨克阿西莫夫`。单横线 `—` 的两段一律按
+    # 「丛书—分册」处理（`中国现代文学百家—张恨水` 是作家作品集，
+    # 张恨水在此是人名/分册名而不是署名作者）。
+    if (len(segs) == 3 and re.search(r"—{2,}[^-－]*[-－]", raw_stem)
+            and _looks_author(segs[2])
+            and len(CJK.findall(segs[1])) >= 2):
+        segs = [segs[0] + segs[1]]
+
+    # 丛书名 + 分册名要拼起来：《跨世纪知识城——谈地球》《神探高斯系列《风向》》
+    # 《五千年演义：三国兴亡》。不拼的话几十个别册全被压成同一个丛书名，
+    # 然后被「同名去重」删得只剩一本 —— 实测一口气误删上千条。
+    # 只拼两段：「新世纪接班人素质培养_劳动素质（二）」这种三段以上的，
+    # 中段是分类标签，拼进去反而更乱。
+    # `《》` 早在开头就被换成空格了 —— 这里若拿 `s` 判断有没有「分隔符」，
+    # `神探高斯系列《风向》` 会被误当成「有横线」的两段、直接拼成
+    # `神探高斯系列风向` 反倒还好，但 `我们怎样发现了——地震-艾萨克阿西莫夫`
+    # 这类三段会被错误合流。所以只在「真的还有冒号」时才走这条。
+    if (len(segs) == 2 and re.search(r"：|:", s)
+            and all(len(CJK.findall(x)) >= 2 for x in segs)):
+        segs = [segs[0] + segs[1]]
+    elif (len(segs) == 3 and re.search(r"：|:", s)
+            and len(CJK.findall(segs[0])) >= 4
+            and len(CJK.findall(segs[1])) >= 2
+            and not re.search(r"作者|著者|译者|编著|主编", s)
+            and not _looks_author(segs[1])):
+        # `五千年演义：三国兴亡-隐石霖`：丛书：分册-作者。三段里中间那段才是
+        # 这本的名字，不拼就被压成「五千年演义」，十几册一起被去重只剩一本。
+        # 末段是作者（`隐石霖` 这种冷门名字不在 AUTHOR_VOCAB 里，判不出），
+        # 但只要前面是「丛书：分册」的形状，末段一律当作者丢掉。
+        # `东胜神州志 第13集 作者：紫渊` 不算 —— 中段就是「作者：」本身。
+        segs = [segs[0] + segs[1]]
+    elif (len(segs) == 3 and EM_DASH_JOIN.search(raw_stem)
+            and (len(CJK.findall(segs[0])) >= 2 and len(CJK.findall(segs[1])) >= 2)
+            and (_looks_author(segs[2]) or len(CJK.findall(segs[2])) >= 4)):
+        # `我们怎样发现了——地震-艾萨克阿西莫夫`：丛书——分册-作者。
+        # `——` 已经把丛书名和分册名分开了，末段的人名是作者，丢掉。
+        segs = [segs[0] + segs[1]]
+    elif _series_join_ok(segs, raw_stem):
+        # `XX系列-分册`、`丛书——分册`、`XX系列《风向》`：第一段是丛书名，
+        # 后面跟着的才是这本的书名。不拼的话几百个别册全压缩成丛书名，
+        # 去重后只剩一本。
+        segs = [segs[0] + segs[1]]
+    elif len(segs) == 3 and segs[1].endswith(("中篇", "短篇", "长篇", "极短篇")):
+        # `009武侠文学系列-01中篇-002刀丛里的诗`：系列名 + 篇幅分类 + 篇名。
+        # 序号 `01` 是系列内部的编排号，篇幅分类（中篇/短篇）是有信息量的，
+        # 留着能区分「中篇·刀丛里的诗」和同名的短篇。
+        segs = [segs[0] + segs[1] + segs[2]]
+    elif _series_join_ok(segs[1:], raw_stem):
+        # 兜底：后两段满足拼接条件（`XX系列-分册` 的形状埋在第二段后面）
+        segs = [segs[0] + segs[2]]
+    # `东胜神州志 第13集 作者：紫渊`：卷号那一段被 pick_title 主动跳过了
+    # （`_looks_author` 之外还有一条「纯数字段是编号」），于是 segs 只剩
+    # [东胜神州志, 13] 这种两段。这时末段就是卷号的一部分，得拼回去，
+    # 否则「第13集 / 第14集 …」会全部撞成同一个书名，白丢十几本。
+    if _tail_vol_join_ok(segs, s):
+        segs = [segs[0] + segs[-1]]
+    # 拼完之后只剩一段：这就是最终书名，别再往下走「挑最像书名的段」那套。
+    # 不跳过的话，`中国现代文学百家张恨水` 会被 _looks_author 认出尾部是人名
+    # 之外的东西、又被「第一段短就换后面长的」那条规则二次改写。
+    joined = len(segs) == 1 and len(CJK.findall(segs[0])) >= 2
+    # 但「拼出来的两段」和「本来就是一整段」不是一回事：
+    # 前者是 `丛书名+分册名`，分册名才区分得开；后者是一整个书名。
+    # `大师语录—吴建民论国际风云` 拼成 `大师语录吴建民论国际风云` 之后若走
+    # joined 短路，就再也没机会认出「大师语录」是系列名 —— 库里 24 场不同
+    # 讲座谈到书名号一裹，全叫《大师语录…》，再被「同名去重」砍到只剩几本。
+    # 所以只有「本来就是一段」才短路；拼出来的继续过下面的作者识别。
+    joined_native = joined and len(SEG_SPLIT.split(s.strip())) <= 1
+    if not joined_native:
+        segs = [x for x in segs if not _looks_cat(x)] or segs  # 甩掉分类标签
+    rest = [] if joined else [x for x in segs if not _looks_author(x)]
+    if not rest:
+        if joined_native:
+            rest = [segs[0]]
+        else:
+            # 全段都像作者才走到这（`柳残阳 沥血伏龙`：柳残阳在人名表、
+            # 沥血伏龙在尾缀作者表）。挑最长的那个当书名，别傻乎乎取第一段。
+            rest = [max(segs, key=lambda x: len(CJK.findall(x)))]
     pick = rest[0]
     pick = BAD_CHARS.sub("", pick)
     pick = COUNTRY.sub("", pick)                           # 去掉 [日]/（美）这类标签
@@ -685,7 +1141,32 @@ def pick_title(stem):
     # 不这么做，同一作者的几十部作品会全部撞成「寄秋」一名，去重时只留一本，
     # 其余全被误删（实测这一条就误伤了上万条）。
     n0 = len(CJK.findall(pick))
-    if len(rest) > 1:
+    if joined:
+        # 拼出来的 `丛书名+分册名`：整段就是书名，别再拿两段去比长短。
+        # 唯一要处理的是「系列名本身只是个容器」——`大师语录`、`百家讲坛`，
+        # 底下每场内容都不一样。不切开的话 24 场演讲全叫《大师语录…》，
+        # 再被同名去重砍到只剩几本。判据是系列名命中了反查出来的前缀表，
+        # 说明它就是个系列头，分册名才是这本书的名字。
+        _parts = [x for x in SEG_SPLIT.split(s.strip()) if x and CJK.search(x)]
+        # 段首还挂着编号（`040210大师语录`）：先剥掉再跟系列头比对，
+        # 否则「大师语录」这个词永远匹配不上，切开规则等于没写。
+        _head_word = re.sub(r"^0{1,3}\d{1,3}|^\d{3,}", "", _parts[0]) \
+            if _parts else ""
+        # 也有 `04月0213大师语录` 这种两截编号，剥完还是不像；
+        # 再兜一次：整段以系列头结尾也算（系列头后面不会跟内容）。
+        if not _head_word or _head_word.endswith(tuple(SERIES_HEAD_SET)):
+            _head_word = next((w for w in SERIES_HEAD_SET
+                               if _parts and _parts[0].endswith(w)),
+                              _head_word) or _head_word
+        if (len(_parts) >= 2 and len(rest) == 1
+                and _head_word in PREFIX_VOCAB | SERIES_HEAD_SET):
+            _head = re.sub(r"[\s\-—_·、]+", "", _parts[0])
+            if rest[0].startswith(_head):
+                _cand = rest[0][len(_head):]
+                # 分册名至少 2 字，否则切完就剩碎片了
+                if len(CJK.findall(_cand)) >= 2:
+                    pick = _cand
+    elif len(rest) > 1:
         nxt = COUNTRY.sub("", BAD_CHARS.sub("", rest[1]))
         nn = len(CJK.findall(nxt))
         if DASH_HEAD.match(s) and "_" not in s:
@@ -719,7 +1200,10 @@ def pick_title(stem):
         pick = pick[:-1]
     if pick.endswith("的") and len(rest) > 1:             # 书名被切成了两半
         pick = "".join(rest)
-    else:
+    elif not joined:
+        # 拼好的「丛书+分册」是一个整体，里面还留着原先的分隔符，
+        # 交给 strip_trailing_author 会把分册名当「作者」剥掉
+        # （`中国现代文学百家-张恨水` → 只剩「中国现代文学百家」）。
         pick = strip_trailing_author(pick)
     # 结尾的副本序号：只吃「前面是分隔符」的 1~2 位数字（`书名 2` / `书名_2`）。
     # 老写法 re.sub(r"\d{1,2}$", "") 会误伤紧跟汉字的数字：
@@ -728,10 +1212,21 @@ def pick_title(stem):
     # 只吃「空格 + 1~2 位数字」这种副本序号。下划线/点后的数字多半是编号
     # 而不是副本（上市公司_13、阿信(27)），一口吃掉会把不同编号撞成同一个名字。
     pick = re.sub(r"\s\d{1,2}$", "", pick)
+    # 开头的数字别一刀切：`30天学会…`、`198庄园`、`13号院` 里那是书名的一部分，
+    # `17栋男生宿舍` 的「17」也是（原名《17栋男生宿舍》，作者井宇）。
+    # 只有**补零的**（`07萌翻…`、`01清兵入塞`、`007刀丛里的诗`）才是排序号，
+    # 直接丢掉（不是转成「七萌翻…」）。
+    pick = re.sub(r"^0+\d{1,3}(?=[^\d])", "", pick)
     m = re.match(r"^(\d{2,}|[A-Za-z]{1,2}\d{2,4})(["
                   + CJK_CH + r"].*)$", pick)
-    # 但 `30天学会…`、`60个瞬间` 里的数字是书名的一部分，不能切
-    if m and len(CJK.findall(m.group(2))) >= 4 and m.group(2)[0] not in MEASURE:
+    # 只有「后面不跟量词」才算流水号切掉（`200612创富星`）。
+    # 老条件是反的（跟量词才不切），但漏了「不跟量词也不该切」这一档 ——
+    # 写成了 `not in MEASURE`，于是 `17栋男生宿舍`（栋不在量词表）、
+    # `30天学会C语言`（天在表里反而不切…）两边都出错。
+    # 现在的口径：`22条军规`「条」、`30天`「天」是书名，保留；
+    # 只有 `200612创富星` 这种纯编号才削。
+    if (m and len(CJK.findall(m.group(2))) >= 4
+            and m.group(2)[0] not in MEASURE):
         pick = m.group(2)
     # 全角连字符（－—–）也得一起剥掉，否则 `飞狐的故事－孔庆东` 会留下个尾巴
     return pick.strip(" \t-_·.。，、－—–~～")
@@ -779,6 +1274,8 @@ _CN_VOL = {v: k for k, v in _CN_NUM.items() if v and k != "两"}
 def _num_cn(n):
     if n >= 100:
         return str(n)          # 上百的卷号直接用阿拉伯数字，别拼出「十十一」
+    if n == 0:
+        return "零"            # `大悲咒图解0` → `大悲咒图解零`，别把 0 原样留下
     if n <= 10:
         return _CN_VOL.get(n, str(n))
     if n < 20:
@@ -811,6 +1308,57 @@ def find_volume(stem, allow_bare=False):
     return None, None, None
 
 
+# 尾部序号：`(1)`、`（12）`、`_3`、` 4` —— 表示「第几季」，
+# 从没有序号的那份同名开始数第一季。
+ORD_TAIL = re.compile(r"[\s_]*[（(]\s*(\d{1,3})\s*[)）]\s*$"
+                      r"|[\s_](\d{1,3})$")
+
+
+def split_ordinal(stem):
+    """把尾部的序号摘出来：`花雕 (2)` → (`花雕`, 2)；没有序号返回 (原串, None)"""
+    m = ORD_TAIL.search(stem)
+    if not m:
+        return stem, None
+    return stem[:m.start()].rstrip(" -_·.。，、－—～~（( "), \
+        int(m.group(1) or m.group(2))
+
+
+_DIG_RUN = re.compile(r"\d+")
+
+
+def _num_cn_full(n):
+    """阿拉伯数字转中文读法：198 → 一百九十八、2013 → 二千零十三。
+
+    超过 4 位的长数字串（200612 / 11111）几乎都是日期或流水号，不是书名的一部分，
+    拼成「二十万零六百一十二」反而更难认 —— 直接丢掉。整万的数（`10000例`）
+    是个例外，读成「一万例」很自然，留着。
+    """
+    if n < 0:
+        return str(n)
+    if n >= 10000:
+        if n % 10000 == 0 and n < 10 ** 8:
+            return _num_cn_full(n // 10000) + "万"
+        return ""               # 日期 / 流水号，删掉
+    if n < 100:
+        return _num_cn(n)
+    d = "零一二三四五六七八九"
+    if n < 1000:
+        h, r = divmod(n, 100)
+        s = d[h] + "百"
+        if r == 0:
+            return s
+        return s + "零" + _num_cn(r) if r < 10 else s + _num_cn(r)
+    t, r = divmod(n, 1000)
+    s = d[t] + "千"
+    if r == 0:
+        return s
+    if r < 100:
+        return s + "零" + _num_cn(r)
+    h, r2 = divmod(r, 100)
+    s += d[h] + "百"
+    return s + ("零" + _num_cn(r2) if r2 else "")
+
+
 def vol_suffix(kind, val):
     if kind == "part":
         return "-" + ("上部" if val == "上" else "下部")
@@ -819,18 +1367,89 @@ def vol_suffix(kind, val):
     return ""
 
 
+_OPEN_CLOSE = {"（": "）", "(": ")", "【": "】", "[": "]", "〔": "〕", "｛": "｝"}
+
+
+def _unwrap_keep_inner(s):
+    """只把括号符号换成空格，里面的字留着：`【读品】第2辑` → ` 读品 第2辑`"""
+    for a, b in _OPEN_CLOSE.items():
+        s = s.replace(a, " ").replace(b, " ")
+    return s
+
+
+def pick_bare(stem):
+    """pick_title 取不出书名时的兜底：把所有括号、站点标语、噪声都剥光，
+    留下最长的那个含汉字的片段当名字。"""
+    s = re.sub(r"[｛][^｝]{0,40}[｝]", " ", stem)
+    s = re.sub(r"[〔〕]", " ", s)
+    a = _drop_brackets(s)
+    for w in NOISE_WORDS:
+        a = a.replace(w, " ")
+    a = PUB_TAIL.sub(" ", a)
+    segs = [x.strip() for x in SEG_SPLIT.split(a) if x and CJK.search(x)]
+    if not segs:
+        # 括号一剥就什么都不剩（`【读品】第2辑`）：书名往往就在括号里，
+        # 退回「只把括号符号换成空格、里面的字留着」再试一次。
+        b = _unwrap_keep_inner(s)
+        segs = [x.strip() for x in SEG_SPLIT.split(b) if x and CJK.search(x)]
+    if not segs:
+        return ""
+    s = max(segs, key=lambda x: len(CJK.findall(x)))
+    s = BAD_CHARS.sub("", s)
+    s = re.sub(r"[?*<>|\r\n\t.]", "", s)
+    s = re.sub(r"\s{2,}", " ", s).strip(" -_·、~～")
+    return s if len(CJK.findall(s)) >= 2 else ""
+
+
+def split_seqhead(stem):
+    """开头的补零排序号：`01 清兵入塞` / `001-血凤出世` / `07-萌翻…`
+
+    补零（01、002）是「这批文件按顺序排的编号」，不是书名的一部分 ——
+    直接削掉。`30天学会`、`198庄园`、`13号院` 没有补零，不动。
+    返回 (rest, 前缀)；前缀里带字母时（`01O侯爵夫人`）不削，免得吃错。
+    """
+    m = re.match(r"^(0{1,3}\d{1,3})([\s\-_.、]+)(?=\S)", stem)
+    if m and not re.search(r"[A-Za-z]", m.group(1)):
+        return stem[m.end():].lstrip(), m.group(1) + m.group(2)
+    return stem, ""
+
+
 def clean_name(filename, ext, allow_bare=False):
     stem = base_stem(filename, ext)
+    stem, _seq = split_seqhead(stem)
+    # 尾部序号（`(1)`/`_3`/` 4`）单独摘出来：它表示「第几季」，
+    # 不能混进书名里（老逻辑会留下 `必看说明1` 这种名字）。
+    stem, ordinal = split_ordinal(stem)
     kind, val, raw = find_volume(stem, allow_bare=allow_bare)
     suffix = vol_suffix(kind, val) if kind else ""
     if raw:
         stem = stem.replace(raw, " ")
     title = pick_title(stem)
+    if not title and raw and kind == "vol" and not CJK.search(stem):
+        # 整个文件名就只是一个「第X卷」（`第13卷 (5).mobi`）。卷号本身是个
+        # 带数字的碎片，不是书名，标签为「书名不可识别」，由 classify 统一判死。
+        # 主流程里卷号本来就会被剥掉，这里返回原名不影响任何判断。
+        return filename, suffix, False, ordinal
     if not title:
-        return filename, suffix, False
+        # 书名取不出来时，退一步用一个「干净版原文件名」：剥掉各种括号和
+        # 副本序号之后如果还剩东西，就用它 —— 至少不再带着 ` (2)` 这种尾巴。
+        # 直接返回原名的后果很严重：它会被当成品名参与去重，同系列几百本
+        # 全撞成一个名字，最后只剩一本。
+        title = pick_bare(stem)
+        if not title:
+            # 实在认不出书名（`【读品】第2辑`）：退而求其次，把原文件名里的
+            # 数字转成中文、括号剥掉。至少满足「名字里不留阿拉伯数字」，
+            # 也不能因为认不出就原样返回 —— 那会带着 ` (2)` 这种序号去撞名。
+            fallback = _DIG_RUN.sub(
+                lambda m: _num_cn_full(int(m.group(0))),
+                BAD_CHARS.sub("", _drop_brackets(stem))).strip()
+            fallback = re.sub(r"\s{2,}", " ", fallback).strip(" -_·、~～")
+            if not fallback:
+                return filename, suffix, False, ordinal
+            title = fallback
     title = re.sub(r"[?*<>|\r\n\t]", "", title).strip()
     if not title:
-        return filename, suffix, False
+        return filename, suffix, False, ordinal
     # 省略号在文件名里写成一串点（`爱，那么痛......之微寒`），留着会让
     # 扩展名判断出问题，直接去掉
     title = re.sub(r"\.{2,}", "", title)
@@ -846,10 +1465,23 @@ def clean_name(filename, ext, allow_bare=False):
     if len(CJK.findall(stripped)) >= 2:
         title = stripped
     if not title.strip():
-        return filename, suffix, False
+        return filename, suffix, False, ordinal
+    # 书名里不留阿拉伯数字（`元红3` → `元红三`、`198庄园` → `一百九十八庄园`）
+    # 补零的编排号例外（`中篇01`、`短篇03`）：那是系列内部的分类编号，
+    # 转成「中篇一」「短篇三」既不像书名，还会和真实卷次混在一样。
+    title = re.sub(
+        r"(?<=[\u4e00-\u9fff])0{1,3}\d{1,3}(?=[\u4e00-\u9fff])",
+        "", title)
+    title = _DIG_RUN.sub(lambda m: _num_cn_full(int(m.group(0))), title)
+    # 长数字串被整段丢掉后可能剩下一串空格/连字符（`200612创富星` → ` 创富星`）
+    title = re.sub(r"\s{2,}", " ", title).strip(" -_·.、~～")
+    if not title:
+        return filename, suffix, False, ordinal
     title = to_simplified(title)            # 繁体书名统一转简体
-    new = title + suffix + "." + (ext or "")
-    return new, suffix, new != filename
+    # 卷号/季号放在书名号外面：`作者《书名》-上部.epub`。
+    # 放里面（`作者《书名-上部》`）会被当成书名的一部分，看着别扭。
+    new = fmt_name(title) + suffix + "." + (ext or "")
+    return new, suffix, new != filename, ordinal
 
 
 # ------------------------------------------------------------------ 主流程
@@ -862,6 +1494,9 @@ def load_rows():
 def main():
     stage = sys.argv[1] if len(sys.argv) > 1 else "summary"
     rows, fields = load_rows()
+    # 作者库（tools/authors.py 生成）。没有也能跑，只是名字里不带作者。
+    n_auth = load_authors(os.path.join(OUT, "authors.json"))
+    print(f"作者库：{n_auth} 本")
     set_author_vocab([base_stem(r["文件名"], r["后缀"]) for r in rows])
     del_cnt = collections.Counter()
     del_samples = collections.defaultdict(list)
@@ -882,7 +1517,7 @@ def main():
     # 第一遍：只认明确的卷号，先拿一个「候选书名」
     for row in keeps:
         ext = (row.get("后缀") or "").strip()
-        _, _, _ = clean_name(row["文件名"], ext, allow_bare=False)
+        _, _, _ = clean_name(row["文件名"], ext, allow_bare=False)[0:3]
         row["_t0"] = pick_title(find_stem_minus_vol(row["文件名"], ext))
     cnt0 = collections.Counter(
         re.sub(r"[上下]$", "", r["_t0"]) for r in keeps)
@@ -891,12 +1526,17 @@ def main():
     for row in keeps:
         ext = (row.get("后缀") or "").strip()
         bare = cnt0.get(re.sub(r"[上下]$", "", row["_t0"]), 0) >= 2
-        new, suffix, changed = clean_name(row["文件名"], ext, allow_bare=bare)
+        new, suffix, changed, ordinal = clean_name(
+            row["文件名"], ext, allow_bare=bare)
         if suffix:
             vols[suffix] += 1
         row["_new"] = new
         row["_changed"] = changed
+        row["_ord"] = ordinal
+        # 去重键只用书名（不含作者）：同一本书有的副本带了作者、有的没带，
+        # 若把作者算进键里，它们会被当成两本不同的书各留一份。
         row["_base"] = os.path.splitext(new)[0]
+        row["_title_key"] = strip_author_prefix(row["_base"])
         rank = FMT_RANK.get(ext.lower(), 99)
         row["_rank"] = (rank, -int(row.get("大小(字节)") or 0))
 
@@ -918,21 +1558,149 @@ def main():
             if len(del_samples["无意义名"]) < 60:
                 del_samples["无意义名"].append(row["文件名"])
 
+    # ---- 先剔除「同一本书的重复拷贝」，再谈第几季 ----
+    #
+    # 之前把「同名 + 带序号」一律当成多季，结果 `醉逍遥书屋 (1)…(450)` 被标成
+    # 450 季、`红楼梦 (2)` 也变成「第二季」—— 它们根本不是分季，只是重复副本。
+    #
+    # 判别靠**文件大小**：同一本书的不同副本大小几乎一模一样（那 450 个全是
+    # 300 字节），而真正被分季/分章拆开的文件大小各不相同（`无以言退_1..79`
+    # 从 515 到 56 万字节都有）。所以：同一书名 + 同后缀 + 同大小的，只留一份。
+    by_fp = collections.defaultdict(list)
+    for row in keeps:
+        if row["_op"] != "keep":
+            continue
+        size = int(row.get("大小(字节)") or 0)
+        if size <= 0:
+            continue
+        by_fp[(row["_title_key"], (row.get("后缀") or "").lower(), size)].append(row)
+    for fp, grp in by_fp.items():
+        if len(grp) < 2:
+            continue
+        grp.sort(key=lambda r: (r["_ord"] is not None, r["_ord"] or 0))
+        for extra in grp[1:]:
+            extra["_op"] = "delete"
+            del_cnt["同名重复"] += 1
+            if len(del_samples["同名重复"]) < 60:
+                del_samples["同名重复"].append(extra["文件名"])
+
+    # 同名的重复副本删掉之后，组里若只剩一份带序号的，序号就没有意义了
+    # （`花雕 (2)` 只剩这一份 → 就叫 `花雕`，不叫「第二季」）。
+    _left = collections.Counter(
+        r["_title_key"] for r in keeps if r["_op"] == "keep")
+    for row in keeps:
+        if row["_op"] != "keep" or row["_ord"] is None:
+            continue
+        if _left.get(row["_title_key"], 0) > 1:
+            continue
+        stem0, ext0 = os.path.splitext(row["_new"])
+        tag = "-第%s季" % _num_cn_full(row["_ord"])
+        if stem0.endswith(tag):
+            row["_new"] = stem0[:-len(tag)] + ext0
+            row["_base"] = stem0[:-len(tag)]
+            row["_changed"] = True
+
+    # 同名带序号的算「季」：没有序号的那份是第一季，(1) 第二季、(2) 第三季…
+    # （没有无序号那份时，序号最小的当第一季）。只有一份的不用标。
+    # 必须放在去重之前：标完季它们的名字就不同了，不会再被当成重复删掉。
+    #
+    # 但「序号」有两义，必须先分辨：
+    #   · 分卷/分季：文件名带 `_1.._79`，各片大小**互不相同**
+    #     （`无以言退_1..79` 从 515 到 56 万字节）—— 这些是真分卷，得留着编号；
+    #   · 刷屏副本：`大院子女 (10)(11)(12)…` 大小都在 4~5KB 上下、彼此雷同，
+    #     是同一份内容被反复复制 —— 不是分卷，不该编到「第七十九季」。
+    # 判据：组内文件大小的**离散程度**。各片大小差异越大越像分卷，
+    # 越集中在同一量级越像副本。
+    # 刷屏副本：同一本书存了几十份（`大院子女` 91 份、`无以言退` 79 份、
+    # `丁玲陈企霞反党集团冤案始末` 81 份）。它们只是反复复制，不是分卷，
+    # 留着既占地方又让「第X季」编号虚高到七十九季。
+    # 判据：同书名 + 同后缀 + 副本数超过阈值 → 只留最大和最小的各一份
+    # （最大那份多半是完整版，最小那份有时是单独拆出来的序章，留着不亏）。
+    by_dup = collections.defaultdict(list)
+    for row in keeps:
+        if row["_op"] == "keep":
+            by_dup[(row["_title_key"], (row.get("后缀") or "").lower())].append(row)
+    for key, grp in by_dup.items():
+        if len(grp) < 8:                       # 8 份以内不算刷屏
+            continue
+        grp.sort(key=lambda r: -(int(r.get("大小(字节)") or 0)))
+        keep_two = {id(grp[0]), id(grp[-1])}
+        for extra in grp[1:-1]:
+            if extra["_op"] != "keep":
+                continue
+            extra["_op"] = "delete"
+            del_cnt["刷屏副本"] += 1
+            if len(del_samples["刷屏副本"]) < 60:
+                del_samples["刷屏副本"].append(extra["文件名"])
+
+    _grp = collections.defaultdict(list)
+    for row in keeps:
+        if row["_op"] == "keep":
+            _grp[row["_title_key"]].append(row)
+    for base, grp in _grp.items():
+        if len(grp) < 2 or all(r["_ord"] is None for r in grp):
+            continue
+        sizes = sorted(int(r.get("大小(字节)") or 0) for r in grp)
+        biggest = sizes[-1] or 1
+        # 中位数 / 最大值：分卷组里各片大小参差（比值小），
+        # 副本组里大家都跟最大的那片差不多（比值接近 1）。
+        median = sizes[len(sizes) // 2]
+        spread = median / biggest
+        # 真正的「多季/多卷」不会太多；超过这个数几乎一定是副本或章节切片。
+        # 放宽到 30 是因为确有超长系列（卫斯理 100+ 册），但 79 个「季」不合理。
+        MAX_SEASON = 30
+        is_volume = spread <= 0.5 and len(grp) <= MAX_SEASON
+        if not is_volume:
+            # 副本/切片：不编号，只留最大的那一份，其余按重复删掉
+            grp.sort(key=lambda r: -(int(r.get("大小(字节)") or 0)))
+            for extra in grp[1:]:
+                if extra["_op"] != "keep":
+                    continue
+                extra["_op"] = "delete"
+                del_cnt["同名重复"] += 1
+                if len(del_samples["同名重复"]) < 60:
+                    del_samples["同名重复"].append(extra["文件名"])
+            continue
+        grp.sort(key=lambda r: (r["_ord"] is None, r["_ord"] or 0))
+        for i, r in enumerate(grp, 1):
+            stem0, ext0 = os.path.splitext(r["_new"])
+            # 用 _num_cn_full：季号可以到三位数，_num_cn 上百会退回阿拉伯数字，
+            # 那就违背了「名字里不留数字」（`读者-第100季` 就是这么来的）。
+            tag = f"-第{_num_cn_full(i)}季"
+            r["_new"] = f"{stem0}{tag}{ext0}"
+            r["_changed"] = True
+            r["_base"] = stem0 + tag
+            if i <= 40:
+                vols[tag] += 1
+
+    # 最终去重按 (书名, 格式)：同一本书的 epub / mobi / pdf / txt 各留一份。
+    # 原来是「同名只留格式优先级最高的一份」，那样《红楼梦》的 mobi、pdf、txt
+    # 全被删掉，换设备就没法看了。用户明确要求每个格式都留。
     by_base = collections.defaultdict(list)
     for row in keeps:
         if row["_op"] == "keep":
-            by_base[row["_base"]].append(row)
+            by_base[(row["_title_key"], (row.get("后缀") or "").lower())].append(row)
     dup_groups = []
-    for base, group in by_base.items():
+    for key, group in by_base.items():
         if len(group) == 1:
             continue
         group.sort(key=lambda r: r["_rank"])
-        dup_groups.append((base, [g["文件名"] for g in group]))
+        dup_groups.append((key[0], [g["文件名"] for g in group]))
         for extra in group[1:]:
             extra["_op"] = "delete"
-    del_cnt["同名重复"] = sum(len(g) - 1 for _, g in dup_groups)
+    # 统计时按「同一书名」汇总，方便看出哪本书副本最多
+    same_title = collections.Counter(key[0] for key, g in by_base.items()
+                                     for _ in g)
+    # 注意用 `=` 会**覆盖**前面 by_fp 那轮已经累加的计数，导致「删除合计」
+    # 少报十万条、和 CSV 里实际的删除行数对不上（实测差 106720）。
+    # 这里改成累加，并且只加「最终去重」这一轮新增的量。
+    del_cnt["同名重复"] += sum(len(g) - 1 for _, g in dup_groups)
     dup_groups.sort(key=lambda x: -len(x[1]))
     final_keep = [r for r in keeps if r["_op"] == "keep"]
+
+    # 名字里还留着阿拉伯数字的：用户明确要求「改名不应包含数字之类」。
+    # 这里不自动删，先报出量来——量小是边角，量大说明还有规则没覆盖到。
+    dig_keep = [r for r in final_keep if _DIG_RUN.search(r["_new"])]
 
     lines = []
     a = lines.append
@@ -951,6 +1719,10 @@ def main():
     a("")
     a("=== 保留样本（随机 500）===")
     for r in random.sample(final_keep, min(500, len(final_keep))):
+        a(f"{r['文件名']}\t->\t{r['_new']}")
+    a("")
+    a(f"=== 改名后仍含阿拉伯数字：{len(dig_keep)} ===")
+    for r in dig_keep[:200]:
         a(f"{r['文件名']}\t->\t{r['_new']}")
     a("")
     a("=== 各删除原因样本 ===")
