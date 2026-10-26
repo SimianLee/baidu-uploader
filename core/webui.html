@@ -1431,6 +1431,8 @@ async function cacheClear(kind){
   setMsg('cacheMsg' + suffix, (d && d.msg) || '清理完成', d && d.ok ? true : false);
   if(d && d.ok) toast(`已清理：${c.t}`, 'ok');
   cacheRefresh();
+  // 清的是上传缓存时，实时进度卡也跟着归位（progress.json 已被后端一并清掉）
+  if(c.page === 'upload') pollNow();
 }
 
 /* ---------- 配置 ---------- */
@@ -1849,8 +1851,16 @@ function renderProgress(d){
     $('barLabel').textContent = '正在扫描目录…（9 万级文件约需半分钟）';
     $('barTip').textContent = d.pid ? 'PID ' + d.pid : '';
   } else {
+    // 没有任何进度记录（刚清完缓存 / 刚刷新）：整张卡回到初始样子，
+    // 不能留着上一轮的数字，否则清了缓存看起来跟没清一样。
+    $('stTotal').textContent = '—';
+    $('stDone').textContent = '—';
+    $('stFail').textContent = '—';
+    $('stPct').textContent = '—';
+    $('barFill').style.width = '0%';
     $('barLabel').textContent = '尚未开始';
     $('barTip').textContent = '';
+    $('nowFile').textContent = '';
   }
   $('bar').classList.toggle('anim', !!d.running);
 

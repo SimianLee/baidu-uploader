@@ -617,6 +617,19 @@ def cache_clear(kind: str):
         removed += c
         msg = "已清理本地改名记录（之后就不能回退上一次改名了）"
 
+    # progress.json（上一轮上传的最终进度）也是上传产生的一摊。不清的话，
+    # 缓存清完刷新页面，「实时进度」卡还挂着上一轮的 33 万文件和「已结束」，
+    # 看起来像清了个寂寞。走到这里时上传必然没在跑（resume/logs 上面已经挡过），
+    # 删掉是安全的；_last_progress 一并归零，防止接口把它当好值回传。
+    if kind in ("resume", "logs") and PROGRESS.exists():
+        try:
+            freed += PROGRESS.stat().st_size
+            removed += 1
+            PROGRESS.unlink()
+        except OSError:
+            pass
+        _last_progress.clear()
+
     return {"ok": True, "freed": freed, "freed_human": _human(freed),
             "count": removed, "msg": msg + f" · 释放 {_human(freed)}"}
 
