@@ -1070,28 +1070,18 @@
         <!-- 导出清单：只列目录、只出表，不动任何东西。
              「拿表格回来改」那一半已经并进「改名」页签的「按表格」模式，
              这里不再放第二个入口——两个入口做同一件事，行为还不一样
-             （以前外面这个能删、里面那个只能改名），谁都说不清该点哪个 -->
+             （以前外面这个能删、里面那个只能改名），谁都说不清该点哪个。
+             「含子目录」原来这里也单独挂了一个复选框，跟下面「扫描范围」
+             里的开关重复且长得不一样——导出也是一种扫描，统一跟共用开关走 -->
         <div class="panel" id="paneSheet">
-          <div class="row">
-            <div class="field w-auto nomargin">
-              <label>&nbsp;</label>
-              <div class="btnbar bottom">
-                <button class="btn ghost" onclick="panListExport()">导出文件清单</button>
-              </div>
-            </div>
-            <div class="field w-auto nomargin">
-              <label>&nbsp;</label>
-              <label class="chk" title="不勾就只列这一层的文件">
-                <input type="checkbox" id="shRecursive" checked>
-                <span>含子目录</span>
-              </label>
-            </div>
+          <div class="btnbar bottom">
+            <button class="btn ghost" onclick="panListExport()">导出文件清单</button>
           </div>
           <div class="hint" id="shExportHint">
             把「操作目录」里的文件列成一张表导出：<b>文件名、后缀、完整路径、大小、修改时间</b>，
             Excel 直接打开（带 BOM 不乱码）。表里<b>预留了「操作」和「新文件名」两列</b>——
             想照着表批量改名，就到<b>「改名」页签</b>里选<b>「按表格改名」</b>模式，
-            把这份表填好再选回去。<br>
+            把这份表填好再选回去。是否连子目录一起导出，用下面<b>「扫描范围」里的「含子目录」开关</b>。<br>
             目录很多时导出要先扫一遍，时间取决于文件数量（实施进度里可见）。
           </div>
         </div>
@@ -2213,8 +2203,9 @@ function panModeChange(){
   show('rnExtBox',    m !== 'csv');
   $('rnHint').classList.toggle('hidden', m === 'csv');   // 说明换成表格那一块的
   // 表格模式不扫网盘，「含子目录」在这没有意义。它不会被 panLockRecursive 抢回去：
-  // panTab 先跑 ogModeChange（那时已不在整理页签，会解锁），再跑这里
-  $('recBox').classList.toggle('hidden', m === 'csv');
+  // panTab 先跑 ogModeChange（那时已不在整理页签，会解锁），再跑这里。
+  // 只在改名页签里藏——导出清单页签要靠这个开关决定是否连子目录一起导出
+  $('recBox').classList.toggle('hidden', panTab_ === 'rename' && m === 'csv');
   $('rnHint').textContent = {
     replace: '把文件名里的某串替换成另一串（大小写不敏感）。',
     affix:   '统一加前缀 / 后缀，扩展名不受影响。',
@@ -2795,7 +2786,7 @@ async function panListExport(){
   let d;
   try{
     d = await api('/api/pan_list_export',
-                  {path: p, recursive: $('shRecursive').checked, src: panSrc,
+                  {path: p, recursive: $('panRecursive').checked, src: panSrc,
                    root: panSrc === 'local' ? (localRoot || p) : p});
   }finally{
     const fin = await api('/api/pan_scan_progress');
