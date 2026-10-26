@@ -869,21 +869,21 @@
 
       <!-- ---- 卡片 2：整理功能 ----
            四个页签按「要做什么动作」归类，不是按「东西在哪」：
-             改名      改文件名（含按表格改名）
-             归类整理  搬位置（归类移动 / 合并重复）
+             改名      改文件名（查找替换 / 加前后缀 / 去广告清理）
+             归档      搬位置（归类移动 / 合并重复）
              删除      删掉（文件 / 空文件夹）
-             导出清单  只把目录列成表，不改不删
-           以前「按表格操作」同时出现在改名页签里和外面单独一个页签，
-           两个入口做同一件事、行为还不一样（外面的能删，里面的只能改名），
-           现在统一成改名页签里的一种模式，外面那个页签瘦身为纯导出。 -->
+             按表修改  导出清单 → Excel 里定好新名 → 喂回来照表改
+           2026-10-26 二次精简：改名砍到三种常用模式；「按表格改名」从改名
+           下拉里挪出来，跟导出清单合成「按表修改」一个完整闭环（先出表、
+           再改表、后照表执行），改名下拉里不再有它 -->
       <div class="card">
         <h2><span class="idx">2</span>整理功能<small>先选动作 → 生成预览核对 → 再执行</small></h2>
 
         <div class="tabs">
           <button type="button" class="tab on" id="tabRename" onclick="panTab('rename')">改名</button>
-          <button type="button" class="tab" id="tabOrganize" onclick="panTab('organize')">归类整理</button>
+          <button type="button" class="tab" id="tabOrganize" onclick="panTab('organize')">归档</button>
           <button type="button" class="tab" id="tabDelete" onclick="panTab('delete')">删除</button>
-          <button type="button" class="tab" id="tabSheet" onclick="panTab('sheet')">导出清单</button>
+          <button type="button" class="tab" id="tabSheet" onclick="panTab('sheet')">按表修改</button>
         </div>
 
         <!-- 改名 -->
@@ -894,11 +894,7 @@
               <select id="rnMode" onchange="panModeChange()">
                 <option value="replace">查找替换</option>
                 <option value="affix">加前后缀</option>
-                <option value="serial">序号重命名</option>
-                <option value="regex">正则替换</option>
                 <option value="clean">去广告/括号清理</option>
-                <option value="title">只保留书名（整理小说用）</option>
-                <option value="csv">按表格改名（从导出的清单里读新名）</option>
               </select>
             </div>
             <div class="field sm" id="rnFindBox">
@@ -913,67 +909,15 @@
             <div class="field sm hidden" id="rnSuffixBox">
               <label>后缀</label><input id="rnSuffix" placeholder="如  - 终版">
             </div>
-            <div class="field sm hidden" id="rnStartBox">
-              <label>起始序号</label><input id="rnStart" type="number" value="1">
-            </div>
-            <div class="field sm hidden" id="rnWidthBox">
-              <label>位数</label><input id="rnWidth" type="number" value="3">
-            </div>
-            <div class="field sm hidden" id="rnTplBox">
-              <label>模板</label><input id="rnTpl" value="{n}_{name}">
-            </div>
-            <div class="field sm hidden" id="rnPatternBox">
-              <label>正则</label><input id="rnPattern" placeholder="\.S(\d+)E(\d+)\.">
-            </div>
-            <div class="field sm hidden" id="rnRepl2Box">
-              <label>替换为</label><input id="rnRepl2" placeholder="可用 \1 \2 引用捕获组">
-            </div>
             <div class="field sm" id="rnExtBox" style="flex:0 0 170px">
               <label>只处理后缀</label>
               <input id="rnExts" placeholder="留空=全部，如 txt,mobi"
                      title="只对这些后缀的文件改名，其余的一律不动。逗号分隔，大小写和点号都不挑">
             </div>
           </div>
-          <!-- 只保留书名时的分册处理开关（其他模式不显示） -->
-          <div class="row hidden" id="rnVolBox">
-            <label class="chk" title="套书被分成上下部/第几部时，把「第几部」留在新名字末尾，不然《XX》第一部和第二部会压成同一个名字">
-              <input type="checkbox" id="rnKeepVol" checked>
-              <span>保留分册（上部/下部/第1部…/番外）</span>
-            </label>
-            <label class="chk" title="《白蔷薇之二》这类系列序号。真实数据里「之X」多数是文章序号不是分册，容易串味，默认关">
-              <input type="checkbox" id="rnKeepSeries">
-              <span>同时保留系列序号（之2/之3…）</span>
-            </label>
-          </div>
           <div class="hint" id="rnHint">把文件名里的某串替换成另一串（大小写不敏感）。</div>
-          <!-- 「按表格改名」：把导出去的 CSV 在 Excel 里改好再喂回来。
-               跟上面那五种模式互斥——名字是表格里写好的，混着显示只会让人以为
-               还要再配一遍参数，所以它自己单独占一块 -->
-          <div class="row hidden" id="rnCsvBox">
-            <div class="field sm w-xl">
-              <label>选择 CSV 表格</label>
-              <input type="file" id="csvFile" accept=".csv,.txt" onchange="csvPick(this.files[0])">
-            </div>
-            <div class="field sm w-auto">
-              <label>&nbsp;</label>
-              <div class="btnbar bottom">
-                <button class="btn ghost sm" onclick="csvSample()">下载模板</button>
-              </div>
-            </div>
-          </div>
-          <div class="hint hidden" id="rnCsvHint">
-            把导出去的改名表格（<code>预览_xxx.csv</code>）在 Excel 里改好「新文件名」这一列，
-            选回来后点下面的<b>「生成预览」</b>。<br>
-            表格只需要两列：<b>原路径</b>（或「路径」「文件名」）和 <b>新文件名</b>（或「新名」「目标名」）；
-            没有表头也认，第 1 列当路径、第 2 列当新名。不在网盘根目录范围内的行、
-            新名字里带斜杠的行会被拦下并报出来。<br>
-            这个模式<b>不扫网盘</b>：名字就是表格里写好的，所以上面的「查找/模板」那些参数、
-            「含子目录」在这里都没有意义。<br>
-            表格里两行撞成同一个名字时<b>一律自动编号</b>（绝不能自己顶掉自己）；
-            真正由左上角「重名跳过 / 重名删除」决定的是表格<b>之外</b>同名的那份——
-            它不在这张表里，体现在执行那一刻：跳过＝那一条报失败，删除＝把它删掉。
-          </div>
-          <div class="hint hidden" id="rnCsvStat" style="color:#7fa0ff"></div>
+          <!-- 「按表格改名」已整体搬进「按表修改」页签：先导出清单、
+               在 Excel 里定好新文件名、再喂回来生成预览——一个页签一条完整流水线 -->
         </div>
 
         <!-- 整理：归类移动 / 合并重复 两种方式共用一个页签，它们本来就是同一件
@@ -1067,23 +1011,46 @@
           </div>
         </div>
 
-        <!-- 导出清单：只列目录、只出表，不动任何东西。
-             「拿表格回来改」那一半已经并进「改名」页签的「按表格」模式，
-             这里不再放第二个入口——两个入口做同一件事，行为还不一样
-             （以前外面这个能删、里面那个只能改名），谁都说不清该点哪个。
-             「含子目录」原来这里也单独挂了一个复选框，跟下面「扫描范围」
-             里的开关重复且长得不一样——导出也是一种扫描，统一跟共用开关走 -->
+        <!-- 按表修改：出表 → Excel 里定新名 → 喂回来照表改，一条流水线。
+             「按表格改名」原来挂在改名下拉里，2026-10-26 挪到这里——
+             它跟导出本来就是同一张表的两头，拆在两处反而要来回跳页签 -->
         <div class="panel" id="paneSheet">
           <div class="btnbar bottom">
             <button class="btn ghost" onclick="panListExport()">导出文件清单</button>
           </div>
           <div class="hint" id="shExportHint">
-            把「操作目录」里的文件列成一张表导出：<b>文件名、后缀、完整路径、大小、修改时间</b>，
-            Excel 直接打开（带 BOM 不乱码）。表里<b>预留了「操作」和「新文件名」两列</b>——
-            想照着表批量改名，就到<b>「改名」页签</b>里选<b>「按表格改名」</b>模式，
-            把这份表填好再选回去。是否连子目录一起导出，用下面<b>「扫描范围」里的「含子目录」开关</b>。<br>
+            第一步：把「操作目录」里的文件列成一张表导出——
+            <b>文件名、后缀、完整路径、大小、修改时间</b>，Excel 直接打开（带 BOM 不乱码）。
+            表里<b>预留了「操作」和「新文件名」两列</b>。是否连子目录一起导出，
+            用下面<b>「扫描范围」里的「含子目录」开关</b>。<br>
             目录很多时导出要先扫一遍，时间取决于文件数量（实施进度里可见）。
           </div>
+
+          <div class="sec" style="margin-top:14px">照表改名</div>
+          <div class="row">
+            <div class="field sm w-xl">
+              <label>选择 CSV 表格</label>
+              <input type="file" id="csvFile" accept=".csv,.txt" onchange="csvPick(this.files[0])">
+            </div>
+            <div class="field sm w-auto">
+              <label>&nbsp;</label>
+              <div class="btnbar bottom">
+                <button class="btn ghost sm" onclick="csvSample()">下载模板</button>
+              </div>
+            </div>
+          </div>
+          <div class="hint" id="shCsvHint">
+            第二步：把导出的表格（或模板）在 Excel 里改好<b>「新文件名」</b>这一列，
+            选回来后点下面的<b>「生成预览」</b>。<br>
+            表格只需要两列：<b>原路径</b>（或「路径」「文件名」）和 <b>新文件名</b>（或「新名」「目标名」）；
+            没有表头也认，第 1 列当路径、第 2 列当新名。不在整理范围里的行、
+            新名字里带斜杠的行会被拦下并报出来。<br>
+            照表改名<b>不扫网盘</b>：名字就是表格里写好的，「含子目录」等扫描参数在这里不参与计算。<br>
+            表格里两行撞成同一个名字时<b>一律自动编号</b>（绝不能自己顶掉自己）；
+            真正由左上角「重名跳过 / 重名删除」决定的是表格<b>之外</b>同名的那份——
+            它不在这张表里，体现在执行那一刻：跳过＝那一条报失败，删除＝把它删掉。
+          </div>
+          <div class="hint hidden" id="shCsvStat" style="color:#7fa0ff"></div>
         </div>
 
 
@@ -2035,17 +2002,13 @@ function panTab(k){
   // 执行时把策略悄悄带过去（setDup 内部会顺手作废手里的预览）
   if(typeof setDup === 'function') setDup('skip', true);   // silent：切页签不该弹提示
   if(typeof ogModeChange === 'function') ogModeChange();
-  // 回到改名页签时按当前模式重排一遍显隐：上次可能停在「按表格改名」，
-  // 那时第二行的那些参数是藏起来的
+  // 回到改名页签时按当前模式重排一遍显隐（三种模式各自的输入框）
   if(typeof panModeChange === 'function') panModeChange();
   // 删文件 / 删空文件夹两套输入只留一套，顺带刷新备份区路径和提示文案
   if(k === 'delete' && typeof dlModeChange === 'function') dlModeChange();
   panResetPlan();
-  // 「导出清单」只出表，没有计划可生成：把两颗生成按钮置灰，
-  // 别让人点了才在下面看到一句报错（panResetPlan 会重置状态，所以放它后面）
-  const isSheet = (k === 'sheet');
-  $('btnPanPlan').disabled = isSheet;
-  $('btnPanFresh').disabled = isSheet;
+  // 「按表修改」页签也要生成预览（照 CSV 表改），所以生成按钮不再按页签置灰——
+  // 四个页签现在都有各自的计划可生成
 }
 
 /* 整理方式切换：只显示当前方式需要的输入框，并更新说明文案。
@@ -2168,8 +2131,9 @@ function panLockRecursive(){
 function syncDupBox(){
   const mergeNoDup = panTab_ === 'organize' && ogMode() === 'merge'
     && $('ogMergeTarget').value === 'file';
+  // 按表修改页签同样要重名策略：表格里写好的名字也可能撞上表外的文件
   $('dupBox').classList.toggle('hidden',
-    !(panTab_ === 'rename' || panTab_ === 'organize') || mergeNoDup);
+    !((panTab_ === 'rename' || panTab_ === 'organize' || panTab_ === 'sheet')) || mergeNoDup);
 }
 
 function panResetPlan(){
@@ -2181,7 +2145,8 @@ function panResetPlan(){
   if(typeof pvRefresh === 'function') pvRefresh('');
 }
 
-/* 改名模式切换：只显示当前模式需要的输入框 */
+/* 改名模式切换：只显示当前模式需要的输入框。
+   2026-10-26 精简后只剩三种模式，「按表格改名」已整体搬进「按表修改」页签 */
 function panModeChange(){
   const m = $('rnMode').value;
   const show = (id, on) => $(id).classList.toggle('hidden', !on);
@@ -2189,32 +2154,10 @@ function panModeChange(){
   show('rnReplBox',   m === 'replace');
   show('rnPrefixBox', m === 'affix');
   show('rnSuffixBox', m === 'affix');
-  show('rnStartBox',  m === 'serial');
-  show('rnWidthBox',  m === 'serial');
-  show('rnTplBox',    m === 'serial');
-  show('rnPatternBox', m === 'regex');
-  show('rnRepl2Box',   m === 'regex');
-  show('rnVolBox',     m === 'title');
-  // 「按表格改名」独占一块：它跟上面这些参数互斥（名字是表格里写好的），
-  // 所以连「只处理后缀」一起藏掉——留着只会让人以为还得再配一遍
-  show('rnCsvBox',    m === 'csv');
-  show('rnCsvHint',   m === 'csv');
-  show('rnCsvStat',   m === 'csv' && !!$('rnCsvStat').textContent);
-  show('rnExtBox',    m !== 'csv');
-  $('rnHint').classList.toggle('hidden', m === 'csv');   // 说明换成表格那一块的
-  // 表格模式不扫网盘，「含子目录」在这没有意义。它不会被 panLockRecursive 抢回去：
-  // panTab 先跑 ogModeChange（那时已不在整理页签，会解锁），再跑这里。
-  // 只在改名页签里藏——导出清单页签要靠这个开关决定是否连子目录一起导出
-  $('recBox').classList.toggle('hidden', panTab_ === 'rename' && m === 'csv');
   $('rnHint').textContent = {
     replace: '把文件名里的某串替换成另一串（大小写不敏感）。',
     affix:   '统一加前缀 / 后缀，扩展名不受影响。',
-    serial:  '按顺序编号。模板里 {n}=序号、{name}=原文件名。',
-    regex:   '正则作用于「文件名（不含扩展名）」，可用 \\1 \\2 引用捕获组。',
     clean:   '自动去掉网址、广告词、多余括号和空格；清理后为空则保留原名。',
-    title:   '按 书名号 → 残缺书名号 → 作者标记 → 前导标签 → 空格-空格 的次序提取书名，'
-             + '再清掉尾部标注（全本/完结/TXT）。'
-             + '五种信号都没命中就原样保留——宁可不动，也不乱改。',
   }[m] || '';
 }
 
@@ -2684,16 +2627,16 @@ function ogLogPhase(sig){
   ogLogAdd(sig);
 }
 
-/* ---------- 按表改名（CSV 导入） ----------
+/* ---------- 按表改名（CSV 导入，住在「按表修改」页签） ----------
    典型用法：把改名预览导出成 CSV → 在 Excel 里逐行定好「新文件名」→ 喂回来执行。
    这样几万条人工判断过的名字，不必在界面里一条条操作。
    这里不玩任何「聪明」的花样：表格里写什么就改成什么，与批量改名那几个模式无关。
-   生成预览统一用下方那颗「生成预览」按钮——panPlan() 看到 rnMode=csv 就走这条路 */
+   生成预览统一用下方那颗「生成预览」按钮——panPlan() 在按表修改页签就走这条路 */
 let csvText = '';
 
 function csvPick(f){
   csvText = '';
-  const stat = $('rnCsvStat');
+  const stat = $('shCsvStat');
   if(!f){ stat.textContent = ''; stat.classList.add('hidden'); return; }
   const rd = new FileReader();
   rd.onload = () => {
@@ -2728,7 +2671,7 @@ function csvPick(f){
 /* 表格 → 预览。跟 pan_plan 的返回同形，所以预览渲染、执行按钮、
    预览文件下拉全部照原样复用 */
 function csvAfterPlan(d){
-  const stat = $('rnCsvStat');
+  const stat = $('shCsvStat');
   const errs = d.errors || [];
   const total = d.total || 0;
   stat.textContent = total
@@ -2769,10 +2712,9 @@ function csvSample(){
   downloadText('按表改名_模板.csv', csv);
 }
 
-/* ---------- 导出清单 ----------
-   只出表，不改不删。以前这个页签还挂着「按表格操作」（改名+删除），
-   跟「改名」页签里的「按表格改名」是两个入口做同一件事、行为还不一样，
-   2026-10-26 重构时合并掉了：表格一律走改名页签，这里只管导出。 */
+/* ---------- 导出清单（「按表修改」页签的前半段） ----------
+   只出表，不改不删。出表之后在 Excel 里定好「新文件名」，
+   再从本页签的 CSV 入口喂回来生成预览——出表和照表改现在同住一个页签 */
 
 /* 导出当前目录的文件清单。目录一多就要扫一阵，所以照例把进度摊给轮询 */
 async function panListExport(){
@@ -3057,39 +2999,19 @@ async function panPlan(refresh){
 
   if(panTab_ === 'rename'){
     const m = $('rnMode').value;
-    if(m === 'csv'){
-      // 「按表格改名」：名字是表格里写好的，不扫网盘，也不用上面那些参数。
-      // 但重名策略仍然生效——表格里两行撞成同一个名字时按它办
-      if(!csvText.trim()){
-        setMsg('panMsg', '请先选一张 CSV 表格；没有的话点上面的「下载模板」照着装', false);
-        return;
-      }
-      body = {kind: 'rename_csv', csv: csvText, ondup: panDup};
-    }else{
-      body.kind = 'rename';
-      body.mode = m;
-      // 重名策略对改名同样有效，而且**影响计划本身**（跳过给撞车的编号、删除直接删旧），
-      // 所以必须发过去：既让后端照它算，也让它进指纹（换策略不会拿旧预览顶上）
-      body.ondup = panDup;
-      body.exts = $('rnExts').value;    // 留空=全部；填了就只改这些后缀的文件
-      body.params = ({
-        replace: {find: $('rnFind').value, replace: $('rnRepl').value},
-        affix:   {prefix: $('rnPrefix').value, suffix: $('rnSuffix').value},
-        serial:  {start: +$('rnStart').value || 1, width: +$('rnWidth').value || 3,
-                  template: $('rnTpl').value},
-        regex:   {pattern: $('rnPattern').value, repl: $('rnRepl2').value},
-        clean:   {},
-        // 分册/系列要不要留，得发给后端：它俩改变结果，也必须进指纹，
-        // 不然改了开关还拿上一份预览顶上，用户会以为开关没生效
-        title:   {keep_volume: $('rnKeepVol').checked,
-                  keep_series: $('rnKeepSeries').checked}
-      })[m];
-      if(m === 'replace' && !body.params.find){
-        setMsg('panMsg', '请先填写「查找」内容', false); return;
-      }
-      if(m === 'regex' && !body.params.pattern){
-        setMsg('panMsg', '请先填写正则表达式', false); return;
-      }
+    body.kind = 'rename';
+    body.mode = m;
+    // 重名策略对改名同样有效，而且**影响计划本身**（跳过给撞车的编号、删除直接删旧），
+    // 所以必须发过去：既让后端照它算，也让它进指纹（换策略不会拿旧预览顶上）
+    body.ondup = panDup;
+    body.exts = $('rnExts').value;    // 留空=全部；填了就只改这些后缀的文件
+    body.params = ({
+      replace: {find: $('rnFind').value, replace: $('rnRepl').value},
+      affix:   {prefix: $('rnPrefix').value, suffix: $('rnSuffix').value},
+      clean:   {},
+    })[m];
+    if(m === 'replace' && !body.params.find){
+      setMsg('panMsg', '请先填写「查找」内容', false); return;
     }
   }else if(panTab_ === 'organize'){
     // 一个页签三种整理方式，挑出来的 kind 记下来：下面的结果文案要按它措辞
@@ -3117,11 +3039,14 @@ async function panPlan(refresh){
               target: $('ogMergeTarget').value, how: $('ogMergeHow').value};
     }
   }else if(panTab_ === 'sheet'){
-    // 「导出清单」只出表，不改不删，所以没有预览可生成。
-    // 照表格操作请去「改名」页签选「按表格改名」——去重后只有那一个入口
-    setMsg('panMsg', '「导出清单」只生成表格，不动文件。想照表格批量改名，'
-      + '请到「改名」页签选「按表格改名」模式。', false);
-    return;
+    // 「按表修改」：名字是表格里写好的，不扫网盘，也不用扫描参数。
+    // 但重名策略仍然生效——表格里两行撞成同一个名字时按它办
+    if(!csvText.trim()){
+      setMsg('panMsg', '请先选一张 CSV 表格；没有的话先「导出文件清单」，'
+        + '或点「下载模板」照着装', false);
+      return;
+    }
+    body = {kind: 'rename_csv', csv: csvText, ondup: panDup};
   }else if(panTab_ === 'delete'){
     if(dlTarget() === 'empty'){
       // 空文件夹（原先挂在整理归档页签）。recursive 恒为 true：后端也会强制递归，
