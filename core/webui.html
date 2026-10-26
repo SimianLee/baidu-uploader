@@ -146,6 +146,10 @@
   a.btn{text-decoration:none}
   a.btn:hover{text-decoration:none}
   .btnbar{display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+  /* 跟输入框并排时按钮要沉到底边对齐（输入框下面挂着 hint，比按钮高） */
+  .btnbar.bottom{align-items:flex-end}
+  .btnbar.center{align-items:center}
+  .btnbar.wrap{flex-wrap:wrap}
   .divider{height:1px;background:var(--line);margin:16px -20px}
 
   /* ---------- 子功能切换标签 ---------- */
@@ -427,6 +431,88 @@
   .opbadge.auto{background:#2a2410;color:#ffc85c;border-color:#5c4a1a}
   /* 表格窄列里徽章别折行，「撞名编号」折成两行很难看 */
   table.optbl .opbadge{white-space:nowrap}
+
+  /* ==========================================================
+     统一规格（2026-10-26 整理）
+     以前每个控件都在 HTML 里写 inline flex / padding，宽度和间距散落在
+     一千多行里，改一个地方得全文搜。这里集中成三类工具类：
+       宽度  .field.w-xs / .w-sm / .w-md / .w-lg / .w-xl / .w-auto
+       按钮  .btn（默认）/ .btn.sm   再乘颜色 .ghost / .green / .danger
+       输入  .field 下的 input/select/textarea 一律同高同圆角
+     新增控件请直接用类，别再写 inline style。
+     ========================================================== */
+
+  /* ---------- 字段宽度 ---------- */
+  .field.w-auto{flex:0 0 auto;min-width:0}
+  .field.w-xs{flex:0 0 110px;min-width:96px}
+  .field.w-sm{flex:0 0 150px;min-width:120px}
+  .field.w-md{flex:0 0 210px;min-width:150px}
+  .field.w-lg{flex:0 0 260px;min-width:180px}
+  .field.w-xl{flex:1 1 320px;min-width:220px}
+  .field.w-full{flex:1 1 100%}
+  /* 按钮行里的字段：按钮底部要跟输入框对齐，所以去掉下边距 */
+  .field.nomargin{margin-bottom:0}
+  /* 摆在按钮行里的说明文字不该自带上边距，否则整行会被顶歪 */
+  .hint.flat{margin:0}
+
+  /* ---------- 输入框：文件选择框也拉回同一套外观 ----------
+     原生 file input 高度、字号、圆角都跟文本框不一致，摆一排会明显高低错落。
+     ::file-selector-button 是它的内建按钮，单独给它套 .btn.sm 的观感。 */
+  .field input[type=file]{
+    padding:7px 10px;font-size:12px;cursor:pointer;
+  }
+  .field input[type=file]::file-selector-button{
+    background:#1b2231;border:1px solid var(--line-hi);color:#c3cbdd;
+    border-radius:7px;padding:5px 11px;margin-right:10px;
+    font-size:12px;font-family:inherit;cursor:pointer;transition:.15s;
+    line-height:normal;
+  }
+  .field input[type=file]::file-selector-button:hover{background:#232c40;border-color:#3d4863}
+  /* 数字框右侧的上下箭头占位，跟其他输入框拉开时别让它更宽 */
+  .field input[type=number]{font-variant-numeric:tabular-nums}
+
+  /* ---------- 顶部页面导航（上传 / 整理） ---------- */
+  .pagenav{
+    display:flex;gap:6px;padding:5px;margin-bottom:18px;
+    background:rgba(20,25,37,.72);border:1px solid var(--line);border-radius:14px;
+    backdrop-filter:blur(8px);box-shadow:var(--shadow);
+  }
+  .pagetab{
+    flex:1;display:flex;align-items:center;justify-content:center;gap:9px;
+    padding:11px 16px;border:0;border-radius:10px;background:transparent;
+    color:var(--muted);font-family:inherit;font-size:14px;font-weight:500;
+    cursor:pointer;transition:.18s;white-space:nowrap;
+  }
+  .pagetab:hover{color:#c3cbdd;background:#1a2130}
+  .pagetab.on{
+    background:linear-gradient(135deg,#2a3d6b,#1e2b4d);color:#e8ebf2;font-weight:600;
+    box-shadow:0 4px 14px -6px #4f7cffaa, inset 0 1px 0 rgba(255,255,255,.06);
+  }
+  .pagetab .ico{width:17px;height:17px;flex:0 0 17px;fill:currentColor}
+  /* 页签上的小圆点：那页正在跑任务时亮着，切走了也能看见 */
+  .pagetab .live{
+    width:7px;height:7px;border-radius:50%;background:var(--green);
+    box-shadow:0 0 0 3px rgba(47,207,148,.18);animation:pulse 1.2s infinite;
+  }
+  @media(max-width:520px){.pagetab{font-size:13px;padding:10px 8px;gap:6px}}
+
+  /* ---------- 清理缓存 ---------- */
+  .cachegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(238px,1fr));gap:10px}
+  .cacheitem{
+    display:flex;flex-direction:column;gap:7px;padding:12px 14px;
+    border:1px solid var(--line);border-radius:11px;background:#10141d;
+  }
+  .cacheitem .ct{
+    display:flex;align-items:center;gap:7px;
+    font-size:12.5px;color:#c3cbdd;font-weight:500;
+  }
+  .cacheitem .ct .n{margin-left:auto;font-size:11px;color:var(--muted2);font-variant-numeric:tabular-nums}
+  .cacheitem .cs{flex:1;font-size:11px;color:var(--muted2);line-height:1.5}
+  .cacheitem .cb{display:flex;align-items:center;gap:9px}
+  .cacheitem .sz{font-size:13px;font-weight:700;color:var(--yellow);font-variant-numeric:tabular-nums}
+  .cacheitem .sz.zero{color:var(--muted2);font-weight:400}
+  .cacheitem.danger{border-color:#4d2530;background:#1a1016}
+  .cacheitem.danger .ct{color:#ffb3ba}
 </style>
 </head>
 <body>
@@ -454,9 +540,22 @@
     <span class="chip" id="tokenChip"><span class="dot"></span>检查授权中…</span>
   </header>
 
-  <div class="grid">
-    <!-- ============ 左列 ============ -->
-    <div class="col">
+  <!-- ===== 页面导航：上传 / 整理 ===== -->
+  <nav class="pagenav">
+    <button type="button" class="pagetab on" id="pageTabUpload" onclick="switchPage('upload')">
+      <svg class="ico" viewBox="0 0 24 24"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9L12 3zm0 2.3 5.7 3.2v6.1L12 17.9l-5.7-3.3V8.5L12 5.3zM11 9v3H8v2h3v3h2v-3h3v-2h-3V9h-2z"/></svg>
+      <span>上传</span>
+      <span class="live hidden" id="liveUpload" title="有上传任务正在后台跑"></span>
+    </button>
+    <button type="button" class="pagetab" id="pageTabOrganize" onclick="switchPage('organize')">
+      <svg class="ico" viewBox="0 0 24 24"><path d="M3 5h7v2H3V5zm0 6h7v2H3v-2zm0 6h7v2H3v-2zm11-9 7 5-7 5V8z"/></svg>
+      <span>整理</span>
+      <span class="live hidden" id="liveOrganize" title="整理正在扫描或执行"></span>
+    </button>
+  </nav>
+
+  <!-- ============ 页面 1：上传 ============ -->
+  <div id="pageUpload" class="col">
 
       <div class="card">
         <h2><span class="idx">1</span>参数设置与账号授权<small>改动自动保存，也可手动点保存</small></h2>
@@ -625,7 +724,7 @@
               <option value="by_ext">按扩展名分目录（mp4/pdf/txt…）</option>
             </select>
           </div>
-          <div class="field sm" style="flex:0 0 210px">
+          <div class="field sm w-md">
             <label>试传数量(0=全部)</label>
             <input id="limit" type="number" min="0" value="0" style="padding:8px 10px">
           </div>
@@ -650,7 +749,7 @@
           看看有没有撞名的，命中的按这里的策略处理。
         </div>
 
-        <div class="btnbar" style="align-items:flex-end;margin-top:10px">
+        <div class="btnbar bottom" style="margin-top:10px">
           <button class="btn ghost" onclick="dryrun()" id="btnDry">干跑预览</button>
           <button class="btn ghost" id="btnRescan" onclick="rescanUpload()"
                   title="忽略断点记录：本地扫到的文件全部重新上传一遍。用于「记录说传完了、担心其实有漏」时做一次彻底核对">重新扫描上传</button>
@@ -658,7 +757,7 @@
           <button class="btn green" id="btnStart" onclick="startUpload()">开始上传</button>
           <button class="btn danger" id="btnStop" onclick="stopUpload()" disabled>停止</button>
         </div>
-        <div class="btnbar" style="align-items:center;margin-top:9px">
+        <div class="btnbar center" style="margin-top:9px">
           <div class="dupseg" id="nrBox" style="margin:0"
                title="勾上后本次不看上传记录，把本地扫到的文件全部纳入上传。网盘里已有相同内容的会走秒传，基本不耗流量、不重复占空间">
             <label class="chkchip" id="nrChip">
@@ -691,15 +790,31 @@
         <pre class="term headroom empty" id="log" data-empty="等待上传任务…暂无日志"></pre>
       </div>
 
-      <!-- ============ 卡片 4：网盘整理 / 改名 / 删除 ============ -->
+      <!-- ---- 卡片 4：清理缓存记录 ---- -->
       <div class="card">
-        <h2><span class="idx">4</span>网盘整理 · 批量改名 · 批量删除
-          <small>网盘沙盒或本地文件夹，越界自动拦截</small></h2>
+        <h2><span class="idx">4</span>清理缓存记录<small>只清本机的运行记录，不动网盘上的文件</small></h2>
+        <div class="cachegrid" id="cacheGridUpload"></div>
+        <div class="btnbar" style="margin-top:12px">
+          <button class="btn ghost sm" onclick="cacheRefresh()">刷新占用</button>
+          <div class="spacer"></div>
+          <span class="hint flat" id="cacheHintUpload"></span>
+        </div>
+        <div class="msg" id="cacheMsgUpload"></div>
+      </div>
 
-        <!-- 整理对象：网盘 / 本地。下面改名、整理归档、批量删除三套功能两边通用，
+  </div><!-- /pageUpload -->
+
+  <!-- ============ 页面 2：整理 ============ -->
+  <div id="pageOrganize" class="col hidden">
+
+      <!-- ---- 卡片 1：整理目标 ---- -->
+      <div class="card">
+        <h2><span class="idx">1</span>整理目标<small>网盘沙盒或本地文件夹，越界自动拦截</small></h2>
+
+        <!-- 整理对象：网盘 / 本地。下面改名、归类整理、删除三套功能两边通用，
              因为后端对本地目录实现了同一套「列目录 / 改名 / 移动 / 删除」接口 -->
         <div class="row" style="margin-top:2px">
-          <div class="field sm" style="flex:0 0 auto">
+          <div class="field sm w-auto">
             <label>整理对象</label>
             <div class="dupseg" style="margin:0">
               <button type="button" class="segbtn on" id="srcRemote"
@@ -708,14 +823,14 @@
                       onclick="setPanSrc('local')">本地文件夹</button>
             </div>
           </div>
-          <div class="field" style="flex:1 1 260px">
+          <div class="field w-xl">
             <label>操作目录</label>
             <input id="panPath" placeholder="/apps/baidu_uploader" spellcheck="false"
                    oninput="if(panSrc === 'local') syncLocalRoot(this.value, false)">
           </div>
-          <div class="field" style="flex:0 0 auto;min-width:0">
+          <div class="field w-auto">
             <label>&nbsp;</label>
-            <div class="btnbar" style="align-items:flex-end">
+            <div class="btnbar bottom">
               <button class="btn ghost" onclick="panBrowse()">浏览</button>
               <button class="btn ghost" onclick="panUp()">上一级</button>
             </div>
@@ -733,18 +848,31 @@
           点进子目录只是换起点，范围不会跟着变窄。
         </div>
         <pre class="term headroom empty" id="panList" data-empty="点「浏览」列出该目录下的子目录与文件"></pre>
+      </div>
+
+      <!-- ---- 卡片 2：整理功能 ----
+           四个页签按「要做什么动作」归类，不是按「东西在哪」：
+             改名      改文件名（含按表格改名）
+             归类整理  搬位置（归类移动 / 合并重复）
+             删除      删掉（文件 / 空文件夹）
+             导出清单  只把目录列成表，不改不删
+           以前「按表格操作」同时出现在改名页签里和外面单独一个页签，
+           两个入口做同一件事、行为还不一样（外面的能删，里面的只能改名），
+           现在统一成改名页签里的一种模式，外面那个页签瘦身为纯导出。 -->
+      <div class="card">
+        <h2><span class="idx">2</span>整理功能<small>先选动作 → 生成预览核对 → 再执行</small></h2>
 
         <div class="tabs">
-          <button class="tab on" id="tabRename" onclick="panTab('rename')">批量改名</button>
-          <button class="tab" id="tabOrganize" onclick="panTab('organize')">整理归档</button>
-          <button class="tab" id="tabDelete" onclick="panTab('delete')">批量删除</button>
-          <button class="tab" id="tabSheet" onclick="panTab('sheet')">导出 / 按表格操作</button>
+          <button type="button" class="tab on" id="tabRename" onclick="panTab('rename')">改名</button>
+          <button type="button" class="tab" id="tabOrganize" onclick="panTab('organize')">归类整理</button>
+          <button type="button" class="tab" id="tabDelete" onclick="panTab('delete')">删除</button>
+          <button type="button" class="tab" id="tabSheet" onclick="panTab('sheet')">导出清单</button>
         </div>
 
         <!-- 改名 -->
         <div class="panel on" id="paneRename">
           <div class="row">
-            <div class="field sm" style="flex:0 0 150px">
+            <div class="field sm w-sm">
               <label>改名模式</label>
               <select id="rnMode" onchange="panModeChange()">
                 <option value="replace">查找替换</option>
@@ -753,7 +881,7 @@
                 <option value="regex">正则替换</option>
                 <option value="clean">去广告/括号清理</option>
                 <option value="title">只保留书名（整理小说用）</option>
-                <option value="csv">按表格改名（导入 CSV）</option>
+                <option value="csv">按表格改名（从导出的清单里读新名）</option>
               </select>
             </div>
             <div class="field sm" id="rnFindBox">
@@ -805,13 +933,13 @@
                跟上面那五种模式互斥——名字是表格里写好的，混着显示只会让人以为
                还要再配一遍参数，所以它自己单独占一块 -->
           <div class="row hidden" id="rnCsvBox">
-            <div class="field sm" style="flex:1 1 320px">
+            <div class="field sm w-xl">
               <label>选择 CSV 表格</label>
               <input type="file" id="csvFile" accept=".csv,.txt" onchange="csvPick(this.files[0])">
             </div>
-            <div class="field sm" style="flex:0 0 auto">
+            <div class="field sm w-auto">
               <label>&nbsp;</label>
-              <div class="btnbar" style="align-items:flex-end">
+              <div class="btnbar bottom">
                 <button class="btn ghost sm" onclick="csvSample()">下载模板</button>
               </div>
             </div>
@@ -836,14 +964,14 @@
              跟「删文件」摆在一起（都是删，只是删的东西不一样） -->
         <div class="panel" id="paneOrganize">
           <div class="row">
-            <div class="field sm" style="flex:0 0 210px">
+            <div class="field sm w-md">
               <label>整理方式</label>
               <select id="ogMode" onchange="ogModeChange()">
                 <option value="organize">归类移动（搬进归档目录）</option>
                 <option value="merge">合并重复 → txt(1) 合回 txt / a(1).pdf 合回 a.pdf</option>
               </select>
             </div>
-            <div class="field sm og-org" style="flex:0 0 150px">
+            <div class="field sm og-org w-sm">
               <label>归档方式</label>
               <select id="ogBy">
                 <option value="category">按大类（视频/文档/图片…）</option>
@@ -855,7 +983,7 @@
               <label>归档到</label>
               <input id="ogDest" placeholder="/apps/baidu_uploader/归档">
             </div>
-            <div class="field sm og-merge hidden" style="flex:0 0 260px">
+            <div class="field sm og-merge hidden w-lg">
               <label>处理哪一层重复</label>
               <select id="ogMergeTarget" onchange="ogMergeSync()">
                 <option value="both">目录和文件都处理（推荐）</option>
@@ -865,7 +993,7 @@
             </div>
             <!-- 文案随「处理哪一层」变：文件层的「不删」是只把最小号正名，
                  目录层的「不删」是搬回主目录，混着说会让人以为两头一个规矩 -->
-            <div class="field sm og-merge hidden" style="flex:0 0 250px">
+            <div class="field sm og-merge hidden w-lg">
               <label>重复的那份怎么处理</label>
               <select id="ogMergeHow">
                 <option value="dedupe">删除重复那份（推荐）</option>
@@ -883,7 +1011,7 @@
              先后关系，反而是「又一种删」，跟批量删除摆在一起更好找 -->
         <div class="panel" id="paneDelete">
           <div class="row">
-            <div class="field sm" style="flex:0 0 220px">
+            <div class="field sm w-md">
               <label>删什么</label>
               <select id="dlTarget" onchange="dlModeChange()">
                 <option value="file">文件（按右边的条件筛）</option>
@@ -895,7 +1023,7 @@
             <div class="field sm dl-file"><label>正则</label><input id="dlRegex" placeholder="可选"></div>
             <div class="field sm dl-file"><label>大于(MB)</label><input id="dlMin" type="number" placeholder="0"></div>
             <div class="field sm dl-file"><label>小于(MB)</label><input id="dlMax" type="number" placeholder="0"></div>
-            <div class="field sm dl-file" style="flex:0 0 210px">
+            <div class="field sm dl-file w-md">
               <label>中文名</label>
               <select id="dlCjk" onchange="dlSyncHint()">
                 <option value="any">不限制</option>
@@ -922,18 +1050,19 @@
           </div>
         </div>
 
-        <!-- 导出文件清单 / 按表格操作（改名 + 删除）
-             两件事是配套的：导出的清单里就带着「操作」「新文件名」两个空列，
-             在 Excel 里填好再选回来，不必手抄几千行路径 -->
+        <!-- 导出清单：只列目录、只出表，不动任何东西。
+             「拿表格回来改」那一半已经并进「改名」页签的「按表格」模式，
+             这里不再放第二个入口——两个入口做同一件事，行为还不一样
+             （以前外面这个能删、里面那个只能改名），谁都说不清该点哪个 -->
         <div class="panel" id="paneSheet">
           <div class="row">
-            <div class="field sm" style="flex:0 0 auto;min-width:0">
+            <div class="field w-auto nomargin">
               <label>&nbsp;</label>
-              <div class="btnbar" style="align-items:flex-end">
+              <div class="btnbar bottom">
                 <button class="btn ghost" onclick="panListExport()">导出文件清单</button>
               </div>
             </div>
-            <div class="field sm" style="flex:0 0 auto">
+            <div class="field w-auto nomargin">
               <label>&nbsp;</label>
               <label class="chk" title="不勾就只列这一层的文件">
                 <input type="checkbox" id="shRecursive" checked>
@@ -944,43 +1073,18 @@
           <div class="hint" id="shExportHint">
             把「操作目录」里的文件列成一张表导出：<b>文件名、后缀、完整路径、大小、修改时间</b>，
             Excel 直接打开（带 BOM 不乱码）。表里<b>预留了「操作」和「新文件名」两列</b>——
-            填好保存后从下面选回来，就能批量改名 / 删除。<br>
-            目录很多时导出要先扫一遍，时间取决于文件数量（右上角进度条可见）。
-          </div>
-
-          <div class="row" style="margin-top:6px">
-            <div class="field sm" style="flex:1 1 320px">
-              <label>选择操作表格</label>
-              <input type="file" id="sheetFile" accept=".csv,.txt" onchange="sheetPick(this.files[0])">
-            </div>
-            <div class="field sm" style="flex:0 0 auto">
-              <label>&nbsp;</label>
-              <div class="btnbar" style="align-items:flex-end">
-                <button class="btn ghost sm" onclick="sheetSample()">下载模板</button>
-              </div>
-            </div>
-          </div>
-          <div class="hint hidden" id="shStat" style="color:#7fa0ff"></div>
-          <div class="hint" id="shHint">
-            表格认这几列（中英文都行，顺序随意，多余的列忽略）：<br>
-            <b>操作</b> —— 填 <code>改名</code>（或 rename）/<code>删除</code>（或 delete）。
-            <b>留空</b>的行：写了新文件名就当改名，都没写就跳过这一行。<br>
-            <b>原路径</b> —— 文件的完整路径。<b>新文件名</b> —— 只要名字，不要带路径和斜杠。<br>
-            认不出「操作」写的是什么、写了改名却没给新名、名字里带斜杠、路径跑出整理范围的，
-            <b>生成预览时就会一条条拦下来报给你</b>，不会闷头执行。<br>
-            ⚠ <b>「删除」真的会删</b>：网盘删除不进回收站，本地删除也不进回收站，都不可恢复。
-            表格里的删除<b>只按文件处理</b>——要删目录请用「批量删除」，那里会先确认它是不是空的。<br>
-            这个模式<b>不扫盘</b>：名字和去留全凭表里写的，所以「含子目录」「查找/模板」那些参数在这里都没意义。
+            想照着表批量改名，就到<b>「改名」页签</b>里选<b>「按表格改名」</b>模式，
+            把这份表填好再选回去。<br>
+            目录很多时导出要先扫一遍，时间取决于文件数量（实施进度里可见）。
           </div>
         </div>
 
-        
 
         <!-- 预览与执行 -->
         <div class="row" style="margin-top:10px">
-          <div class="field sm" style="flex:0 0 auto">
+          <div class="field sm w-auto">
             <label>&nbsp;</label>
-            <div class="btnbar" style="align-items:flex-end;flex-wrap:wrap">
+            <div class="btnbar bottom wrap">
               <div class="dupseg" id="recBox" style="margin:0 8px 0 0"
                    title="开启：连同所有子目录一起扫描（文件多时更慢）；关闭：只处理当前这一层">
                 <label class="chkchip" id="recChip">
@@ -1008,7 +1112,7 @@
             <label>预览文件</label>
             <select id="pvList" onchange="pvLoad()"></select>
           </div>
-          <div class="field" style="flex:0 0 auto;min-width:0;margin-bottom:0">
+          <div class="field w-auto nomargin">
             <label>&nbsp;</label>
             <div class="btnbar">
               <button class="btn ghost sm" onclick="pvRefresh()">刷新</button>
@@ -1022,6 +1126,29 @@
           </div>
         </div>
         <div class="hint" id="pvHint"></div>
+        <div class="msg" id="panMsg"></div>
+        <!-- 预览统计：扫描/操作/撞名/漏扫 做成数字卡，别让人从一长句里找数字 -->
+        <div class="pvstats" id="pvStats"></div>
+        <div class="oplist term headroom empty" id="panPreview" data-empty="预览区：先选模式再点「生成预览」，确认无误后点「执行」"></div>
+      </div>
+
+      <!-- ---- 卡片 3：实施进度 ----
+           扫描和执行都往这一块报：数字卡给总量、进度条给百分比、日志给流水。
+           以前只有一个细长条藏在按钮堆里，跑几十万条时看不出走到哪了。
+           停止按钮也挪到这里——跟进度放在一起才找得到。 -->
+      <div class="card">
+        <h2><span class="idx">3</span>实施进度<small>扫描与执行共用这一块</small></h2>
+
+        <div class="stats">
+          <div class="stat total"><b id="ogTotal">—</b><span>待处理</span></div>
+          <div class="stat done"><b id="ogDone">—</b><span>成功</span></div>
+          <div class="stat fail"><b id="ogFail">—</b><span>失败</span></div>
+          <div class="stat pct"><b id="ogPct">—</b><span>完成度</span></div>
+        </div>
+        <div class="barhead"><span id="ogPhase">尚未开始</span><span id="ogTime"></span></div>
+        <div class="bar" id="ogBar"><i id="ogBarFill"></i></div>
+        <div class="nowfile" id="ogNow"></div>
+
         <div class="scanbar hidden" id="scanBar">
           <div class="scantop">
             <span class="spin"></span>
@@ -1032,7 +1159,6 @@
           </div>
           <div class="scanline"><i></i></div>
         </div>
-        <!-- 执行计划进度：几百条操作要跑几分钟，这里显示真实百分比 -->
         <div class="scanbar hidden" id="execBar">
           <div class="scantop">
             <span class="spin"></span>
@@ -1044,13 +1170,23 @@
           </div>
           <div class="execline"><i id="execFill"></i></div>
         </div>
-        <div class="msg" id="panMsg"></div>
-        <!-- 预览统计：扫描/操作/撞名/漏扫 做成数字卡，别让人从一长句里找数字 -->
-        <div class="pvstats" id="pvStats"></div>
-        <div class="oplist term headroom empty" id="panPreview" data-empty="预览区：先选模式再点「生成预览」，确认无误后点「执行」"></div>
+
+        <pre class="term headroom empty" id="ogLog" data-empty="整理任务还没开始…暂无日志"></pre>
       </div>
-    </div>
-  </div>
+
+      <!-- ---- 卡片 4：清理缓存记录 ---- -->
+      <div class="card">
+        <h2><span class="idx">4</span>清理缓存记录<small>只清本机的运行记录，不动网盘上的文件</small></h2>
+        <div class="cachegrid" id="cacheGridOrganize"></div>
+        <div class="btnbar" style="margin-top:12px">
+          <button class="btn ghost sm" onclick="cacheRefresh()">刷新占用</button>
+          <div class="spacer"></div>
+          <span class="hint flat" id="cacheHintOrganize"></span>
+        </div>
+        <div class="msg" id="cacheMsgOrganize"></div>
+      </div>
+
+  </div><!-- /pageOrganize -->
 
   <footer>
     面板只监听本机 127.0.0.1，外部无法访问 · 关闭页面或面板都不影响后台上传进程<br>
@@ -1133,6 +1269,82 @@ async function api(path, body){
   }catch(e){
     return {ok:false, msg:'连不上后台服务：请先双击 open_panel.bat 启动面板，再刷新本页'};
   }
+}
+
+/* ==========================================================
+   页面切换：上传 / 整理
+   两个页面共用一份 HTML 和一份授权状态，切换只是显隐——不销毁 DOM，
+   所以切走时后台任务照样跑，切回来进度、预览、日志都还在原处。
+   记住上次停在哪页，刷新后回到那一页（跑长任务时刷页面是常事）。
+   ========================================================== */
+let curPage = 'upload';
+
+function switchPage(p){
+  curPage = (p === 'organize') ? 'organize' : 'upload';
+  const isUp = curPage === 'upload';
+  $('pageUpload').classList.toggle('hidden', !isUp);
+  $('pageOrganize').classList.toggle('hidden', isUp);
+  $('pageTabUpload').classList.toggle('on', isUp);
+  $('pageTabOrganize').classList.toggle('on', !isUp);
+  try{ localStorage.setItem('wb_page', curPage); }catch(e){}
+  // 切到整理页时补拉一次预览列表：可能上次会话里存了计划还没执行
+  if(!isUp && typeof pvRefresh === 'function') pvRefresh();
+}
+
+/* ==========================================================
+   清理缓存记录（上传页、整理页各有一份，同一套实现）
+   这四项都是**本机**的运行记录，跟网盘上的文件无关：
+   清掉不影响网盘内容，但会影响续传、改名回退这些「记得住」的能力，
+   所以每一项都在卡片上写清楚后果，清理前再确认一次。
+   ========================================================== */
+const CACHE_KINDS = [
+  {k:'previews', t:'预览与计划文件',
+   d:'生成过的整理预览和完整计划。清掉只是没了「上次那份」，网盘文件一个不动。'},
+  {k:'resume',   t:'上传断点记录', danger:true,
+   d:'已上传文件的断点映射，续传就靠它。',
+   warn:'清掉后上传从头开始：命中秒传的文件不重复耗流量，没命中的会重传一遍。'},
+  {k:'logs',     t:'上传日志',
+   d:'上传过程日志和归档的旧日志。清掉只是没法回看历史，不影响正在跑的任务。'},
+  {k:'rename',   t:'本地改名记录', danger:true,
+   d:'本地改名的回退依据。',
+   warn:'清掉后「回退上一次改名」就失效了，已改的文件回不去。'},
+];
+
+async function cacheRefresh(){
+  const d = await api('/api/cache_stat');
+  if(!d || !d.ok){
+    ['Upload', 'Organize'].forEach(s =>
+      setMsg('cacheMsg' + s, (d && d.msg) || '读不到缓存占用', false));
+    return;
+  }
+  const html = CACHE_KINDS.map(c => {
+    const it = (d.items && d.items[c.k]) || {size:0, count:0, human:'0 B'};
+    const zero = !it.size;
+    return `<div class="cacheitem${c.danger ? ' danger' : ''}">`
+      + `<div class="ct">${c.t}<span class="n">${it.count} 项</span></div>`
+      + `<div class="cs">${c.d}</div>`
+      + `<div class="cb"><span class="sz${zero ? ' zero' : ''}">${it.human}</span>`
+      + `<div class="spacer"></div>`
+      + `<button type="button" class="btn ghost sm"${zero ? ' disabled' : ''}`
+      + ` onclick="cacheClear('${c.k}')">清理</button></div></div>`;
+  }).join('');
+  ['Upload', 'Organize'].forEach(s => {
+    const g = $('cacheGrid' + s); if(g) g.innerHTML = html;
+    const h = $('cacheHint' + s); if(h) h.textContent = d.total_human ? `合计占用 ${d.total_human}` : '';
+  });
+}
+
+async function cacheClear(kind){
+  const c = CACHE_KINDS.find(x => x.k === kind);
+  if(!c) return;
+  const warn = c.warn ? '\n\n⚠ ' + c.warn : '';
+  if(!confirm(`确定清理「${c.t}」？${warn}`)) return;
+  ['Upload', 'Organize'].forEach(s => setMsg('cacheMsg' + s, '清理中…', null));
+  const d = await api('/api/cache_clear', {kind});
+  ['Upload', 'Organize'].forEach(s =>
+    setMsg('cacheMsg' + s, (d && d.msg) || '清理完成', d && d.ok ? true : false));
+  if(d && d.ok) toast(`已清理：${c.t}`, 'ok');
+  cacheRefresh();
 }
 
 /* ---------- 配置 ---------- */
@@ -1572,7 +1784,13 @@ function renderProgress(d){
 }
 
 async function pollNow(){
-  try{ const d = await api('/api/progress'); renderProgress(d); }catch(e){}
+  try{
+    const d = await api('/api/progress');
+    renderProgress(d);
+    // 页签上的小绿点：上传在跑就亮着，切到整理页也能看见后台没停
+    const live = $('liveUpload');
+    if(live) live.classList.toggle('hidden', !d.running);
+  }catch(e){}
 }
 
 /* =======================================================================
@@ -1737,6 +1955,11 @@ function panTab(k){
   // 删文件 / 删空文件夹两套输入只留一套，顺带刷新备份区路径和提示文案
   if(k === 'delete' && typeof dlModeChange === 'function') dlModeChange();
   panResetPlan();
+  // 「导出清单」只出表，没有计划可生成：把两颗生成按钮置灰，
+  // 别让人点了才在下面看到一句报错（panResetPlan 会重置状态，所以放它后面）
+  const isSheet = (k === 'sheet');
+  $('btnPanPlan').disabled = isSheet;
+  $('btnPanFresh').disabled = isSheet;
 }
 
 /* 整理方式切换：只显示当前方式需要的输入框，并更新说明文案。
@@ -2107,6 +2330,16 @@ function showScan(on){
   if(on){
     $('scanTxt').textContent = '正在连接网盘…'; $('scanTime').textContent = '';
     setScanBtnEnabled(true);
+    // 同步到「实施进度」卡：扫描阶段总条数还不知道，所以用不确定进度条
+    ogLogReset('开始扫描目录…');
+    ogSetStat(0, 0, 0, null);
+    ogSetBar(0, true);
+    $('ogPhase').textContent = '扫描目录';
+    $('ogTime').textContent = '0s';
+    $('ogNow').textContent = '';
+    ogSetLive(true);
+  }else{
+    ogSetBar(0, false);
   }
 }
 
@@ -2185,6 +2418,21 @@ function scanPaint(d, sec){
         + (cur ? ` · 当前 ${cur}` : '');
   }
   $('scanTime').textContent = sec + 's';
+
+  /* 同步到「实施进度」卡：扫描阶段只知道「找到多少文件」，没有完成度可言，
+     所以完成度留 —、进度条走不确定动画，别编一个假百分比 */
+  ogSetStat(d.files || 0, null, null, null);
+  $('ogPhase').textContent = d.phase === '生成计划' ? '生成计划' : '扫描目录';
+  $('ogTime').textContent = sec + 's';
+  $('ogNow').textContent = cur ? `当前目录：${cur}` : '';
+  ogSetLive(!!d.running);
+  if(!d.running){
+    ogLogAdd(d.cancelled
+      ? `扫描已停止：${d.dirs} 个目录 / ${d.files} 个文件`
+      : `扫描完成：${d.dirs} 个目录 / ${d.files} 个文件`);
+  }else if(d.phase === '生成计划'){
+    ogLogPhase('生成计划…');
+  }
 }
 
 /* ---------- 执行进度（点「执行」期间轮询后端） ----------
@@ -2200,6 +2448,16 @@ function showExec(on){
     $('execPct').textContent = '';
     $('execTime').textContent = '';
     $('execFill').style.width = '0%';
+    // 同步到「实施进度」卡
+    ogLogReset('开始执行…');
+    ogSetStat(0, 0, 0, 0);
+    ogSetBar(0, false);
+    $('ogPhase').textContent = '提交操作';
+    $('ogTime').textContent = '0s';
+    $('ogNow').textContent = '';
+    ogSetLive(true);
+  }else{
+    ogSetLive(false);
   }
 }
 
@@ -2237,6 +2495,78 @@ function execPaint(d, sec){
   // 随时随地能叫停比「不许停」强（跑完当前这批就停，已执行的部分有效）
   const bs = $('btnExecStop');
   if(bs) bs.classList.remove('hidden');
+
+  /* 同步到「实施进度」卡：执行阶段总条数已知，所以给真实百分比 */
+  ogSetStat(total, done, d.fails || 0, pct);
+  ogSetBar(pct, false);
+  $('ogPhase').textContent = d.running ? (rd + phase) : (d.cancelled ? '已停止' : '执行结束');
+  $('ogTime').textContent = sec + 's';
+  $('ogNow').textContent = '';
+  ogSetLive(!!d.running);
+  if(d.running){
+    ogLogPhase(`${rd}${phase}${total ? `（${done}/${total}）` : ''}`);
+  }else{
+    ogLogAdd(d.cancelled
+      ? `执行已停止：完成 ${done}/${total}，失败 ${d.fails || 0}`
+      : `执行结束：完成 ${done}/${total}，失败 ${d.fails || 0}`);
+  }
+}
+
+/* ==========================================================
+   整理页「实施进度」：数字卡 + 进度条 + 日志
+   扫描和执行都往这一块报。以前只有一个细长条埋在按钮堆里，跑几万条时
+   看不出走到哪了、也不知道失败几条，切个页签回来更是只剩个空条。
+   日志只在**阶段变化**时追加一行，不按轮询频率刷——300ms 一行的话
+   几十秒就滚成几千行，真正有用的报错反而被冲没了。
+   ========================================================== */
+let ogLogLines = [];
+let ogLastSig = '';
+
+function ogLogReset(title){
+  ogLogLines = [];
+  ogLastSig = '';
+  const el = $('ogLog'); if(!el) return;
+  el.textContent = '';
+  el.classList.add('empty');
+  if(title) ogLogAdd(title);
+}
+
+function ogLogAdd(line){
+  const t = new Date().toTimeString().slice(0, 8);
+  ogLogLines.push(`[${t}] ${line}`);
+  if(ogLogLines.length > 400) ogLogLines.splice(0, ogLogLines.length - 400);
+  const el = $('ogLog'); if(!el) return;
+  el.textContent = ogLogLines.join('\n');
+  el.classList.remove('empty');
+  el.scrollTop = el.scrollHeight;      // 一直贴着底部，新行才看得见
+}
+
+const ogNum = v => (v === null || v === undefined || v === '' ? '—' : v);
+
+function ogSetStat(total, done, fail, pct){
+  $('ogTotal').textContent = ogNum(total);
+  $('ogDone').textContent  = ogNum(done);
+  $('ogFail').textContent  = ogNum(fail);
+  $('ogPct').textContent   = (pct === null || pct === undefined || pct === '') ? '—' : pct + '%';
+}
+
+function ogSetBar(pct, anim){
+  const f = $('ogBarFill');
+  if(f) f.style.width = Math.max(0, Math.min(100, pct || 0)) + '%';
+  const b = $('ogBar');
+  if(b) b.classList.toggle('anim', !!anim);
+}
+
+function ogSetLive(on){
+  const el = $('liveOrganize');
+  if(el) el.classList.toggle('hidden', !on);
+}
+
+/* 阶段变了才写日志，避免同一句话被 300ms 的轮询刷屏 */
+function ogLogPhase(sig){
+  if(sig === ogLastSig) return;
+  ogLastSig = sig;
+  ogLogAdd(sig);
 }
 
 /* ---------- 按表改名（CSV 导入） ----------
@@ -2324,55 +2654,10 @@ function csvSample(){
   downloadText('按表改名_模板.csv', csv);
 }
 
-/* ---------- 导出清单 / 按表格操作（改名 + 删除） ----------
-   这两件事是配套的：导出的清单里就带着「操作」「新文件名」两个空列，在 Excel
-   里填好存盘、再从下面选回来，不必手抄几千行路径 */
-let sheetText = '';
-
-function sheetPick(f){
-  sheetText = '';
-  const stat = $('shStat');
-  if(!f){ stat.textContent = ''; stat.classList.add('hidden'); return; }
-  readTextFile(f, (txt, err) => {
-    if(err){
-      stat.textContent = '这个文件读不出来';
-      stat.classList.remove('hidden');
-      return;
-    }
-    sheetText = txt;
-    const lines = txt.split(/\r?\n/).filter(l => l.trim()).length;
-    stat.textContent = `已选 ${f.name}：${lines} 行，点下面的「生成预览」看会被怎么操作`;
-    stat.classList.remove('hidden');
-    setMsg('panMsg', '', null);
-  });
-}
-
-function sheetSample(){
-  const rows = [
-    ['操作', '原路径', '新文件名'],
-    ['改名', '/apps/baidu_uploader/小说/《三体》第一部.txt', '三体 第1部.txt'],
-    // 删除行不用写新文件名
-    ['删除', '/apps/baidu_uploader/小说/一串乱码的文件名.txt', ''],
-    // 「操作」留空 + 写了新名 = 改名；两列都空的行直接跳过
-    ['', '/apps/baidu_uploader/小说/银河英雄传说(上).txt', '银河英雄传说 上部.txt'],
-    ['', '/apps/baidu_uploader/小说/这个文件保持原样.txt', ''],
-  ];
-  downloadText('按表操作_模板.csv', rows.map(r => r.join(',')).join('\r\n') + '\r\n');
-}
-
-/* 表格 → 预览。跟 pan_plan 的返回同形，所以预览渲染、执行按钮、
-   预览文件下拉全部照原样复用 */
-function sheetAfterPlan(d){
-  const stat = $('shStat');
-  const errs = d.errors || [];
-  const total = d.total || 0;
-  stat.textContent = total
-    ? `已生成预览：改名 ${d.renames || 0} 条 / 删除 ${d.deletes || 0} 条`
-      + (d.plan_saved ? '（完整计划已存，可一次执行全部）' : '')
-    : '';
-  stat.classList.toggle('hidden', !total);
-  return (errs.length ? ` ⚠ ${errs.length} 条被拦截：${errs[0].slice(0, 60)}` : '');
-}
+/* ---------- 导出清单 ----------
+   只出表，不改不删。以前这个页签还挂着「按表格操作」（改名+删除），
+   跟「改名」页签里的「按表格改名」是两个入口做同一件事、行为还不一样，
+   2026-10-26 重构时合并掉了：表格一律走改名页签，这里只管导出。 */
 
 /* 导出当前目录的文件清单。目录一多就要扫一阵，所以照例把进度摊给轮询 */
 async function panListExport(){
@@ -2717,12 +3002,11 @@ async function panPlan(refresh){
               target: $('ogMergeTarget').value, how: $('ogMergeHow').value};
     }
   }else if(panTab_ === 'sheet'){
-    // 表格既是清单也是计划：改名和删除写在同一张表里，「操作」列决定
-    if(!sheetText.trim()){
-      setMsg('panMsg', '请先选一张表格；没有的话先点上面的「导出文件清单」或「下载模板」', false);
-      return;
-    }
-    body = {...body, kind: 'sheet_ops', csv: sheetText, ondup: panDup};
+    // 「导出清单」只出表，不改不删，所以没有预览可生成。
+    // 照表格操作请去「改名」页签选「按表格改名」——去重后只有那一个入口
+    setMsg('panMsg', '「导出清单」只生成表格，不动文件。想照表格批量改名，'
+      + '请到「改名」页签选「按表格改名」模式。', false);
+    return;
   }else if(panTab_ === 'delete'){
     if(dlTarget() === 'empty'){
       // 空文件夹（原先挂在整理归档页签）。recursive 恒为 true：后端也会强制递归，
@@ -2767,7 +3051,7 @@ async function panPlan(refresh){
   const isEmptyTab = planKind === 'empty_dir';
   const isMergeTab = planKind === 'merge_dirs';
   const isCsvTab   = planKind === 'rename_csv';   // 按表改名：不扫网盘，行数≠扫描数
-  const isSheetTab = planKind === 'sheet_ops';    // 按表格操作：改名 + 删除混合
+
   // 重名策略说人话：「跳过」不是不搬，是给后来的编个号谁都不丢；
   // 「删除」才会把网盘上那个旧文件删掉（不可恢复）
   const dupTxt = isDupDelete()
@@ -2801,22 +3085,6 @@ async function panPlan(refresh){
     // 合并重复可能两层一起出结果，目录层和文件层各自报自己的数——只报一个总数
     // 会让人以为另一层没轮到（这正是这次要补的：以前只有目录层那一串）
     ? (mergeTail(d) || '没有发现可合并的重复（详见上面的方框说明）')
-      + (panTotal > panOps.length
-          ? ((d.plan_saved || d.plan_ready)
-             ? ` · 列表显示前 ${panOps.length} 条，点「执行」会按完整计划分 `
-               + `${Math.ceil(panTotal / 2000)} 批全部跑完`
-             : ` · ⚠ 完整计划没存下来，本次只能执行前 ${panOps.length} 条，`
-               + `重新生成一次即可全跑完`)
-          : '')
-    : isSheetTab
-    // 混合表格：改名几条、删除几条分开报——删的部分不可恢复，必须让人在
-    // 点执行之前就看清数量，而不是混在「N 条操作」里一笔带过
-    ? `表格 ${d.scanned || 0} 行 → 改名 ${d.renames || 0} / `
-      + `⚠ 删除 ${d.deletes || 0}（不可恢复）`
-      + (d.skipped ? `（${d.skipped} 行空着没写操作）` : '')
-      + (isDupDelete()
-         ? ` · ⚠ 重名删除：${d.overwrite || 0} 个会删掉已有的同名文件`
-         : (d.auto ? ` · ${d.auto} 个撞名已自动编号 (2)(3)` : ''))
       + (panTotal > panOps.length
           ? ((d.plan_saved || d.plan_ready)
              ? ` · 列表显示前 ${panOps.length} 条，点「执行」会按完整计划分 `
@@ -2865,7 +3133,7 @@ async function panPlan(refresh){
     ? `♻ 复用了 ${pvAge(d.preview_age)}生成的同参数预览，没有重新扫描网盘`
     : (d.preview_ts ? `已存为预览文件 ${String(d.preview_ts).slice(11)}` : '');
   // 表格模式把自己的状态行刷新一遍（行数统计写在页签里，别占着结果区）
-  const csvErr = isCsvTab ? csvAfterPlan(d) : (isSheetTab ? sheetAfterPlan(d) : '');
+  const csvErr = isCsvTab ? csvAfterPlan(d) : '';
   renderPanPreview(panOps, tail + (srcTxt ? ` · ${srcTxt}` : '') + csvErr);
   pvPaintStats(pvStatsFrom(d, panTotal));
   $('btnPanApply').disabled = !panOps.length;
@@ -3050,10 +3318,15 @@ async function panApply(){
   if(nrc){
     nrc.addEventListener('change', () => $('nrChip').classList.toggle('on', nrc.checked));
   }
-  // 卡片4 目录输入框回车即浏览
+  // 目录输入框回车即浏览
   const pp = $('panPath');
   if(pp) pp.addEventListener('keydown', e => { if(e.key === 'Enter') panBrowse(); });
   pvRefresh();              // 预览文件列表：拉一次，看看本地存了哪些计划
+  cacheRefresh();           // 缓存占用：两个页面的清理卡片共用一份数据
+  // 回到上次停留的页面（跑长任务时刷新页面是常事）
+  let saved = 'upload';
+  try{ saved = localStorage.getItem('wb_page') || 'upload'; }catch(e){}
+  switchPage(saved);
 })();
 
 loadConfig();

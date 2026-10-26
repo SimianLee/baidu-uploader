@@ -452,6 +452,142 @@ def exec_snapshot():
     return snap
 
 
+# ---------------- 缓存记录：统计与清理 ----------------
+# 面板跑久了会在 data/ 里堆出几百 MB：断点映射、上传日志、整理预览。
+# 这些全是**本机**运行记录，跟网盘上的文件无关 —— 清掉不碰网盘内容，
+# 但会影响「续传」「改名回退」这类**靠记录才存在**的能力，所以界面上每一项
+# 都写清楚后果，清理前再让确认一次。
+
+def _dir_size(p: Path):
+    """目录/文件总大小 + 文件数。单个文件 stat 失败就跳过，别让一个坏文件卡住整页。"""
+    total, count = 0, 0
+    try:
+        if not p.exists():
+            return 0, 0
+        if p.is_file():
+            return p.stat().st_size, 1
+        for f in p.rglob("*"):
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+                    count += 1
+            except OSError:
+                continue
+    except OSError:
+        return 0, 0
+    return total, count
+
+
+def _human(n) -> str:
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def cache_stat():
+    """四项缓存各占多少。前端拿去画卡片——先让人看见，再决定清不清。"""
+    ps, pc = _dir_size(preview_store.preview_dir(PROJ))
+    qs, qc = _dir_size(preview_store.plan_dir(PROJ))
+
+    # 断点：upload_map.json + uploaded_log.txt（都在 data/ 下）
+    rs, rc = 0, 0
+    for name in ("upload_map.json", "uploaded_log.txt"):
+        s, c = _dir_size(DATA / name)
+        rs += s
+        rc += c
+
+    # 日志：upload.log 本体 + rotate_log 归档出来的 upload.log.*
+    ls, lc = 0, 0
+    for f in DATA.glob("upload.log*"):
+        s, c = _dir_size(f)
+        ls += s
+        lc += c
+
+    ns, nc = _dir_size(LOCAL_RENAME_LOG)
+
+    items = {
+        "previews": {"size": ps + qs, "count": pc + qc},
+        "resume":   {"size": rs, "count": rc},
+        "logs":     {"size": ls, "count": lc},
+        "rename":   {"size": ns, "count": nc},
+    }
+    for v in items.values():
+        v["human"] = _human(v["size"])
+    total = sum(v["size"] for v in items.values())
+    return {"ok": True, "items": items, "total": total, "total_human": _human(total)}
+
+
+def cache_clear(kind: str):
+    """清一项缓存。返回释放了多少空间，好让人知道这一下值不值。"""
+    if kind not in ("previews", "resume", "logs", "rename"):
+        return {"ok": False, "msg": f"不认识的缓存类型：{kind}"}
+    # 上传进程正拿着断点文件和日志句柄，这时候删，它会往一个已经不存在的文件里
+    # 继续写 —— 表现是「进度突然清零」「日志断在半截」，事后极难排查。
+    # 宁可挡下来让人等一会儿，也别制造这种疑难杂症。
+    if kind in ("resume", "logs") and is_running():
+        return {"ok": False, "msg": "上传任务正在运行，等它结束再清理这一项"}
+
+    freed, removed = 0, 0
+    if kind == "previews":
+        for d in (preview_store.preview_dir(PROJ), preview_store.plan_dir(PROJ)):
+            s, c = _dir_size(d)
+            for f in (d.glob("*") if d.exists() else []):
+                try:
+                    if f.is_file():
+                        f.unlink()
+                except OSError:
+                    continue
+            freed += s
+            removed += c
+        msg = f"已清理预览与计划文件 {removed} 份"
+    elif kind == "resume":
+        for name in ("upload_map.json", "uploaded_log.txt"):
+            p = DATA / name
+            s, c = _dir_size(p)
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError as e:
+                return {"ok": False, "msg": f"{name} 删不掉：{e}"}
+            freed += s
+            removed += c
+        msg = "已清理上传断点记录（下次上传会重新核对，命中秒传的不重复耗流量）"
+    elif kind == "logs":
+        # 日志本体只清空不删除：上传端持有的是同一个路径，删了它后面写不进去
+        try:
+            if LOGFILE.exists():
+                freed += LOGFILE.stat().st_size
+                removed += 1
+                LOGFILE.write_text("", encoding="utf-8")
+        except OSError:
+            pass
+        for f in DATA.glob("upload.log.*"):
+            s, c = _dir_size(f)
+            try:
+                f.unlink()
+            except OSError:
+                continue
+            freed += s
+            removed += c
+        msg = "已清理上传日志（当前的日志已清空，旧档已删除）"
+    else:                                   # rename
+        s, c = _dir_size(LOCAL_RENAME_LOG)
+        try:
+            if LOCAL_RENAME_LOG.exists():
+                LOCAL_RENAME_LOG.unlink()
+        except OSError as e:
+            return {"ok": False, "msg": f"改名记录删不掉：{e}"}
+        freed += s
+        removed += c
+        msg = "已清理本地改名记录（之后就不能回退上一次改名了）"
+
+    return {"ok": True, "freed": freed, "freed_human": _human(freed),
+            "count": removed, "msg": msg + f" · 释放 {_human(freed)}"}
+
+
 # ---------------- HTTP 服务 ----------------
 class Handler(BaseHTTPRequestHandler):
 
@@ -689,6 +825,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._local_rename_apply(body)
         if path == "/api/local_rename_undo":
             return self._local_rename_undo()
+
+        # ---------------- 缓存记录：占用统计与清理 ----------------
+        if path == "/api/cache_stat":
+            return self._json(cache_stat())
+        if path == "/api/cache_clear":
+            return self._json(cache_clear(str(body.get("kind") or "")))
 
         return self._json({"ok": False, "msg": f"接口不存在：{path}"}, 404)
 
