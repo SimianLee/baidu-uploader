@@ -2270,7 +2270,13 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
 
     # 进度快照。用可变 dict 而非局部变量：闭包里改它不需要 nonlocal
     prog = {"done": 0, "total": len(ren) + len(mov) + len(dele) + len(del_files),
-            "phase": "", "fails": 0}
+            "phase": "", "fails": 0,
+            # 按动作分开计数：整理页要显示「改名几条 / 移动几条 / 删除几条」，
+            # 只有一个总进度时，人看不出这一批到底在动什么。
+            "kinds": {"rename": len(ren), "move": len(mov),
+                      "delete": len(dele) + len(del_files)},
+            "kinds_done": {"rename": 0, "move": 0, "delete": 0},
+            "kind": ""}
 
     # 备份目录只在 backup_delete 打开时才会用到：整个 apply_plan 共用同一个
     # 时间戳目录，事后按时间找就行。惰性生成——没东西要备份就不建。
@@ -2300,15 +2306,20 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
             except Exception:
                 pass        # 进度显示出问题，绝不能影响真正的执行
 
-    def tick(phase):
+    def tick(phase, kind=""):
         """生成「一批提交完成」的回调：累加进度与失败数，然后汇报
 
         失败数由底层连同本批条数一起给出。不能等本函数返回后再从 stat 里数，
         那样进度上的失败数会滞后一批。
+
+        kind 标出这批是改名 / 移动 / 删除，用来给整理页按动作分开显示。
         """
         def cb(k, nf=0):
             prog["done"] += k
             prog["fails"] += nf
+            if kind:
+                prog["kind"] = kind
+                prog["kinds_done"][kind] = prog["kinds_done"].get(kind, 0) + k
             emit(phase)
         return cb
 
@@ -2324,7 +2335,7 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
         if conflicts:
             prog["total"] += len(conflicts)   # 算进总数，否则进度条看着像卡住
             ok, fails = pan.delete_batch(conflicts,
-                                         on_progress=tick("删除重名的旧文件"))
+                                         on_progress=tick("删除重名的旧文件", "delete"))
             stat["dup_deleted"] = ok
             stat["fails"] += fails
             if fails:
@@ -2345,10 +2356,10 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
         emit(f"准备目标目录 {i}/{len(dirs)}")     # 目录多时也得让人看到在动
 
     if ren:
-        ok, fails = pan.rename_batch(ren, ondup="skip", on_progress=tick("正在改名"))
+        ok, fails = pan.rename_batch(ren, ondup="skip", on_progress=tick("正在改名", "rename"))
         stat["rename"] = ok; stat["fails"] += fails
     if mov:
-        ok, fails = pan.move_batch(mov, ondup="skip", on_progress=tick("正在移动"))
+        ok, fails = pan.move_batch(mov, ondup="skip", on_progress=tick("正在移动", "move"))
         stat["move"] = ok; stat["fails"] += fails
     # 删除的文件先搬进备份区（跟覆盖用同一个备份区）。搬走即等于删掉——
     # 文件不在原位了，但可以找回。备份没成功的**不删**：宁可删不掉，也不能丢。
@@ -2362,7 +2373,7 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
             bdest = backup_dest(o["path"])
             _mkdirs(pan, bdest)
             mv_ops.append({"path": o["path"], "dest": bdest})
-        ok, fails = pan.move_batch(mv_ops, on_progress=tick("备份待删除的文件"))
+        ok, fails = pan.move_batch(mv_ops, on_progress=tick("备份待删除的文件", "move"))
         stat["backup"] = stat.get("backup", 0) + ok
         stat["backup_dir"] = backup_dir()
         backed = {m["path"] for m in mv_ops} - {f["path"] for f in fails}
@@ -2382,7 +2393,7 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
         dele += [o["path"] for o in del_files]      # 关掉备份 = 照旧真删
 
     if dele:
-        ok, fails = pan.delete_batch(dele, on_progress=tick("正在删除"))
+        ok, fails = pan.delete_batch(dele, on_progress=tick("正在删除", "delete"))
         stat["delete"] = ok; stat["fails"] += fails
 
     # 站到磁盘上复核：报错的那些到底动没动。
@@ -2424,14 +2435,14 @@ def apply_plan(pan: PanFiles, ops: list, ondup: str = "skip", on_progress=None,
             f2 = []
             if r2:
                 ok, fl = pan.rename_batch(
-                    r2, ondup="skip", on_progress=tick("重试改名"))
+                    r2, ondup="skip", on_progress=tick("重试改名", "rename"))
                 stat["rename"] += ok; f2 += fl
             if m2:
                 ok, fl = pan.move_batch(
-                    m2, ondup="skip", on_progress=tick("重试移动"))
+                    m2, ondup="skip", on_progress=tick("重试移动", "move"))
                 stat["move"] += ok; f2 += fl
             if d2:
-                ok, fl = pan.delete_batch(d2, on_progress=tick("重试删除"))
+                ok, fl = pan.delete_batch(d2, on_progress=tick("重试删除", "delete"))
                 stat["delete"] += ok; f2 += fl
             v2 = {}
             if f2:

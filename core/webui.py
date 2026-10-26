@@ -404,23 +404,41 @@ def scan_snapshot():
 # 不同于扫描的是：执行的总条数事先就知道，所以前端能显示真实百分比。
 _exec_lock = threading.Lock()
 _exec = {"running": False, "phase": "", "done": 0, "total": 0, "fails": 0,
-         "round": 0, "rounds": 0, "stop": False, "t0": 0.0}
+         "round": 0, "rounds": 0, "stop": False, "t0": 0.0,
+         # 按动作拆开：整理页要分别报「改名几条 / 移动几条 / 删除几条」
+         "kinds": {"rename": 0, "move": 0, "delete": 0},
+         "kinds_done": {"rename": 0, "move": 0, "delete": 0}, "kind": ""}
 
 
-def exec_begin(total=0, rounds=0):
+def exec_begin(total=0, rounds=0, kinds=None):
     with _exec_lock:
         _exec.update(running=True, phase="准备中", done=0, total=int(total or 0),
                      fails=0, round=0, rounds=int(rounds or 0), stop=False,
-                     t0=time.time())
+                     t0=time.time(), kind="")
+        if kinds:
+            for k in ("rename", "move", "delete"):
+                _exec["kinds"][k] = int(kinds.get(k) or 0)
+                _exec["kinds_done"][k] = 0
 
 
 def exec_tick(snap):
-    """apply_plan 每完成一批回调一次，snap={done,total,phase,fails}"""
+    """apply_plan 每完成一批回调一次，snap={done,total,phase,fails,kinds_done,kind}"""
     with _exec_lock:
         _exec.update(done=snap.get("done", 0) or 0,
                      total=snap.get("total", 0) or 0,
                      phase=snap.get("phase", "") or "",
-                     fails=snap.get("fails", 0) or 0)
+                     fails=snap.get("fails", 0) or 0,
+                     kind=snap.get("kind", "") or _exec.get("kind", ""))
+        # 分动作计数：apply_plan 报的是本批所属类型的量，这里累加到同一张表
+        ks = snap.get("kinds") or {}
+        for k in ("rename", "move", "delete"):
+            if k in ks:
+                _exec["kinds"][k] = int(ks[k] or 0)
+        add = snap.get("_add") or {}
+        for k in ("rename", "move", "delete"):
+            d = int(add.get(k) or 0)
+            if d > 0:
+                _exec["kinds_done"][k] = (_exec["kinds_done"].get(k) or 0) + d
 
 
 def exec_request_stop():
@@ -487,8 +505,20 @@ def _human(n) -> str:
     return f"{n:.1f} TB"
 
 
-def cache_stat():
-    """四项缓存各占多少。前端拿去画卡片——先让人看见，再决定清不清。"""
+# 缓存项各自的归属页。以前两个页面都列全部四项，结果整理页上出现
+# 「上传断点记录」「上传日志」——那是上传的事，整理页不该管。
+# 现在各页只清自己那一摊：上传页管断点和日志，整理页管预览与改名记录。
+CACHE_SCOPE = {
+    "upload":   ("resume", "logs"),
+    "organize": ("previews", "rename"),
+}
+
+
+def cache_stat(scope: str = ""):
+    """四项缓存各占多少。前端拿去画卡片——先让人看见，再决定清不清。
+
+    scope 只影响「返回哪几项」，不清任何东西。留空则返回全部。
+    """
     ps, pc = _dir_size(preview_store.preview_dir(PROJ))
     qs, qc = _dir_size(preview_store.plan_dir(PROJ))
 
@@ -514,8 +544,11 @@ def cache_stat():
         "logs":     {"size": ls, "count": lc},
         "rename":   {"size": ns, "count": nc},
     }
+    wanted = CACHE_SCOPE.get(scope) if scope else None
     for v in items.values():
         v["human"] = _human(v["size"])
+    if wanted:
+        items = {k: v for k, v in items.items() if k in wanted}
     total = sum(v["size"] for v in items.values())
     return {"ok": True, "items": items, "total": total, "total_human": _human(total)}
 
@@ -619,6 +652,11 @@ class Handler(BaseHTTPRequestHandler):
             body = HTMLFILE.read_bytes()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # 必须 no-cache：面板是本地起的服务，改了 HTML、刷新却还是旧界面，
+            # 十有八九是浏览器把页面缓存住了。之前出现过一次，排查成本很高。
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -828,7 +866,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # ---------------- 缓存记录：占用统计与清理 ----------------
         if path == "/api/cache_stat":
-            return self._json(cache_stat())
+            # scope 由前端按页面传：upload / organize
+            return self._json(cache_stat(str(body.get("scope") or "")))
         if path == "/api/cache_clear":
             return self._json(cache_clear(str(body.get("kind") or "")))
 
@@ -1866,8 +1905,14 @@ class Handler(BaseHTTPRequestHandler):
             # 两个进程握的是同一个 access_token，一起猛敲百度会整批整批地回假错误
             _upload_busy = is_running()
             # 执行可能几百条、要好几分钟，进度交给前端轮询 /api/pan_apply_progress
+            _ops_all = [o for g in all_good for o in g if isinstance(o, dict)]
+            _kinds = {
+                "rename": sum(1 for o in _ops_all if o.get("op") == "rename"),
+                "move":   sum(1 for o in _ops_all if o.get("op") == "move"),
+                "delete": sum(1 for o in _ops_all if o.get("op") == "delete"),
+            }
             total_ops = sum(len(g) for g in all_good)
-            exec_begin(total_ops, rounds=len(all_good))
+            exec_begin(total_ops, rounds=len(all_good), kinds=_kinds)
             stat = {"rename": 0, "move": 0, "delete": 0,
                     "dup_deleted": 0, "backup": 0, "deleted_backup": 0,
                     "backup_dir": "", "fails": [], "verified": 0,
@@ -1889,12 +1934,31 @@ class Handler(BaseHTTPRequestHandler):
                     # 批次号走 _exec["round"] 单独给前端，不塞进 phase ——
                     # phase 里带 '/' 会让前端以为这是「准备目录 3/60」之类的
                     # 自带计数，从而不显示总进度，反而更看不清
-                    def tick(base=base):
+                    def tick(base=base, prev=None):
+                        """把 apply_plan 的「批内累计」换算成「跨批累计」
+
+                        apply_plan 每批持有一份独立的 prog 快照，它的 done /
+                        kinds_done 都是**本批内**从头累加的。分批执行时直接用会
+                        重复计数（第 2 批一开始又把第 1 批算一遍），所以要按
+                        增量差分后再累加到全局表上。
+                        """
+                        prev = {"rename": 0, "move": 0, "delete": 0}
                         def cb(snap):
+                            kd = snap.get("kinds_done") or {}
+                            delta = {}
+                            for k in ("rename", "move", "delete"):
+                                cur = int(kd.get(k) or 0)
+                                d = cur - prev[k]
+                                if d > 0:
+                                    prev[k] = cur
+                                    delta[k] = d
                             exec_tick({"done": base + (snap.get("done") or 0),
                                        "total": total_ops,
                                        "phase": snap.get("phase") or "",
-                                       "fails": len(stat["fails"]) + (snap.get("fails") or 0)})
+                                       "fails": len(stat["fails"]) + (snap.get("fails") or 0),
+                                       "kind": snap.get("kind") or "",
+                                       "kinds": snap.get("kinds") or {},
+                                       "_add": delta})
                         return cb
 
                     s = pan_tools.apply_plan(pan, g, ondup=ondup,

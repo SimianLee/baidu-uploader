@@ -319,6 +319,25 @@
   .stat.total{color:#7fa0ff} .stat.done{color:var(--green)}
   .stat.fail{color:var(--red)} .stat.pct{color:var(--purple)}
 
+  /* ---------- 按动作分列的计数（改名 / 移动 / 删除）----------
+     整理一张预览里常常三种动作混着跑，只给总数的话看不出「完成一半」到底
+     是改了一半还是删了一半。删除不可回退，所以它单独一行要能一眼盯住。 */
+  .opcount{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:8px}
+  @media(max-width:520px){.opcount{grid-template-columns:1fr}}
+  .opc{
+    display:flex;align-items:center;justify-content:space-between;gap:8px;
+    background:#141924;border:1px solid var(--line);border-radius:10px;
+    padding:9px 12px;
+  }
+  .opc .tag{font-size:12px;color:var(--muted);letter-spacing:.5px}
+  .opc b{font-size:16px;font-weight:600;font-variant-numeric:tabular-nums}
+  .opc.rn b{color:#7fa0ff}
+  .opc.mv b{color:var(--purple)}
+  .opc.dl b{color:var(--muted)}
+  /* 删除真的动起来了才转红：没事别吓人，有事必须刺眼 */
+  .opc.dl b.active{color:var(--red)}
+  .opc.dl{border-color:#2b2020}
+
   /* ---------- 进度条 ---------- */
   .barhead{display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-bottom:6px}
   .bar{
@@ -792,7 +811,7 @@
 
       <!-- ---- 卡片 4：清理缓存记录 ---- -->
       <div class="card">
-        <h2><span class="idx">4</span>清理缓存记录<small>只清本机的运行记录，不动网盘上的文件</small></h2>
+        <h2><span class="idx">4</span>清理上传缓存<small>只清上传产生的记录，不动网盘上的文件</small></h2>
         <div class="cachegrid" id="cacheGridUpload"></div>
         <div class="btnbar" style="margin-top:12px">
           <button class="btn ghost sm" onclick="cacheRefresh()">刷新占用</button>
@@ -1080,35 +1099,52 @@
         </div>
 
 
-        <!-- 预览与执行 -->
-        <div class="row" style="margin-top:10px">
-          <div class="field sm w-auto">
-            <label>&nbsp;</label>
-            <div class="btnbar bottom wrap">
-              <div class="dupseg" id="recBox" style="margin:0 8px 0 0"
-                   title="开启：连同所有子目录一起扫描（文件多时更慢）；关闭：只处理当前这一层">
-                <label class="chkchip" id="recChip">
-                  <input type="checkbox" id="panRecursive">含子目录
-                </label>
-              </div>
-              <div class="dupseg" id="dupBox" style="margin:0 8px 0 0"
-                   title="改名/整理撞到网盘已有的同名文件时：跳过＝保留旧文件、给这次的编号；删除＝把旧文件直接删掉">
-                <button type="button" class="segbtn on" id="dupSkip"
-                        onclick="setDup('skip')">重名跳过</button>
-                <button type="button" class="segbtn warn" id="dupDel"
-                        onclick="setDup('delete')">重名删除</button>
-              </div>
-              <button class="btn ghost" id="btnPanPlan" onclick="panPlan()">生成预览</button>
-              <button class="btn ghost" id="btnPanFresh" onclick="panPlan(true)"
-                      title="忽略已存下来的同参数预览，重新扫一遍网盘">重新生成</button>
-              <button class="btn green" id="btnPanApply" onclick="panApply()" disabled>执行</button>
+        <!-- 扫描范围与重名策略：这两个是「怎么扫」的开关，
+             放在四个动作页签的外面——不管选了哪种动作都要先回答这两个问题，
+             收进某一页里的话，换个页签就得重新设一遍 -->
+        <div class="sec" style="margin-top:14px">扫描范围与重名策略</div>
+        <div class="row">
+          <div class="field w-auto nomargin">
+            <div class="dupseg" id="recBox" style="margin:0"
+                 title="开启：连同所有子目录一起扫描（文件多时更慢）；关闭：只处理当前这一层">
+              <label class="chkchip" id="recChip">
+                <input type="checkbox" id="panRecursive">含子目录
+              </label>
+            </div>
+          </div>
+          <div class="field w-auto nomargin">
+            <div class="dupseg" id="dupBox" style="margin:0"
+                 title="改名/整理撞到网盘已有的同名文件时：跳过＝保留旧文件、给这次的编号；删除＝把旧文件直接删掉">
+              <button type="button" class="segbtn on" id="dupSkip"
+                      onclick="setDup('skip')">重名跳过</button>
+              <button type="button" class="segbtn warn" id="dupDel"
+                      onclick="setDup('delete')">重名删除</button>
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- ---- 卡片 3：预览与核对 ----
+           整理最危险的一步就在这里：网盘改名/删除基本不可回退。
+           所以「生成预览」和「执行」被刻意放进独立的一张卡，
+           跟上面「选动作」、下面「看进度」分开——三张卡对应三个必须依次
+           走过的心智步骤：我打算做什么 → 做成这样对不对 → 跑到哪儿了。
+           堆在一张卡里时，「执行」按钮紧贴着页签，很容易顺手就点了。 -->
+      <div class="card">
+        <h2><span class="idx">3</span>预览与核对<small>先看清单，再执行；这一步错了还能改</small></h2>
+
+        <div class="btnbar">
+          <button class="btn primary" id="btnPanPlan" onclick="panPlan()">生成预览</button>
+          <button class="btn ghost" id="btnPanFresh" onclick="panPlan(true)"
+                  title="忽略已存下来的同参数预览，重新扫一遍网盘">重新生成</button>
+          <div class="spacer"></div>
+          <button class="btn green" id="btnPanApply" onclick="panApply()" disabled>执行</button>
+        </div>
+
         <!-- 预览文件：每次「生成预览」都把计划落盘成一份文件。同参数再点一次直接复用，
              不必把网盘重扫一遍；也可以从这份列表里挑一份旧的载入后直接执行 -->
         <div class="row" style="margin-top:12px">
-          <div class="field" style="margin-bottom:0">
+          <div class="field nomargin">
             <label>预览文件</label>
             <select id="pvList" onchange="pvLoad()"></select>
           </div>
@@ -1129,26 +1165,40 @@
         <div class="msg" id="panMsg"></div>
         <!-- 预览统计：扫描/操作/撞名/漏扫 做成数字卡，别让人从一长句里找数字 -->
         <div class="pvstats" id="pvStats"></div>
-        <div class="oplist term headroom empty" id="panPreview" data-empty="预览区：先选模式再点「生成预览」，确认无误后点「执行」"></div>
+        <div class="oplist term headroom empty" id="panPreview" data-empty="预览区：先在上面选好动作，再点「生成预览」看它打算怎么改，确认无误后再点「执行」"></div>
       </div>
 
-      <!-- ---- 卡片 3：实施进度 ----
-           扫描和执行都往这一块报：数字卡给总量、进度条给百分比、日志给流水。
-           以前只有一个细长条藏在按钮堆里，跑几十万条时看不出走到哪了。
-           停止按钮也挪到这里——跟进度放在一起才找得到。 -->
+      <!-- ---- 卡片 4：整理进度 ----
+           扫到哪儿、改到第几条、删了多少——整理的全部进展都汇总在这一块。
+           这张卡是整理页专属：它读的是 /api/pan_apply_progress（整理进程的状态），
+           跟上传页那份「实时进度」是两个互不相干的接口，互不串台。 -->
       <div class="card">
-        <h2><span class="idx">3</span>实施进度<small>扫描与执行共用这一块</small></h2>
+        <h2><span class="idx">4</span>整理进度<small>改名 / 移动 / 删除各自的进展</small></h2>
 
+        <div class="barhead"><span id="ogPhase">尚未开始</span><span id="ogTime"></span></div>
+        <div class="bar" id="ogBar"><i id="ogBarFill"></i></div>
+        <div class="nowfile" id="ogNow"></div>
+
+        <!-- 按动作分列的数字卡：整理一张预览里常常同时有改名、移动、删除三种动作。
+             只给一个总数的话，「跑了一半」到底是改了一半还是删了一半完全看不出来——
+             而删除是不可回退的，这个区分必须让人一眼看见。 -->
         <div class="stats">
           <div class="stat total"><b id="ogTotal">—</b><span>待处理</span></div>
           <div class="stat done"><b id="ogDone">—</b><span>成功</span></div>
           <div class="stat fail"><b id="ogFail">—</b><span>失败</span></div>
           <div class="stat pct"><b id="ogPct">—</b><span>完成度</span></div>
         </div>
-        <div class="barhead"><span id="ogPhase">尚未开始</span><span id="ogTime"></span></div>
-        <div class="bar" id="ogBar"><i id="ogBarFill"></i></div>
-        <div class="nowfile" id="ogNow"></div>
 
+        <div class="opcount">
+          <div class="opc rn"><span class="tag">改名</span><b id="ogRn">—</b></div>
+          <div class="opc mv"><span class="tag">移动</span><b id="ogMv">—</b></div>
+          <div class="opc dl"><span class="tag">删除</span><b id="ogDl">—</b></div>
+        </div>
+        <div class="hint flat" id="ogKindHint">改名 / 移动 / 删除各自「已完成 条 / 计划 条」——删除不可回退，单独列出来盯。</div>
+
+        <!-- 扫描与执行各自一条细进度条 + 停止按钮。扫描只读、执行会改网盘，
+             分两条是为了让人分得清「现在是在数文件」还是「已经在动文件了」。
+             停止按钮跟着各自的进度条——出了事要刹的时候才找得到 -->
         <div class="scanbar hidden" id="scanBar">
           <div class="scantop">
             <span class="spin"></span>
@@ -1172,11 +1222,20 @@
         </div>
 
         <pre class="term headroom empty" id="ogLog" data-empty="整理任务还没开始…暂无日志"></pre>
+
+        <div class="btnbar" style="margin-top:10px">
+          <button class="btn ghost sm" onclick="ogLogClear()">清空日志</button>
+          <div class="spacer"></div>
+          <span class="hint flat">整理在后台跑，切到上传页也不会中断；切回来进度仍在这一块</span>
+        </div>
       </div>
 
-      <!-- ---- 卡片 4：清理缓存记录 ---- -->
+      <!-- ---- 卡片 5：清理缓存记录 ----
+           这里只列**整理自己产生的**两项：预览文件（含计划）和本地改名记录。
+           「上传断点」「上传日志」是上传那一路的东西，放在上传页那一栏，
+           不在整理页出现——进了整理页就不该看到上传的账 -->
       <div class="card">
-        <h2><span class="idx">4</span>清理缓存记录<small>只清本机的运行记录，不动网盘上的文件</small></h2>
+        <h2><span class="idx">5</span>清理整理缓存<small>只清整理产生的记录，不动网盘上的文件</small></h2>
         <div class="cachegrid" id="cacheGridOrganize"></div>
         <div class="btnbar" style="margin-top:12px">
           <button class="btn ghost sm" onclick="cacheRefresh()">刷新占用</button>
@@ -1292,46 +1351,75 @@ function switchPage(p){
 }
 
 /* ==========================================================
-   清理缓存记录（上传页、整理页各有一份，同一套实现）
-   这四项都是**本机**的运行记录，跟网盘上的文件无关：
-   清掉不影响网盘内容，但会影响续传、改名回退这些「记得住」的能力，
-   所以每一项都在卡片上写清楚后果，清理前再确认一次。
+   清理缓存记录（上传页、整理页各有一栏，同名但各管各的）
+
+   以前两页都把四项全列出来，结果整理页上出现了「上传断点记录」「上传日志」
+   ——那是上传的事，进了整理页不该看见。现在按页分流：
+     上传页 → 断点记录、上传日志
+     整理页 → 预览与计划文件、本地改名记录
+   这几项都是**本机**的运行记录，跟网盘上的文件无关：清掉不影响网盘内容，
+   但会影响续传、改名回退这些「记得住」的能力，所以每项都写清后果、清理前再确认一次。
    ========================================================== */
 const CACHE_KINDS = [
-  {k:'previews', t:'预览与计划文件',
+  {k:'previews', t:'预览与计划文件', page:'organize',
    d:'生成过的整理预览和完整计划。清掉只是没了「上次那份」，网盘文件一个不动。'},
-  {k:'resume',   t:'上传断点记录', danger:true,
+  {k:'resume',   t:'上传断点记录', danger:true, page:'upload',
    d:'已上传文件的断点映射，续传就靠它。',
    warn:'清掉后上传从头开始：命中秒传的文件不重复耗流量，没命中的会重传一遍。'},
-  {k:'logs',     t:'上传日志',
+  {k:'logs',     t:'上传日志', page:'upload',
    d:'上传过程日志和归档的旧日志。清掉只是没法回看历史，不影响正在跑的任务。'},
-  {k:'rename',   t:'本地改名记录', danger:true,
+  {k:'rename',   t:'本地改名记录', danger:true, page:'organize',
    d:'本地改名的回退依据。',
    warn:'清掉后「回退上一次改名」就失效了，已改的文件回不去。'},
 ];
 
+/* 每页两块格子 DIV_ID → 该页要看的 kind。用 map 而不是数组过滤，
+   是为了让「哪些项属于哪页」只在这里写一次，加新项时不会漏某个页面 */
+const CACHE_PAGE = {
+  Upload:   ['resume', 'logs'],
+  Organize: ['previews', 'rename'],
+};
+
 async function cacheRefresh(){
-  const d = await api('/api/cache_stat');
-  if(!d || !d.ok){
-    ['Upload', 'Organize'].forEach(s =>
-      setMsg('cacheMsg' + s, (d && d.msg) || '读不到缓存占用', false));
-    return;
+  const pageHtml = {Upload: '', Organize: ''};
+  const pageTotal = {Upload: 0, Organize: 0};
+
+  for(const [suffix, kinds] of Object.entries(CACHE_PAGE)){
+    // scope 传给后端：只要这一页相关的项。不传的话后端会把四项都回来，
+    // 整理页就会又看见上传的账
+    const d = await api('/api/cache_stat', {scope: suffix.toLowerCase()});
+    if(!d || !d.ok){
+      setMsg('cacheMsg' + suffix, (d && d.msg) || '读不到缓存占用', false);
+      continue;
+    }
+    pageTotal[suffix] = d.total || 0;
+    pageHtml[suffix] = CACHE_KINDS.filter(c => kinds.includes(c.k)).map(c => {
+      const it = (d.items && d.items[c.k]) || {size:0, count:0, human:'0 B'};
+      const zero = !it.size;
+      return `<div class="cacheitem${c.danger ? ' danger' : ''}">`
+        + `<div class="ct">${c.t}<span class="n">${it.count} 项</span></div>`
+        + `<div class="cs">${c.d}</div>`
+        + `<div class="cb"><span class="sz${zero ? ' zero' : ''}">${it.human}</span>`
+        + `<div class="spacer"></div>`
+        + `<button type="button" class="btn ghost sm"${zero ? ' disabled' : ''}`
+        + ` onclick="cacheClear('${c.k}')">清理</button></div></div>`;
+    }).join('');
   }
-  const html = CACHE_KINDS.map(c => {
-    const it = (d.items && d.items[c.k]) || {size:0, count:0, human:'0 B'};
-    const zero = !it.size;
-    return `<div class="cacheitem${c.danger ? ' danger' : ''}">`
-      + `<div class="ct">${c.t}<span class="n">${it.count} 项</span></div>`
-      + `<div class="cs">${c.d}</div>`
-      + `<div class="cb"><span class="sz${zero ? ' zero' : ''}">${it.human}</span>`
-      + `<div class="spacer"></div>`
-      + `<button type="button" class="btn ghost sm"${zero ? ' disabled' : ''}`
-      + ` onclick="cacheClear('${c.k}')">清理</button></div></div>`;
-  }).join('');
-  ['Upload', 'Organize'].forEach(s => {
-    const g = $('cacheGrid' + s); if(g) g.innerHTML = html;
-    const h = $('cacheHint' + s); if(h) h.textContent = d.total_human ? `合计占用 ${d.total_human}` : '';
-  });
+  for(const suffix of Object.keys(CACHE_PAGE)){
+    const g = $('cacheGrid' + suffix); if(g) g.innerHTML = pageHtml[suffix];
+    const h = $('cacheHint' + suffix);
+    if(h) h.textContent = pageTotal[suffix] ? `合计占用 ${_human(pageTotal[suffix])}` : '';
+  }
+}
+
+/* 前端自己也备一份 human：后端按 scope 只返回本页的几项，
+   它的 total_human 是这几项的小计，自己算一遍更稳，也让两页各显示各的合计 */
+function _human(n){
+  n = Number(n || 0);
+  const units = ['B','KB','MB','GB','TB'];
+  let i = 0;
+  while(n >= 1024 && i < units.length - 1){ n /= 1024; i++; }
+  return i === 0 ? `${Math.round(n)} B` : `${n.toFixed(1)} ${units[i]}`;
 }
 
 async function cacheClear(kind){
@@ -1339,10 +1427,10 @@ async function cacheClear(kind){
   if(!c) return;
   const warn = c.warn ? '\n\n⚠ ' + c.warn : '';
   if(!confirm(`确定清理「${c.t}」？${warn}`)) return;
-  ['Upload', 'Organize'].forEach(s => setMsg('cacheMsg' + s, '清理中…', null));
+  const suffix = c.page === 'upload' ? 'Upload' : 'Organize';
+  setMsg('cacheMsg' + suffix, '清理中…', null);
   const d = await api('/api/cache_clear', {kind});
-  ['Upload', 'Organize'].forEach(s =>
-    setMsg('cacheMsg' + s, (d && d.msg) || '清理完成', d && d.ok ? true : false));
+  setMsg('cacheMsg' + suffix, (d && d.msg) || '清理完成', d && d.ok ? true : false);
   if(d && d.ok) toast(`已清理：${c.t}`, 'ok');
   cacheRefresh();
 }
@@ -2419,9 +2507,11 @@ function scanPaint(d, sec){
   }
   $('scanTime').textContent = sec + 's';
 
-  /* 同步到「实施进度」卡：扫描阶段只知道「找到多少文件」，没有完成度可言，
-     所以完成度留 —、进度条走不确定动画，别编一个假百分比 */
+  /* 同步到「整理进度」卡：扫描阶段只知道「找到多少文件」，没有完成度可言，
+     所以完成度留 —、进度条走不确定动画，别编一个假百分比。
+     分动作计数这时还没有值——要等「生成预览」把计划定下来才有，所以先清空 */
   ogSetStat(d.files || 0, null, null, null);
+  ogSetKinds({kinds: {}, kinds_done: {}});
   $('ogPhase').textContent = d.phase === '生成计划' ? '生成计划' : '扫描目录';
   $('ogTime').textContent = sec + 's';
   $('ogNow').textContent = cur ? `当前目录：${cur}` : '';
@@ -2496,9 +2586,10 @@ function execPaint(d, sec){
   const bs = $('btnExecStop');
   if(bs) bs.classList.remove('hidden');
 
-  /* 同步到「实施进度」卡：执行阶段总条数已知，所以给真实百分比 */
+  /* 同步到「整理进度」卡：执行阶段总条数已知，所以给真实百分比 */
   ogSetStat(total, done, d.fails || 0, pct);
   ogSetBar(pct, false);
+  ogSetKinds(d);                       // 改名 / 移动 / 删除 各自进行到哪
   $('ogPhase').textContent = d.running ? (rd + phase) : (d.cancelled ? '已停止' : '执行结束');
   $('ogTime').textContent = sec + 's';
   $('ogNow').textContent = '';
@@ -2541,7 +2632,29 @@ function ogLogAdd(line){
   el.scrollTop = el.scrollHeight;      // 一直贴着底部，新行才看得见
 }
 
+function ogSetLive(on){
+  const el = $('liveOrganize');
+  if(el) el.classList.toggle('hidden', !on);
+}
+
 const ogNum = v => (v === null || v === undefined || v === '' ? '—' : v);
+
+/* 按动作分列的三个格子：显示「已完成 / 计划」。
+   计划数为 0 的动作显示「—」，免得满屏三个 0 让人以为都要删才行 */
+function ogSetKinds(d){
+  const ks = d.kinds || {}, kd = d.kinds_done || {};
+  const put = (elId, key) => {
+    const el = $(elId); if(!el) return;
+    const plan = ks[key] || 0, fin = kd[key] || 0;
+    // 计划数未知时至少要把已完成数显示出来（执行途中 total 可能还是 0）
+    el.textContent = plan ? `${fin} / ${plan}` : (fin ? `${fin} / —` : '—');
+    // 删到动了就把这一格标红：删操作不可回退，让人一眼看见它在跑
+    if(key === 'delete') el.classList.toggle('active', fin > 0);
+  };
+  put('ogRn', 'rename');
+  put('ogMv', 'move');
+  put('ogDl', 'delete');
+}
 
 function ogSetStat(total, done, fail, pct){
   $('ogTotal').textContent = ogNum(total);
@@ -2557,9 +2670,12 @@ function ogSetBar(pct, anim){
   if(b) b.classList.toggle('anim', !!anim);
 }
 
-function ogSetLive(on){
-  const el = $('liveOrganize');
-  if(el) el.classList.toggle('hidden', !on);
+function ogLogClear(){
+  ogLogLines = [];
+  ogLastSig = '';
+  const el = $('ogLog'); if(!el) return;
+  el.textContent = '';
+  el.classList.add('empty');
 }
 
 /* 阶段变了才写日志，避免同一句话被 300ms 的轮询刷屏 */
