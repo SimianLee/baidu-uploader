@@ -977,6 +977,8 @@
               <select id="dlTarget" onchange="dlModeChange()">
                 <option value="file">文件（按右边的条件筛）</option>
                 <option value="empty">空文件夹（整棵子树没文件）</option>
+                <!-- 违规文件只有网盘有（标记由百度打在文件上），本地入口会藏掉这项 -->
+                <option value="violation">违规文件（网盘提示无法下载的）</option>
               </select>
             </div>
             <div class="field sm dl-file"><label>后缀(逗号分隔)</label><input id="dlExts" placeholder="tmp, part, bak"></div>
@@ -1008,6 +1010,14 @@
             勾上「删除前先移到备份区」能找回，但<b>网盘空间不会释放</b>，备份区要定期手动清。
             空文件夹永远直接删。执行前会列出完整清单，需要你再确认一次。
             <span id="dlCjkNote"></span><span id="dlEmptyNote"></span>
+          </div>
+          <!-- 违规文件模式的专属说明：检测原理和「删了就没了」都得先说清 -->
+          <div class="hint hidden" id="dlVioNote" style="color:#ffb26b">
+            检测原理：逐批向网盘查询每个文件的<b>违规标记</b>——官方客户端提示
+            「内容违规，无法下载」拦的就是带这个标记的文件（文件本体其实还在网盘上）。
+            只有<b>百度网盘</b>有这个概念；是否连子目录一起查，用下面「含子目录」开关。<br>
+            ⚠ 这类文件<b>没有备份选项</b>：连官方客户端都拒绝读它，挪进备份区同样找不回。
+            扫描＋核查文件多时要等一阵（进度见下方），执行前会列出完整清单再确认一次。
           </div>
         </div>
 
@@ -1909,6 +1919,13 @@ function setPanSrc(v){
   $('panLocalHint').classList.toggle('hidden', next !== 'local');
   $('panPath').placeholder = (next === 'local') ? 'D:\\书籍（本地文件夹）'
                                                 : '/apps/baidu_uploader';
+  // 「违规文件」是网盘专属：切到本地就藏掉这一档；正停在这档上的话拨回「文件」
+  const vioOpt = $('dlTarget').querySelector('option[value="violation"]');
+  if(vioOpt) vioOpt.hidden = (next === 'local');
+  if(next === 'local' && dlTarget() === 'violation'){
+    $('dlTarget').value = 'file';
+    dlModeChange();
+  }
   if(first){
     // 目录跟着换：网盘那边是 /apps/...，本地这边是 D:\...，串着用只会报越界
     const cur = $('panPath').value.trim();
@@ -1932,10 +1949,14 @@ function setPanSrc(v){
 function backupPathText(){
   return (panSandbox ? panSandbox + '/' : '') + '_覆盖备份';
 }
-/* 批量删除要不要先备份。取消勾选＝真删，提示得跟着变红变狠 */
+/* 批量删除要不要先备份。取消勾选＝真删，提示得跟着变红变狠。
+   只有「文件」这一档认这个开关：空文件夹挪进备份区只是一堆空壳，
+   违规文件连官方客户端都拒绝读、搬过去同样找不回，两种都是直接删。
+   勾选框在非文件档是藏起来的，藏起来不代表没勾——所以必须在这里按模式
+   归零，否则确认框会照着残留的勾说「可找回」，而实际是永久删除 */
 function dlBackupOn(){
   const e = $('dlBackup');
-  return !!(e && e.checked);
+  return !!(e && e.checked) && dlTarget() === 'file';
 }
 function dlSyncHint(){
   const p = $('dlBackupPath');
@@ -2041,6 +2062,9 @@ function dlModeChange(){
     e.classList.toggle('hidden', t !== 'file'));
   document.querySelectorAll('.dl-empty').forEach(e =>
     e.classList.toggle('hidden', t !== 'empty'));
+  // 违规文件的专属说明：只有选中这一档才露面
+  const vio = $('dlVioNote');
+  if(vio) vio.classList.toggle('hidden', t !== 'violation');
   $('dlEmptyNote').innerHTML = (t === 'empty')
     ? '<br>空文件夹：一个目录<b>连同它的所有子目录</b>里一个文件都没有才算空，'
       + '预览只列<b>最外层</b>的空目录（删掉它，嵌在里面的空目录一并消失）。'
@@ -2218,8 +2242,10 @@ function pvStatsFrom(d, total){
     it.push({n: d.dirs_scanned || 0, label: '扫描目录', cls: 'acc'});
     it.push({n: d.files_scanned || 0, label: '扫描文件', cls: 'acc'});
   }else if(d.scanned){
-    // 按表改名那这里的 scanned 是表格行数，不是扫出来的文件数
-    it.push({n: d.scanned, label: d.csv ? '表格行数' : '扫描文件', cls: 'acc'});
+    // 按表改名那这里的 scanned 是表格行数，不是扫出来的文件数；
+    // 违规模式带 probed，说明这个数是「问过标记的文件数」
+    it.push({n: d.scanned, cls: 'acc',
+             label: d.csv ? '表格行数' : (d.probed != null ? '核查文件' : '扫描文件')});
   }
   // 文件层、目录层各出一叠：两边的键互不重叠（f 开头的是文件层），
   // 谁都没出就不用「条操作」那个兜底数字，直接让 panTotal 说话
@@ -2430,8 +2456,9 @@ function startScanPoll(){
 
 function scanPaint(d, sec){
   const cur = d.path ? d.path.split('/').pop() : '';
-  // 扫描阶段才有东西可停；进入「生成计划」后按钮置灰，避免点了没反应像坏了
-  setScanBtnEnabled(d.running && d.phase === '扫描目录');
+  // 扫描阶段才有东西可停；进入「生成计划」后按钮置灰，避免点了没反应像坏了。
+  // 违规核查也在扫描窗口里（可被刹住），「停止」按钮同样要亮着
+  setScanBtnEnabled(d.running && (d.phase === '扫描目录' || d.phase === '核查违规标记'));
   // 只要用户点过停止（不管请求到没到后端），文案就锁定在「正在停止」，
   // 否则 300ms 一次的轮询会把提示覆盖回「正在扫描…」，看着像点了没反应
   if(scanStopping || d.stopping){
@@ -2444,6 +2471,10 @@ function scanPaint(d, sec){
   }else{
     $('scanTxt').textContent = d.phase === '生成计划'
       ? `扫描完成（${d.dirs} 个目录 / ${d.files} 个文件），正在生成计划…`
+      : d.phase === '核查违规标记'
+      ? `扫描完成（${d.files} 个文件），正在核查违规标记：`
+        + `已查 ${d.probe_done || 0} / ${d.probe_total || d.files} 个`
+        + (cur ? ` · 当前 ${cur}` : '')
       : `正在扫描：已遍历 ${d.dirs} 个目录 · 找到 ${d.files} 个文件`
         + (cur ? ` · 当前 ${cur}` : '');
   }
@@ -2454,9 +2485,11 @@ function scanPaint(d, sec){
      分动作计数这时还没有值——要等「生成预览」把计划定下来才有，所以先清空 */
   ogSetStat(d.files || 0, null, null, null);
   ogSetKinds({kinds: {}, kinds_done: {}});
-  $('ogPhase').textContent = d.phase === '生成计划' ? '生成计划' : '扫描目录';
+  $('ogPhase').textContent = d.phase === '生成计划' ? '生成计划'
+    : (d.phase === '核查违规标记' ? '核查违规标记' : '扫描目录');
   $('ogTime').textContent = sec + 's';
-  $('ogNow').textContent = cur ? `当前目录：${cur}` : '';
+  $('ogNow').textContent = cur
+    ? (d.phase === '核查违规标记' ? `当前：${cur}` : `当前目录：${cur}`) : '';
   ogSetLive(!!d.running);
   if(!d.running){
     ogLogAdd(d.cancelled
@@ -3052,6 +3085,9 @@ async function panPlan(refresh){
       // 空文件夹（原先挂在整理归档页签）。recursive 恒为 true：后端也会强制递归，
       // 这里显式写出来免得两头不一致
       body = {...body, kind: 'empty_dir', recursive: true, skip: $('edSkip').value};
+    }else if(dlTarget() === 'violation'){
+      // 违规文件：后端扫描后逐批查标记，筛选参数一概用不上
+      body = {...body, kind: 'delete_violation'};
     }else{
       // cjk：中文名筛选（any 不限制 / no 只要没有中文的 / yes 只要含中文的）。
       // 它跟后缀一样会改变命中清单，filters 整包进指纹，所以换一档必定重算预览
@@ -3146,7 +3182,14 @@ async function panPlan(refresh){
              : ` · ⚠ 完整计划没存下来，本次只能执行前 ${panOps.length} 条，`
                + `重新生成一次即可全跑完`)
           : '')
-    : `扫描 ${d.scanned} 个文件 → ${panTotal} 条操作`
+    : (d.probed != null
+    // 违规模式：扫到的文件数和真正问过标记的文件数是同一个数，但报「核查」更贴切——
+    // 用户关心的是「这么多文件里翻出几个违规的」，不是又扫了一遍目录
+    ? `核查 ${d.probed} 个文件的违规标记 → ${panTotal} 个命中`
+      + (d.probe_fail
+         ? ` · ⚠ ${d.probe_fail} 个没查到标记（接口频控，这份清单可能不全）`
+         : '')
+    : `扫描 ${d.scanned} 个文件 → ${panTotal} 条操作`)
       + (d.exts ? ` · 只处理 ${d.exts} 后缀（其余不改名，也不算进上面这个数）` : '')
       // 按中文名筛的时候报出「这一类在整棵树里到底有多少」：命中的条数会被后缀
       // 等条件再砍一刀，只看它会以为工具漏扫了大半
@@ -3222,11 +3265,17 @@ async function panApply(){
     ? `\n\n⚠ 这是本机磁盘上的 ${n2} 项：删除不进回收站、不可恢复，`
       + `改名/移动立即生效。`
     : '';
+  // 违规文件：删除目标、后果都跟普通删文件不一样，确认框单独说一句
+  const isVio = (panTab_ === 'delete' && dlTarget() === 'violation');
   const tip = onlyEmptyDirs
     ? `即将删除 ${n2} 个空文件夹（内部不含任何文件），删除后不可恢复。确定继续吗？`
     : mixedPlan
     ? `⚠ 即将把 ${mvN} 个主目录里没有的文件搬回主目录，并永久删除 ${delN} 个重复的`
       + `同名文件（不进备份区，不可恢复）。确定继续吗？`
+    : isVio
+    ? `⚠ 即将永久删除 ${n2} 个被百度标记为违规的文件（官方客户端提示`
+      + `「内容违规，无法下载」的那批）。不进备份区——搬过去同样下不回来，`
+      + `此操作不可撤销。确定继续吗？`
     : isDel
     ? (dlBackupOn()
        ? `即将把 ${n2} 个文件移进备份区「${backupPathText()}/时间戳/」（不是真删，可找回；`

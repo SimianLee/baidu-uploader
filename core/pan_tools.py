@@ -33,6 +33,7 @@ pan_tools.py —— 百度网盘（应用沙盒）文件操作库
 
 import os
 import re
+import json
 import threading
 import time
 import unicodedata
@@ -42,7 +43,14 @@ import requests
 
 FILEMANAGER = "https://pan.baidu.com/rest/2.0/xpan/file?method=filemanager"
 LIST_URL = "https://pan.baidu.com/rest/2.0/xpan/file?method=list"
+FILEMETAS_URL = "https://pan.baidu.com/rest/2.0/xpan/file?method=filemetas"
 CREATE_URL = "https://pan.baidu.com/rest/2.0/xpan/file?method=create"
+
+# 违规标记的判定口径：black_tag 是百度打在文件上的和谐/违规标记（实测正常文件
+# 一律是 "0" 或缺省，被打标记的文件是 1203000/1602000/1902000 这类类型编码）。
+# 客户端提示「内容违规，无法下载」就是按它拦的——文件本体其实还在网盘上。
+# filemetas 一次最多查 100 个 fsid，这个上限写死在百度接口文档里。
+VIOLATION_BATCH = 100
 
 # 备份区（可选）的名字与位置：**全项目只有这一个**。
 #
@@ -297,6 +305,8 @@ class PanFiles:
                 "size": it.get("size", 0) or 0,
                 "isdir": bool(it.get("isdir")),
                 "mtime": it.get("server_mtime") or it.get("local_mtime") or 0,
+                # fsid：filemetas（违规核查用）按它查，列表接口白送，存下免得二次请求
+                "fsid": it.get("fs_id"),
             }
             rows.append(rec)
             if rec["isdir"]:
@@ -589,6 +599,54 @@ class PanFiles:
                                          should_stop=should_stop,
                                          failures=failures)
                 if not f["isdir"]]
+
+    # ---------- 违规标记核查 ----------
+    def find_violations(self, files, on_progress=None, should_stop=None):
+        """从扫描结果里找出被百度打了违规标记的文件。
+
+        files 是 list_files 的返回（每条须带 fsid，见 _take）。
+        客户端提示「内容违规，无法下载」拦的就是 black_tag != 0 的文件——
+        文件本体其实还躺在网盘上，标记只是让所有官方客户端拒绝下载它。
+
+        filemetas 每次最多查 100 个 fsid（百度接口上限），八千个文件就是 80 次请求，
+        是这个功能的主要耗时。on_progress(done, total, cur) 每 100 个回调一次。
+
+        返回 (命中清单, 统计 dict)。命中清单是 list_files 同形的行
+        （path/name/size），直接喂给 build_violation_plan 就是删除计划。
+        整批查询失败（频控等）不中断——但数量记进统计，结果不完整要如实上报。
+        """
+        total = len(files)
+        bad, probe_fail = [], 0
+        for i in range(0, total, VIOLATION_BATCH):
+            if should_stop and should_stop():
+                raise ScanCancelled(0, i)
+            batch = [f for f in files[i:i + VIOLATION_BATCH] if f.get("fsid")]
+            if not batch:
+                continue
+            body = {"fsids": json.dumps([f["fsid"] for f in batch]), "dlink": 1}
+            r = self._get(FILEMETAS_URL, body)
+            if r.get("errno", 0) != 0:
+                # 整批没查成：退两秒再试一次（多半是频控），还不行就记失败数跳过。
+                # 跳过的文件当「未知」处理——宁可在统计里如实报出来，也不悄悄装作查过
+                time.sleep(2)
+                r = self._get(FILEMETAS_URL, body)
+            if r.get("errno", 0) != 0:
+                probe_fail += len(batch)
+            else:
+                for it in r.get("info") or []:
+                    bt = it.get("black_tag")
+                    if bt not in (None, "", "0", 0):
+                        p = it.get("path", "")
+                        bad.append({"path": p, "name": p.rpartition("/")[2],
+                                    "size": it.get("size", 0) or 0, "isdir": False,
+                                    "fsid": it.get("fs_id") or "",
+                                    "black_tag": str(bt)})
+            if on_progress:
+                on_progress(min(i + VIOLATION_BATCH, total), total,
+                            (batch[-1].get("path", "") if batch else ""))
+        # probed 只算「真问到了标记」的：没查成的那些是未知，不能混进已核查数里
+        # 充数——前端会把两个数一起报出来，用户得看得见这份清单的成色
+        return bad, {"probed": total - probe_fail, "probe_fail": probe_fail}
 
     # ---------- 建目录 ----------
     def mkdir(self, path: str) -> bool:
@@ -1515,6 +1573,17 @@ def filter_files(files, f: dict):
 
 def build_delete_plan(files, f: dict):
     hits = filter_files(strip_backup(files), f)
+    return [{"op": "delete", "path": h["path"], "name": h["name"],
+             "size": h.get("size", 0)} for h in hits]
+
+
+def build_violation_plan(bad):
+    """违规文件 → 删除计划。bad 是 find_violations 的命中清单。
+
+    只有「直接删除」一条路：违规文件连官方客户端都拒绝下载，备份区那份
+    同样会被拦（搬过去也找不回），给个备份选项纯属安慰剂。
+    """
+    hits = strip_backup(bad)
     return [{"op": "delete", "path": h["path"], "name": h["name"],
              "size": h.get("size", 0)} for h in hits]
 

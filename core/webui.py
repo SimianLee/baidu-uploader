@@ -356,6 +356,7 @@ def scan_begin():
     _scan_cancel.clear()            # 新一轮扫描开始，清掉上一轮遗留的取消请求
     with _scan_lock:
         _scan.update(running=True, phase="扫描目录", dirs=0, files=0, path="",
+                     probe_done=0, probe_total=0,
                      t0=time.time(), stopping=False, cancelled=False)
 
 
@@ -368,6 +369,13 @@ def scan_tick(dirs, files, cur):
 def scan_phase(phase):
     with _scan_lock:
         _scan["phase"] = phase
+
+
+def scan_probe_tick(done, total, cur):
+    """违规核查每查完一批（100 个 fsid）回调一次：
+    dirs/files 两个槽位被扫描阶段占着，核查进度放独立字段里，前端照着画"""
+    with _scan_lock:
+        _scan.update(probe_done=done, probe_total=total, path=cur)
 
 
 def scan_request_stop():
@@ -1652,6 +1660,13 @@ class Handler(BaseHTTPRequestHandler):
             if kind == "sheet_ops":
                 return self._pan_sheet_plan(sandbox, src, body)
 
+            # 违规文件只在网盘里有：black_tag 是百度服务端打在文件上的标记，
+            # 本地磁盘没有「网盘提示无法下载」这个概念，别让本地入口白跑一趟
+            if kind == "delete_violation" and src == "local":
+                return self._json({"ok": False, "msg":
+                    "「违规文件」只在百度网盘里存在（违规标记由网盘打在文件上），"
+                    "本地文件夹没有这一说，请切回「百度网盘」再查"})
+
             # 把「影响结果的全部输入」归一化：它既是判断「同参数」的指纹依据（决定能
             # 不能复用旧预览），也随预览文件一起存下来，事后能看清这份计划是拿什么算的
             # src 必须进指纹：同一条路径在网盘和本地是两码事，不带上它，
@@ -1681,6 +1696,8 @@ class Handler(BaseHTTPRequestHandler):
             scan_begin()
             cancelled = False
             entries = None
+            vinfo = {}          # 违规核查的统计（仅 delete_violation 用到）
+            bad = []            # 违规命中清单（同上）
             # 列不开的子目录（百度脏条目）：不中断整次扫描，但也绝不能装作没看见——
             # 结果不完整这件事必须传到前端，否则用户会以为「就这些文件」
             failures = []
@@ -1697,6 +1714,13 @@ class Handler(BaseHTTPRequestHandler):
                     files = pan.list_files(p, recursive=recursive, on_progress=scan_tick,
                                            should_stop=scan_should_stop,
                                            failures=failures)
+                    if kind == "delete_violation":
+                        # 扫描只拿到 fsid 清单；违规标记要再按 fsid 一批批问 filemetas。
+                        # 也放在扫描窗口内：这一步同样可能要几分钟、能被「停止」刹住
+                        scan_phase("核查违规标记")
+                        bad, vinfo = pan.find_violations(
+                            files, on_progress=scan_probe_tick,
+                            should_stop=scan_should_stop)
             except pan_tools.ScanCancelled as e:
                 cancelled = True
                 return self._json({"ok": False, "cancelled": True, "msg":
@@ -1792,6 +1816,17 @@ class Handler(BaseHTTPRequestHandler):
                     info["cjk_hits"] = sum(
                         1 for f in files if pan_tools.has_cjk(f["name"]) == want)
                 label = "批量删除·" + filter_label(flt)
+            elif kind == "delete_violation":
+                # 违规文件整批删：bad 是扫描窗口里核查出来的命中清单
+                ops = pan_tools.build_violation_plan(bad)
+                info = {"scanned": len(files), **vinfo}
+                label = "删除违规文件"
+                # 没查全的文件不能装作「查过且干净」：挂进 failures，
+                # 让前端那条「⚠ 结果可能不完整」的提示替我们说话
+                if vinfo.get("probe_fail"):
+                    failures.append({"path": "（违规标记核查）", "errno": None,
+                                     "msg": f"{vinfo['probe_fail']} 个文件没查到标记"
+                                            f"（接口频控），这份清单可能不全"})
             elif kind == "merge_dirs":
                 # 合并 X(1)/X(2) 副本：归档几轮下来攒出的大量 (1) 副本
                 # 是「预览总比真实文件多」的根因——同名对在扫描里就是两条计划。
